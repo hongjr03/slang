@@ -86,7 +86,7 @@ std::shared_ptr<SyntaxTree> SyntaxTree::fromText(std::string_view text,
     if (!name.empty())
         sourceManager.addLineDirective(SourceLocation(buffer.id, 0), 2, name, 0);
 
-    return create(sourceManager, std::span(&buffer, 1), options, {}, true);
+    return create(sourceManager, std::span(&buffer, 1), options, {}, false);
 }
 
 std::shared_ptr<SyntaxTree> SyntaxTree::fromFileInMemory(std::string_view text,
@@ -138,7 +138,7 @@ std::shared_ptr<SyntaxTree> SyntaxTree::create(SourceManager& sourceManager,
 
     TimeTraceScope timeScope("parseFile"sv, [&] {
         if (sources.size() == 1)
-            return std::string(sourceManager.getRawFileName(sources[0].id));
+          return std::string(sourceManager.getRawFileName(sources[0].id));
         else
             return "<multi-buffer>"s;
     });
