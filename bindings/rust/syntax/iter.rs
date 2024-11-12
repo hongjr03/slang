@@ -19,28 +19,34 @@ impl<'a> SyntaxIdxChildren<'a> {
 impl<'a> Iterator for SyntaxIdxChildren<'a> {
     type Item = (usize, SyntaxElement<'a>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        (self.start_idx..self.end_idx).find_map(|idx| {
-            self.parent.child(idx).map(|child| {
-                self.start_idx = idx + 1;
-                (idx, child)
-            })
-        })
+        while self.start_idx < self.end_idx {
+            let idx = self.start_idx;
+            self.start_idx += 1;
+            if let Some(child) = self.parent.child(idx) {
+                return Some((idx, child));
+            }
+        }
+        None
     }
 }
 
 impl<'a> DoubleEndedIterator for SyntaxIdxChildren<'a> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        (self.start_idx..self.end_idx).rev().find_map(|idx| {
-            self.parent.child(idx).map(|child| {
-                self.end_idx = idx;
-                (idx, child)
-            })
-        })
+        while self.start_idx < self.end_idx {
+            self.end_idx -= 1;
+            if let Some(child) = self.parent.child(self.end_idx) {
+                return Some((self.end_idx, child));
+            }
+        }
+        None
     }
 }
 
 impl<'a> ExactSizeIterator for SyntaxIdxChildren<'a> {
+    #[inline]
     fn len(&self) -> usize {
         self.end_idx - self.start_idx
     }

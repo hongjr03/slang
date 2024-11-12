@@ -109,6 +109,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::parsing"]
         fn SyntaxToken_unit(tok: &SyntaxToken) -> u8;
+
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxToken_trivia_count(tok: &SyntaxToken) -> usize;
+
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxToken_trivia(tok: &SyntaxToken, idx: usize) -> *const SyntaxTrivia;
     }
 
     impl UniquePtr<SyntaxTrivia> {}
@@ -230,6 +236,8 @@ impl_functions! {
         fn bitValue(&self) -> UniquePtr<SVLogic> |> SyntaxToken_bitValue;
         fn base(&self) -> u8 |> SyntaxToken_base;
         fn unit(&self) -> u8 |> SyntaxToken_unit;
+        fn trivia_count(&self) -> usize |> SyntaxToken_trivia_count;
+        fn trivia(&self, idx: usize) -> *const SyntaxTrivia |> SyntaxToken_trivia;
     }
 }
 

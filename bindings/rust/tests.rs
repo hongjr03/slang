@@ -2,6 +2,7 @@ use ast::{
     AstNode, CompilationUnit, Expression, LiteralExpression, Member, Name, PrimaryExpression,
 };
 use expect_test::expect;
+use itertools::Itertools;
 
 use super::*;
 
@@ -17,15 +18,23 @@ fn get_multi_module_tree() -> SyntaxTree {
     SyntaxTree::from_text("module A; endmodule; module B; endmodule;", "source", "")
 }
 
+fn get_tree_with_trivia() -> SyntaxTree {
+    SyntaxTree::from_text(
+        r#"
+// testA
+// testB
+wire a = 1;
+"#,
+        "source",
+        "",
+    )
+}
+
 fn get_complex_tree() -> SyntaxTree {
     SyntaxTree::from_text(
         r#"
-module A();
-always_comb begin
-  wire x = 3;
-end
-endmodule;
-"#,
+module A (input a,);
+endmodule"#,
         "source",
         "",
     )
@@ -37,16 +46,14 @@ fn dfs(node: SyntaxNode, depth: usize, ans: &mut String) {
     let child_count = node.child_count();
     if let Some(range) = range {
         *ans += &format!(
-            "{:indent$}{kind:?} | st: {} | ed: {} | cnt: {child_count}\n",
+            "{:indent$}{kind:?} {range:?} (cnt: {child_count})\n",
             "",
-            range.start(),
-            range.end(),
             indent = depth * 2
         );
     } else {
         assert!(kind == SyntaxKind::UNKNOWN || kind.is_list());
         *ans += &format!(
-            "{:indent$}{kind:?} | cnt: {child_count}\n",
+            "{:indent$}{kind:?} (cnt: {child_count})\n",
             "",
             indent = depth * 2
         );
@@ -56,22 +63,24 @@ fn dfs(node: SyntaxNode, depth: usize, ans: &mut String) {
         if let Some(node) = node.child_node(i) {
             dfs(node, depth + 1, ans);
         } else if let Some(tok) = node.child_token(i) {
+            tok.trivias_with_loc().for_each(|((start, end), trivia)| {
+                *ans += &format!(
+                    "{:indent$}{:?} {start}..{end} (trivia)\n",
+                    "",
+                    trivia.kind(),
+                    indent = (depth + 1) * 2
+                );
+            });
+
             if let Some(range) = tok.range() {
                 *ans += &format!(
-                    "{:indent$}kind: {:?} | st: {} | ed: {}\n",
+                    "{:indent$}{:?} {range:?}\n",
                     "",
                     tok.kind(),
-                    range.start(),
-                    range.end(),
                     indent = (depth + 1) * 2
                 );
             } else {
-                *ans += &format!(
-                    "{:indent$}kind: {:?}\n",
-                    "",
-                    tok.kind(),
-                    indent = (depth + 1) * 2
-                );
+                *ans += &format!("{:indent$}{:?}\n", "", tok.kind(), indent = (depth + 1) * 2);
             }
         }
     }
@@ -85,47 +94,52 @@ fn parse() {
     dfs(root, 0, &mut ans);
 
     let expected = expect![[r#"
-        CompilationUnit | st: 0 | ed: 37 | cnt: 2
-          SyntaxList | st: 0 | ed: 37 | cnt: 2
-            ModuleDeclaration | st: 0 | ed: 36 | cnt: 5
-              SyntaxList | cnt: 0
-              ModuleHeader | st: 0 | ed: 18 | cnt: 7
-                kind: ModuleKeyword | st: 0 | ed: 6
-                kind: Identifier | st: 7 | ed: 8
-                SyntaxList | cnt: 0
-                AnsiPortList | st: 8 | ed: 17 | cnt: 3
-                  kind: OpenParenthesis | st: 8 | ed: 9
-                  SeparatedList | st: 9 | ed: 16 | cnt: 1
-                    ImplicitAnsiPort | st: 9 | ed: 16 | cnt: 3
-                      SyntaxList | cnt: 0
-                      VariablePortHeader | st: 9 | ed: 15 | cnt: 4
-                        kind: InputKeyword | st: 9 | ed: 14
-                        ImplicitType | st: 15 | ed: 15 | cnt: 3
-                          SyntaxList | cnt: 0
-                          kind: Placeholder | st: 15 | ed: 15
-                      Declarator | st: 15 | ed: 16 | cnt: 3
-                        kind: Identifier | st: 15 | ed: 16
-                        SyntaxList | cnt: 0
-                  kind: CloseParenthesis | st: 16 | ed: 17
-                kind: Semicolon | st: 17 | ed: 18
-              SyntaxList | st: 19 | ed: 26 | cnt: 1
-                NetDeclaration | st: 19 | ed: 26 | cnt: 8
-                  SyntaxList | cnt: 0
-                  kind: WireKeyword | st: 19 | ed: 23
-                  ImplicitType | st: 24 | ed: 24 | cnt: 3
-                    SyntaxList | cnt: 0
-                    kind: Placeholder | st: 24 | ed: 24
-                  SeparatedList | st: 24 | ed: 25 | cnt: 1
-                    Declarator | st: 24 | ed: 25 | cnt: 3
-                      kind: Identifier | st: 24 | ed: 25
-                      SyntaxList | cnt: 0
-                  kind: Semicolon | st: 25 | ed: 26
-              kind: EndModuleKeyword | st: 27 | ed: 36
-            EmptyMember | st: 36 | ed: 37 | cnt: 3
-              SyntaxList | cnt: 0
-              TokenList | cnt: 0
-              kind: Semicolon | st: 36 | ed: 37
-          kind: EndOfFile | st: 37 | ed: 37
+        CompilationUnit 0..37 (cnt: 2)
+          SyntaxList 0..37 (cnt: 2)
+            ModuleDeclaration 0..36 (cnt: 5)
+              SyntaxList (cnt: 0)
+              ModuleHeader 0..18 (cnt: 7)
+                ModuleKeyword 0..6
+                Whitespace 6..7 (trivia)
+                Identifier 7..8
+                SyntaxList (cnt: 0)
+                AnsiPortList 8..17 (cnt: 3)
+                  OpenParenthesis 8..9
+                  SeparatedList 9..16 (cnt: 1)
+                    ImplicitAnsiPort 9..16 (cnt: 3)
+                      SyntaxList (cnt: 0)
+                      VariablePortHeader 9..15 (cnt: 4)
+                        InputKeyword 9..14
+                        ImplicitType 15..15 (cnt: 3)
+                          SyntaxList (cnt: 0)
+                          Placeholder 15..15
+                      Declarator 15..16 (cnt: 3)
+                        Whitespace 14..15 (trivia)
+                        Identifier 15..16
+                        SyntaxList (cnt: 0)
+                  CloseParenthesis 16..17
+                Semicolon 17..18
+              SyntaxList 19..26 (cnt: 1)
+                NetDeclaration 19..26 (cnt: 8)
+                  SyntaxList (cnt: 0)
+                  Whitespace 18..19 (trivia)
+                  WireKeyword 19..23
+                  ImplicitType 24..24 (cnt: 3)
+                    SyntaxList (cnt: 0)
+                    Placeholder 24..24
+                  SeparatedList 24..25 (cnt: 1)
+                    Declarator 24..25 (cnt: 3)
+                      Whitespace 23..24 (trivia)
+                      Identifier 24..25
+                      SyntaxList (cnt: 0)
+                  Semicolon 25..26
+              Whitespace 26..27 (trivia)
+              EndModuleKeyword 27..36
+            EmptyMember 36..37 (cnt: 3)
+              SyntaxList (cnt: 0)
+              TokenList (cnt: 0)
+              Semicolon 36..37
+          EndOfFile 37..37
     "#]];
     expected.assert_eq(&ans);
 }
@@ -138,35 +152,40 @@ fn multiple_module() {
     dfs(root, 0, &mut ans);
 
     let expected = expect![[r#"
-        CompilationUnit | st: 0 | ed: 41 | cnt: 2
-          SyntaxList | st: 0 | ed: 41 | cnt: 4
-            ModuleDeclaration | st: 0 | ed: 19 | cnt: 5
-              SyntaxList | cnt: 0
-              ModuleHeader | st: 0 | ed: 9 | cnt: 7
-                kind: ModuleKeyword | st: 0 | ed: 6
-                kind: Identifier | st: 7 | ed: 8
-                SyntaxList | cnt: 0
-                kind: Semicolon | st: 8 | ed: 9
-              SyntaxList | cnt: 0
-              kind: EndModuleKeyword | st: 10 | ed: 19
-            EmptyMember | st: 19 | ed: 20 | cnt: 3
-              SyntaxList | cnt: 0
-              TokenList | cnt: 0
-              kind: Semicolon | st: 19 | ed: 20
-            ModuleDeclaration | st: 21 | ed: 40 | cnt: 5
-              SyntaxList | cnt: 0
-              ModuleHeader | st: 21 | ed: 30 | cnt: 7
-                kind: ModuleKeyword | st: 21 | ed: 27
-                kind: Identifier | st: 28 | ed: 29
-                SyntaxList | cnt: 0
-                kind: Semicolon | st: 29 | ed: 30
-              SyntaxList | cnt: 0
-              kind: EndModuleKeyword | st: 31 | ed: 40
-            EmptyMember | st: 40 | ed: 41 | cnt: 3
-              SyntaxList | cnt: 0
-              TokenList | cnt: 0
-              kind: Semicolon | st: 40 | ed: 41
-          kind: EndOfFile | st: 41 | ed: 41
+        CompilationUnit 0..41 (cnt: 2)
+          SyntaxList 0..41 (cnt: 4)
+            ModuleDeclaration 0..19 (cnt: 5)
+              SyntaxList (cnt: 0)
+              ModuleHeader 0..9 (cnt: 7)
+                ModuleKeyword 0..6
+                Whitespace 6..7 (trivia)
+                Identifier 7..8
+                SyntaxList (cnt: 0)
+                Semicolon 8..9
+              SyntaxList (cnt: 0)
+              Whitespace 9..10 (trivia)
+              EndModuleKeyword 10..19
+            EmptyMember 19..20 (cnt: 3)
+              SyntaxList (cnt: 0)
+              TokenList (cnt: 0)
+              Semicolon 19..20
+            ModuleDeclaration 21..40 (cnt: 5)
+              SyntaxList (cnt: 0)
+              ModuleHeader 21..30 (cnt: 7)
+                Whitespace 20..21 (trivia)
+                ModuleKeyword 21..27
+                Whitespace 27..28 (trivia)
+                Identifier 28..29
+                SyntaxList (cnt: 0)
+                Semicolon 29..30
+              SyntaxList (cnt: 0)
+              Whitespace 30..31 (trivia)
+              EndModuleKeyword 31..40
+            EmptyMember 40..41 (cnt: 3)
+              SyntaxList (cnt: 0)
+              TokenList (cnt: 0)
+              Semicolon 40..41
+          EndOfFile 41..41
     "#]];
     expected.assert_eq(&ans);
 }
@@ -204,55 +223,39 @@ fn parse_complex() {
     let mut ans = String::new();
     dfs(root, 0, &mut ans);
 
-    let unit = ast::CompilationUnit::cast(root).unwrap();
-    let module = unit
-        .members()
-        .children()
-        .next()
-        .unwrap()
-        .as_module_declaration()
-        .unwrap();
-    dbg!(module.header().name().unwrap().range());
-
     let expected = expect![[r#"
-        CompilationUnit | st: 1 | ed: 60 | cnt: 2
-          SyntaxList | st: 1 | ed: 59 | cnt: 2
-            ModuleDeclaration | st: 1 | ed: 58 | cnt: 5
-              SyntaxList | cnt: 0
-              ModuleHeader | st: 1 | ed: 12 | cnt: 7
-                kind: ModuleKeyword | st: 1 | ed: 7
-                kind: Identifier | st: 8 | ed: 9
-                SyntaxList | cnt: 0
-                AnsiPortList | st: 9 | ed: 11 | cnt: 3
-                  kind: OpenParenthesis | st: 9 | ed: 10
-                  SeparatedList | cnt: 0
-                  kind: CloseParenthesis | st: 10 | ed: 11
-                kind: Semicolon | st: 11 | ed: 12
-              SyntaxList | st: 13 | ed: 48 | cnt: 1
-                AlwaysCombBlock | st: 13 | ed: 48 | cnt: 3
-                  SyntaxList | cnt: 0
-                  kind: AlwaysCombKeyword | st: 13 | ed: 24
-                  SequentialBlockStatement | st: 25 | ed: 48 | cnt: 7
-                    SyntaxList | cnt: 0
-                    kind: BeginKeyword | st: 25 | ed: 30
-                    SyntaxList | st: 38 | ed: 44 | cnt: 1
-                      ExpressionStatement | st: 38 | ed: 44 | cnt: 4
-                        SyntaxList | cnt: 0
-                        AssignmentExpression | st: 38 | ed: 43 | cnt: 4
-                          IdentifierName | st: 38 | ed: 39 | cnt: 1
-                            kind: Identifier | st: 38 | ed: 39
-                          kind: Equals | st: 40 | ed: 41
-                          SyntaxList | cnt: 0
-                          IntegerLiteralExpression | st: 42 | ed: 43 | cnt: 1
-                            kind: IntegerLiteral | st: 42 | ed: 43
-                        kind: Semicolon | st: 43 | ed: 44
-                    kind: EndKeyword | st: 45 | ed: 48
-              kind: EndModuleKeyword | st: 49 | ed: 58
-            EmptyMember | st: 58 | ed: 59 | cnt: 3
-              SyntaxList | cnt: 0
-              TokenList | cnt: 0
-              kind: Semicolon | st: 58 | ed: 59
-          kind: EndOfFile | st: 60 | ed: 60
+        CompilationUnit 1..31 (cnt: 2)
+          SyntaxList 1..31 (cnt: 1)
+            ModuleDeclaration 1..31 (cnt: 5)
+              SyntaxList (cnt: 0)
+              ModuleHeader 1..21 (cnt: 7)
+                EndOfLine 0..1 (trivia)
+                ModuleKeyword 1..7
+                Whitespace 7..8 (trivia)
+                Identifier 8..9
+                SyntaxList (cnt: 0)
+                AnsiPortList 10..20 (cnt: 3)
+                  Whitespace 9..10 (trivia)
+                  OpenParenthesis 10..11
+                  SeparatedList 11..19 (cnt: 2)
+                    ImplicitAnsiPort 11..18 (cnt: 3)
+                      SyntaxList (cnt: 0)
+                      VariablePortHeader 11..17 (cnt: 4)
+                        InputKeyword 11..16
+                        ImplicitType 17..17 (cnt: 3)
+                          SyntaxList (cnt: 0)
+                          Placeholder 17..17
+                      Declarator 17..18 (cnt: 3)
+                        Whitespace 16..17 (trivia)
+                        Identifier 17..18
+                        SyntaxList (cnt: 0)
+                    Comma 18..19
+                  CloseParenthesis 19..20
+                Semicolon 20..21
+              SyntaxList (cnt: 0)
+              EndOfLine 21..22 (trivia)
+              EndModuleKeyword 22..31
+          EndOfFile 31..31
     "#]];
     expected.assert_eq(&ans);
 }
@@ -345,4 +348,58 @@ endmodule;"#,
         .value_text()
         .to_string()
         .is_empty());
+}
+
+#[test]
+fn test_trivia() {
+    let tree = get_tree_with_trivia();
+    let root = tree.root().unwrap();
+    let mut ans = String::new();
+    dfs(root, 0, &mut ans);
+
+    let expected = expect![[r#"
+        CompilationUnit 19..31 (cnt: 2)
+          SyntaxList 19..30 (cnt: 1)
+            NetDeclaration 19..30 (cnt: 8)
+              SyntaxList (cnt: 0)
+              EndOfLine 0..1 (trivia)
+              LineComment 1..9 (trivia)
+              EndOfLine 9..10 (trivia)
+              LineComment 10..18 (trivia)
+              EndOfLine 18..19 (trivia)
+              WireKeyword 19..23
+              ImplicitType 24..24 (cnt: 3)
+                SyntaxList (cnt: 0)
+                Placeholder 24..24
+              SeparatedList 24..29 (cnt: 1)
+                Declarator 24..29 (cnt: 3)
+                  Whitespace 23..24 (trivia)
+                  Identifier 24..25
+                  SyntaxList (cnt: 0)
+                  EqualsValueClause 26..29 (cnt: 2)
+                    Whitespace 25..26 (trivia)
+                    Equals 26..27
+                    IntegerLiteralExpression 28..29 (cnt: 1)
+                      Whitespace 27..28 (trivia)
+                      IntegerLiteral 28..29
+              Semicolon 29..30
+          EndOfLine 30..31 (trivia)
+          EndOfFile 31..31
+    "#]];
+    expected.assert_eq(&ans);
+
+    let wire = root.child_node(0).unwrap().child_node(0).unwrap();
+    let trivias = wire
+        .child_token(1)
+        .unwrap()
+        .trivias_with_loc()
+        .map(|((start, end), trivia)| format!("{:?} {start:?}..{end:?}", trivia.kind()))
+        .join("\n");
+    let ans = expect![[r#"
+        EndOfLine 0..1
+        LineComment 1..9
+        EndOfLine 9..10
+        LineComment 10..18
+        EndOfLine 18..19"#]];
+    ans.assert_eq(&trivias);
 }

@@ -170,10 +170,8 @@ pub mod loader {
             let line = lines[i];
 
             if !in_target_function {
-                // 检查是否进入目标函数
                 if line.contains("LexerFacts::getTokenKindText") {
                     in_target_function = true;
-                    // 跳过到 '{' 后开始处理
                     while i < lines.len() && !lines[i].contains('{') {
                         i += 1;
                     }
@@ -192,9 +190,8 @@ pub mod loader {
             i += 1;
         }
 
-        // 生成 macro_rules! 字符串
         let mut macro_str = String::from("#[macro_export]\n");
-        macro_str.push_str("macro_rules! T { \n");
+        macro_str.push_str("macro_rules! Token { \n");
         let special_chars = ['(', ')', '[', ']', '{', '}', '\'', '"', '`', '$'];
         for (value, name) in pairs {
             if value.chars().any(|c| special_chars.contains(&c)) {

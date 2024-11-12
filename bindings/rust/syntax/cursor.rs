@@ -39,6 +39,15 @@ impl<'a> SyntaxCursor<'a> {
         self.path.clear();
     }
 
+    pub fn reset_to_root(&mut self) {
+        if self.path.is_empty() {
+            return;
+        }
+
+        self.elem = self.path[0].0.into();
+        self.path.clear();
+    }
+
     // Returns the first child of the current node.
     //
     // If the current node has no children, returns None.
@@ -108,11 +117,6 @@ impl<'a> SyntaxCursor<'a> {
             }
         }
         false
-    }
-
-    // Move the cursor to the root of the tree.
-    pub fn goto_root(&mut self) {
-        while self.goto_parent() {}
     }
 
     // Returns the index of the current node in its parent's children.
@@ -241,7 +245,7 @@ mod tests {
         assert_eq!(cursor.idx(), Some(1));
         assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::EMPTY_MEMBER);
 
-        cursor.goto_root();
+        cursor.reset_to_root();
         assert_eq!(cursor.idx(), None);
         assert_eq!(
             cursor.to_node().unwrap().kind(),
@@ -257,7 +261,7 @@ mod tests {
             TokenKind::OPEN_PARENTHESIS
         );
 
-        cursor.goto_root();
+        cursor.reset_to_root();
         assert!(cursor.goto_last_child_before_pos(8));
         assert!(cursor.goto_last_child_before_pos(8));
         assert!(cursor.goto_last_child_before_pos(8));
@@ -268,23 +272,25 @@ mod tests {
     #[test]
     fn test_goto_by_byte() {
         let tree = get_test_tree();
-        let mut cursor = SyntaxCursor::new(tree.root().unwrap());
+        for i in 1..10000000 {
+            let mut cursor = SyntaxCursor::new(tree.root().unwrap());
 
-        assert!(cursor.goto_first_child_after_pos(7));
-        assert!(cursor.goto_first_child_after_pos(7));
-        assert!(cursor.goto_first_child_after_pos(7));
-        assert!(cursor.goto_first_child_after_pos(7));
-        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
-        assert!(cursor.goto_prev_sibling());
-        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
+            assert!(cursor.goto_first_child_after_pos(7));
+            assert!(cursor.goto_first_child_after_pos(7));
+            assert!(cursor.goto_first_child_after_pos(7));
+            assert!(cursor.goto_first_child_after_pos(7));
+            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
+            assert!(cursor.goto_prev_sibling());
+            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
 
-        cursor.goto_root();
-        assert!(cursor.goto_last_child_before_pos(7));
-        assert!(cursor.goto_last_child_before_pos(7));
-        assert!(cursor.goto_last_child_before_pos(7));
-        assert!(cursor.goto_last_child_before_pos(7));
-        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
-        assert!(cursor.goto_next_sibling());
-        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
+            cursor.reset_to_root();
+            assert!(cursor.goto_last_child_before_pos(7));
+            assert!(cursor.goto_last_child_before_pos(7));
+            assert!(cursor.goto_last_child_before_pos(7));
+            assert!(cursor.goto_last_child_before_pos(7));
+            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
+            assert!(cursor.goto_next_sibling());
+            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
+        }
     }
 }

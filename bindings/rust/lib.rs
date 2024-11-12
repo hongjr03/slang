@@ -5,8 +5,13 @@ mod token;
 
 use cxx::{SharedPtr, UniquePtr};
 pub use ffi::CxxSV;
-use itertools::Either;
-use std::{ffi::c_char, fmt, hash, iter, ops::{self, Not}, pin::Pin};
+use itertools::{Either, Itertools};
+use std::{
+    ffi::c_char,
+    fmt, hash, iter,
+    ops::{self, Not},
+    pin::Pin,
+};
 pub use syntax::{
     cursor::SyntaxCursor,
     iter::{
@@ -47,8 +52,9 @@ pub struct SyntaxTree {
     _ptr: SharedPtr<ffi::SyntaxTree>,
 }
 
-pub struct SyntaxTrivia {
-    _ptr: UniquePtr<ffi::SyntaxTrivia>,
+#[derive(Clone, Copy)]
+pub struct SyntaxTrivia<'a> {
+    _ptr: Pin<&'a ffi::SyntaxTrivia>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,6 +85,11 @@ pub enum Bit {
 
 impl SourceLocation {
     const NO_LOCATION: usize = (1usize << 36) - 1;
+
+    #[inline]
+    pub fn from_unique_ptr(_ptr: UniquePtr<ffi::SourceLocation>) -> Option<Self> {
+        _ptr.is_null().not().then_some(SourceLocation { _ptr })
+    }
 
     #[inline]
     pub fn offset(&self) -> Option<usize> {
@@ -127,10 +138,7 @@ impl SourceRange {
 
 impl fmt::Debug for SourceRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceRange")
-            .field("start", &self.start())
-            .field("end", &self.end())
-            .finish()
+        write!(f, "{}..{}", self.start(), self.end())
     }
 }
 
@@ -252,7 +260,24 @@ impl ToString for SVInt {
     }
 }
 
-impl SyntaxTrivia {
+impl fmt::Debug for SyntaxTrivia<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyntaxTrivia")
+            .field("kind", &self.kind())
+            .field("raw_text", &self.get_raw_text())
+            .finish()
+    }
+}
+
+impl SyntaxTrivia<'_> {
+    #[inline]
+    fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
+        assert!(_ptr.is_null().not());
+        Some(SyntaxTrivia {
+            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
+        })
+    }
+
     #[inline]
     pub fn get_raw_text(&self) -> CxxSV {
         self._ptr.getRawText()
@@ -264,7 +289,7 @@ impl SyntaxTrivia {
     }
 }
 
-impl SyntaxToken<'_> {
+impl<'a> SyntaxToken<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxToken) -> Option<Self> {
         _ptr.is_null().not().then_some(SyntaxToken {
@@ -331,6 +356,48 @@ impl SyntaxToken<'_> {
         matches!(self.kind(), TokenKind::TIME_LITERAL)
             .then(|| unsafe { std::mem::transmute::<u8, TimeUnit>(self._ptr.unit()) })
     }
+
+    #[inline]
+    pub fn trivia_count(&self) -> usize {
+        self._ptr.trivia_count()
+    }
+
+    #[inline]
+    pub fn trivia_at(&self, idx: usize) -> Option<SyntaxTrivia<'a>> {
+        SyntaxTrivia::from_raw_ptr(self._ptr.trivia(idx))
+    }
+
+    #[inline]
+    pub fn trivias(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = SyntaxTrivia<'a>> + ExactSizeIterator + use<'a> {
+        SyntaxTriviaIter {
+            tok: *self,
+            idx: 0,
+            total: self.trivia_count(),
+        }
+    }
+
+    #[inline]
+    pub fn trivias_with_loc(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = ((usize, usize), SyntaxTrivia<'a>)> + ExactSizeIterator + use<'a>
+    {
+        let Some(range) = self.range() else {
+            return Either::Left(iter::empty());
+        };
+        let start = range.start();
+        let locs = self
+            .trivias()
+            .rev()
+            .scan(start, |state: &mut usize, trivia| {
+                let end = *state;
+                *state -= trivia.get_raw_text().to_string().len();
+                Some(((*state, end), trivia))
+            })
+            .collect_vec();
+        Either::Right(locs.into_iter().rev())
+    }
 }
 
 impl fmt::Debug for SyntaxToken<'_> {
@@ -350,6 +417,45 @@ impl PartialEq for SyntaxToken<'_> {
 }
 
 impl Eq for SyntaxToken<'_> {}
+
+#[derive(Debug, Clone)]
+pub struct SyntaxTriviaIter<'a> {
+    tok: SyntaxToken<'a>,
+    idx: usize,
+    total: usize,
+}
+
+impl<'a> Iterator for SyntaxTriviaIter<'a> {
+    type Item = SyntaxTrivia<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx < self.total {
+            let trivia = self.tok.trivia_at(self.idx).unwrap();
+            self.idx += 1;
+            Some(trivia)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> DoubleEndedIterator for SyntaxTriviaIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.idx < self.total {
+            self.total -= 1;
+            let trivia = self.tok.trivia_at(self.total).unwrap();
+            Some(trivia)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for SyntaxTriviaIter<'a> {
+    fn len(&self) -> usize {
+        self.total - self.idx
+    }
+}
 
 impl<'a> SyntaxNode<'a> {
     #[inline]
@@ -427,6 +533,25 @@ impl<'a> SyntaxNode<'a> {
     #[inline]
     pub fn node_preorder(&self) -> SyntaxNodePreorder<'a> {
         SyntaxNodePreorder::new(*self)
+    }
+
+    #[inline]
+    pub fn first_token(&self) -> Option<SyntaxTokenWithParent<'a>> {
+        let mut cursor = self.walk();
+
+        while cursor.to_tok_with_parent().is_none() {
+            if cursor.goto_first_child() {
+                continue;
+            }
+
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    unreachable!("Tree has no tokens");
+                }
+            }
+        }
+
+        cursor.to_tok_with_parent()
     }
 }
 
@@ -609,6 +734,12 @@ impl<'a> SyntaxElement<'a> {
 impl<'a> From<SyntaxNode<'a>> for SyntaxElement<'a> {
     fn from(node: SyntaxNode<'a>) -> SyntaxElement<'a> {
         SyntaxElement::Node(node)
+    }
+}
+
+impl<'a> From<SyntaxTokenWithParent<'a>> for SyntaxElement<'a> {
+    fn from(tok_with_parent: SyntaxTokenWithParent<'a>) -> SyntaxElement<'a> {
+        SyntaxElement::Token(tok_with_parent)
     }
 }
 

@@ -52,6 +52,14 @@ namespace wrapper {
     }
 
     // Token
+    inline static size_t SyntaxToken_trivia_count(const SyntaxToken& token) {
+      return token.trivia().size();
+    }
+
+    inline static const SyntaxTrivia* SyntaxToken_trivia(const SyntaxToken& token, size_t index) {
+      return &token.trivia()[index];
+    }
+
     inline static uint16_t SyntaxToken_kind(const SyntaxToken& token) {
       return static_cast<uint16_t>(token.kind);
     }

@@ -4,19 +4,23 @@ mod sourcegen;
 
 fn main() {
     let debug = cfg!(debug_assertions);
-    let dst = cmake::Config::new(".")
-        // TODO: remove it
+    let mut dst = cmake::Config::new(".");
+    let dst = dst
         .env("CMAKE_BUILD_PARALLEL_LEVEL", "16")
         .define("SLANG_MASTER_PROJECT", "OFF")
         .define("CMAKE_BUILD_TYPE", if debug { "Debug" } else { "Release" })
-        .define("SLANG_BOOST_SINGLE_HEADER", "")
-        .build()
-        .join("build");
+        .define("SLANG_BOOST_SINGLE_HEADER", "");
+
+    if !debug {
+        dst.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");
+    }
+
+    let dst = dst.build().join("build");
     let dst = dst.display();
 
     println!("cargo:rustc-link-search=native={dst}/lib");
     println!("cargo:rustc-link-lib=static=svlang");
-    if cfg!(debug_assertions) {
+    if debug {
         println!("cargo:rustc-link-lib=static=fmtd");
         println!("cargo:rustc-link-lib=static=mimalloc-debug");
     } else {
@@ -46,6 +50,7 @@ fn main() {
         .std("c++20")
         .flag_if_supported("-stdlib=libstdc++")
         .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER");
+
     if debug {
         builder.flag_if_supported("-DDEBUG");
     }
