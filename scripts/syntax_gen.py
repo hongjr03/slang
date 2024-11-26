@@ -329,11 +329,33 @@ namespace slang::syntax {
             "    @brief Constructs a new instance of the {} struct\n".format(name)
         )
 
-        # Write constructor body.
-        for m in currtype.members:
+        range_start = len(currtype.members)
+        for (id, m) in enumerate(currtype.members):
+            if m[0] != "Token" and m[1] not in currtype.pointerMembers and m[1] not in currtype.optionalMembers:
+                range_start = id
+                break
+
+        range_end = -1
+        for (id, m) in reversed(list(enumerate(currtype.members))):
+            if m[0] != "Token" and m[1] not in currtype.pointerMembers and m[1] not in currtype.optionalMembers:
+                range_end = id
+                break
+
+        outf.write("        // range_start = {}, range_end = {}\n".format(range_start, range_end))
+        outf.write("        SourceLocation _start = SourceLocation::NoLocation, _end = SourceLocation::NoLocation;\n")
+
+        if range_end != -1:
+            m = currtype.members[range_end]
             if m[0] == "Token":
-                continue
-            if m[1] in currtype.pointerMembers:
+                outf.write("        _end = this->{}.range().end();\n".format(m[1]))
+            else:
+                outf.write("        _end = this->{}->sourceRange().end();\n".format(m[1]))
+
+        # Write constructor body.
+        for (id, m) in enumerate(currtype.members):
+            if m[0] == "Token":
+                pass
+            elif m[1] in currtype.pointerMembers:
                 outf.write("        this->{}.parent = this;\n".format(m[1]))
                 if m[0].startswith("SyntaxList<") or m[0].startswith(
                     "SeparatedSyntaxList<"
@@ -346,6 +368,39 @@ namespace slang::syntax {
                 )
             else:
                 outf.write("        this->{}->parent = this;\n".format(m[1]))
+
+            if id < range_start:
+                outf.write("        if (_start == SourceLocation::NoLocation)\n")
+                if m[0] == "Token":
+                    outf.write("            _start = this->{}.range().start();\n".format(m[1]))
+                elif m[1] in currtype.pointerMembers:
+                    outf.write("            _start = this->{}.sourceRange().start();\n".format(m[1]))
+                elif m[1] in currtype.optionalMembers:
+                    outf.write("            if (this->{}) _start = this->{}->sourceRange().start();\n".format(m[1], m[1]))
+                else:
+                    outf.write("            _start = this->{}->sourceRange().start();\n".format(m[1]))
+            if id > range_end:
+                if m[0] == "Token":
+                    outf.write("        if (auto new_end = this->{}.range().end(); new_end != SourceLocation::NoLocation)\n".format(m[1]))
+                elif m[1] in currtype.pointerMembers:
+                    outf.write("        if (auto new_end = this->{}.sourceRange().end(); new_end != SourceLocation::NoLocation)\n".format(m[1]))
+                elif m[1] in currtype.optionalMembers:
+                    outf.write("        if (this->{})\n".format(m[1]))
+                    outf.write("            if (auto new_end = this->{}->sourceRange().end(); new_end != SourceLocation::NoLocation)\n    ".format(m[1]))
+                else:
+                    outf.write("        if (auto new_end = this->{}->sourceRange().end(); new_end != SourceLocation::NoLocation)\n".format(m[1]))
+                outf.write("            _end = new_end;\n")
+
+        if range_start != len(currtype.members):
+            m = currtype.members[range_start]
+            if range_start != 0:
+                outf.write("        if (_start == SourceLocation::NoLocation)\n    ")
+            if m[0] == "Token":
+                outf.write("        _start = this->{}.range().start();\n".format(m[1]))
+            else:
+                outf.write("        _start = this->{}->sourceRange().start();\n".format(m[1]))
+
+        outf.write("        this->_range = SourceRange(_start, _end);\n")
 
         outf.write("    }\n\n")
 

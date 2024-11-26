@@ -128,9 +128,7 @@ parsing::Token* SyntaxNode::getLastTokenPtr() {
 }
 
 SourceRange SyntaxNode::sourceRange() const {
-    Token firstToken = getFirstToken();
-    Token lastToken = getLastToken();
-    return SourceRange(firstToken.location(), lastToken.location() + lastToken.rawText().length());
+  return _range;
 }
 
 ConstTokenOrSyntax SyntaxNode::getChild(size_t index) const {

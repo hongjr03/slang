@@ -272,25 +272,24 @@ mod tests {
     #[test]
     fn test_goto_by_byte() {
         let tree = get_test_tree();
-        for i in 1..10000000 {
-            let mut cursor = SyntaxCursor::new(tree.root().unwrap());
 
-            assert!(cursor.goto_first_child_after_pos(7));
-            assert!(cursor.goto_first_child_after_pos(7));
-            assert!(cursor.goto_first_child_after_pos(7));
-            assert!(cursor.goto_first_child_after_pos(7));
-            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
-            assert!(cursor.goto_prev_sibling());
-            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
+        let mut cursor = SyntaxCursor::new(tree.root().unwrap());
 
-            cursor.reset_to_root();
-            assert!(cursor.goto_last_child_before_pos(7));
-            assert!(cursor.goto_last_child_before_pos(7));
-            assert!(cursor.goto_last_child_before_pos(7));
-            assert!(cursor.goto_last_child_before_pos(7));
-            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
-            assert!(cursor.goto_next_sibling());
-            assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
-        }
+        assert!(cursor.goto_first_child_after_pos(7));
+        assert!(cursor.goto_first_child_after_pos(7));
+        assert!(cursor.goto_first_child_after_pos(7));
+        assert!(cursor.goto_first_child_after_pos(7));
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
+        assert!(cursor.goto_prev_sibling());
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
+
+        cursor.reset_to_root();
+        assert!(cursor.goto_last_child_before_pos(7));
+        assert!(cursor.goto_last_child_before_pos(7));
+        assert!(cursor.goto_last_child_before_pos(7));
+        assert!(cursor.goto_last_child_before_pos(7));
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
+        assert!(cursor.goto_next_sibling());
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
     }
 }

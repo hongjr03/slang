@@ -12,6 +12,7 @@
 
 #include "slang/parsing/Token.h"
 #include "slang/syntax/SyntaxKind.h"
+#include "slang/text/SourceLocation.h"
 #include "slang/util/Iterator.h"
 #include "slang/util/PointerIntPair.h"
 #include "slang/util/SmallVector.h"
@@ -106,6 +107,9 @@ public:
     /// For example, an enum declaration deep inside an expression tree
     /// needs to be known up front to add its members to its parent scope.
     const SyntaxNode* previewNode = nullptr;
+
+    /// The source range of syntax node.
+    SourceRange _range;
 
     /// Print the node and all of its children to a string.
     std::string toString() const;
@@ -204,7 +208,7 @@ public:
     static bool isChildOptional(size_t) { return true; }
 
 protected:
-    explicit SyntaxNode(SyntaxKind kind) : kind(kind) {}
+  explicit SyntaxNode(SyntaxKind kind) : kind(kind), _range(SourceRange::NoLocation) {}
 
 private:
     ConstTokenOrSyntax getChild(size_t index) const;
@@ -314,7 +318,13 @@ class SLANG_EXPORT SyntaxList : public SyntaxListBase, public std::span<T*> {
 public:
     SyntaxList(nullptr_t) : SyntaxList(std::span<T*>()) {}
     SyntaxList(std::span<T*> elements) :
-        SyntaxListBase(SyntaxKind::SyntaxList, elements.size()), std::span<T*>(elements) {}
+        SyntaxListBase(SyntaxKind::SyntaxList, elements.size()), std::span<T*>(elements) {
+        SourceLocation start = elements.empty() ? SourceLocation::NoLocation
+                               : elements.front()->sourceRange().start();
+        SourceLocation end = elements.empty() ? SourceLocation::NoLocation
+                             : elements.back()->sourceRange().end();
+        _range = SourceRange(start, end);
+    }
 
 private:
     TokenOrSyntax getChild(size_t index) final { return (*this)[index]; }
@@ -353,7 +363,13 @@ class SLANG_EXPORT TokenList : public SyntaxListBase, public std::span<parsing::
 public:
     TokenList(nullptr_t) : TokenList(std::span<Token>()) {}
     TokenList(std::span<Token> elements) :
-        SyntaxListBase(SyntaxKind::TokenList, elements.size()), std::span<Token>(elements) {}
+              SyntaxListBase(SyntaxKind::TokenList, elements.size()), std::span<Token>(elements) {
+        SourceLocation start = elements.empty() ? SourceLocation::NoLocation
+                               : elements.front().location();
+        SourceLocation end = elements.empty() ? SourceLocation::NoLocation
+                             : elements.back().location();
+        _range = SourceRange(start, end);
+    }
 
 private:
     TokenOrSyntax getChild(size_t index) final { return (*this)[index]; }
@@ -413,7 +429,13 @@ public:
 
     SeparatedSyntaxList(nullptr_t) : SeparatedSyntaxList(std::span<TokenOrSyntax>()) {}
     SeparatedSyntaxList(std::span<TokenOrSyntax> elements) :
-        SyntaxListBase(SyntaxKind::SeparatedList, elements.size()), elements(elements) {}
+      SyntaxListBase(SyntaxKind::SeparatedList, elements.size()), elements(elements) {
+        SourceLocation start = elements.empty() ? SourceLocation::NoLocation
+                               : elements.front().range().start();
+        SourceLocation end = elements.empty() ? SourceLocation::NoLocation
+                             : elements.back().range().end();
+        _range = SourceRange(start, end);
+    }
 
     /// @return the elements of nodes in the list
     [[nodiscard]] std::span<const ConstTokenOrSyntax> elems() const {
