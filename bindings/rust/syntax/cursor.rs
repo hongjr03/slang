@@ -153,45 +153,42 @@ impl<'a> SyntaxCursor<'a> {
         let node = self.to_node().unwrap();
         let tot = node.child_count();
 
-        let mut chunk_start = 0;
-        let chunk_size = tot.isqrt();
+        let mut left: i32 = 0;
+        let mut right: i32 = (tot as i32) - 1;
+        let mut result = None;
 
-        'by_chunk: while chunk_start < tot {
-            let chunk_end = (chunk_start + chunk_size).min(tot);
-
-            for i in (chunk_start..chunk_end).rev() {
-                let Some(child) = node.child(i) else {
+        'out: while left <= right {
+            let mid = (left + right) / 2;
+            let mut i = mid;
+            let (child, range) = loop {
+                if i > right {
+                    right = mid - 1;
+                    continue 'out;
+                }
+                let Some(child) = node.child(i as usize) else {
+                    i += 1;
                     continue;
                 };
-
                 let Some(range) = child.range() else {
+                    i += 1;
                     continue;
                 };
-
-                if range.end() <= byte {
-                    chunk_start = chunk_end;
-                    continue 'by_chunk;
-                }
-
-                // range.end() > byte
-                for j in chunk_start..i {
-                    if let Some(child) = node.child(j)
-                        && let Some(range) = child.range()
-                        && range.end() > byte
-                    {
-                        self.path.push((node, j));
-                        self.elem = child;
-                        return true;
-                    }
-                }
-
-                self.path.push((node, i));
-                self.elem = child;
-                return true;
+                break (child, range);
+            };
+            if range.end() <= byte {
+                left = mid + 1;
+            } else {
+                result = Some((child, i));
+                right = mid - 1;
             }
-            chunk_start = chunk_end;
         }
 
+        if let Some((child, i)) = result {
+            self.path.push((node, i as usize));
+            self.elem = child;
+            return true;
+        }
+    
         false
     }
 
@@ -222,42 +219,42 @@ impl<'a> SyntaxCursor<'a> {
         }
 
         let node = self.to_node().unwrap();
-        let mut chunk_end = node.child_count();
-        let chunk_size = chunk_end.isqrt();
-        'by_chunk: while chunk_end > 0 {
-            let chunk_start = chunk_end.saturating_sub(chunk_size);
+        let tot = node.child_count();
 
-            for i in chunk_start..chunk_end {
-                let Some(child) = node.child(i) else {
+        let mut left: i32 = 0;
+        let mut right: i32 = (tot as i32) - 1;
+        let mut result = None;
+
+        'out: while left <= right {
+            let mid = (left + right) / 2;
+            let mut i = mid;
+            let (child, range) = loop {
+                if i < left {
+                    left = mid + 1;
+                    continue 'out;
+                }
+                let Some(child) = node.child(i as usize) else {
+                    i -= 1;
                     continue;
                 };
-
                 let Some(range) = child.range() else {
+                    i -= 1;
                     continue;
                 };
-
-                if range.start() >= byte {
-                    chunk_end = chunk_start;
-                    continue 'by_chunk;
-                }
-
-                // range.start() < byte
-                for j in (i + 1..chunk_end).rev() {
-                    if let Some(child) = node.child(j)
-                        && let Some(range) = child.range()
-                        && range.start() < byte
-                    {
-                        self.path.push((node, j));
-                        self.elem = child;
-                        return true;
-                    }
-                }
-
-                self.path.push((node, i));
-                self.elem = child;
-                return true;
+                break (child, range);
+            };
+            if range.start() >= byte {
+                right = mid - 1;
+            } else {
+                result = Some((child, i));
+                left = mid + 1;
             }
-            chunk_end = chunk_start;
+        }
+
+        if let Some((child, i)) = result {
+            self.path.push((node, i as usize));
+            self.elem = child;
+            return true;
         }
 
         false
