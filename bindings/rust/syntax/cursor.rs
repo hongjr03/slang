@@ -10,7 +10,7 @@ impl<'a> SyntaxCursor<'a> {
     pub fn new(root: SyntaxNode<'a>) -> SyntaxCursor<'a> {
         SyntaxCursor {
             elem: SyntaxElement::Node(root),
-            path: vec![],
+            path: Vec::with_capacity(16),
         }
     }
 
@@ -146,14 +146,53 @@ impl<'a> SyntaxCursor<'a> {
     // assert_eq!(cursor.node.range(), Some(5..10));
     // ```
     pub fn goto_first_child_after_pos(&mut self, byte: usize) -> bool {
-        self.elem
-            .children_with_idx()
-            .find(|(_, c)| c.range().is_some_and(|r| r.end() > byte))
-            .map(|(i, c)| {
-                self.path.push((self.to_node().unwrap(), i));
-                self.elem = c;
-            })
-            .is_some()
+        if self.to_token().is_some() {
+            return false;
+        }
+
+        let node = self.to_node().unwrap();
+        let tot = node.child_count();
+
+        let mut chunk_start = 0;
+        let chunk_size = tot.isqrt();
+
+        'by_chunk: while chunk_start < tot {
+            let chunk_end = (chunk_start + chunk_size).min(tot);
+
+            for i in (chunk_start..chunk_end).rev() {
+                let Some(child) = node.child(i) else {
+                    continue;
+                };
+
+                let Some(range) = child.range() else {
+                    continue;
+                };
+
+                if range.end() <= byte {
+                    chunk_start = chunk_end;
+                    continue 'by_chunk;
+                }
+
+                // range.end() > byte
+                for j in chunk_start..i {
+                    if let Some(child) = node.child(j)
+                        && let Some(range) = child.range()
+                        && range.end() > byte
+                    {
+                        self.path.push((node, j));
+                        self.elem = child;
+                        return true;
+                    }
+                }
+
+                self.path.push((node, i));
+                self.elem = child;
+                return true;
+            }
+            chunk_start = chunk_end;
+        }
+
+        false
     }
 
     // Move the cursor to the last child that within the given position.
@@ -178,15 +217,50 @@ impl<'a> SyntaxCursor<'a> {
     // assert_eq!(cursor.node.range(), Some(0..5));
     // ```
     pub fn goto_last_child_before_pos(&mut self, byte: usize) -> bool {
-        self.elem
-            .children_with_idx()
-            .rev()
-            .find(|(_, c)| c.range().is_some_and(|r| r.start() < byte))
-            .map(|(i, c)| {
-                self.path.push((self.to_node().unwrap(), i));
-                self.elem = c;
-            })
-            .is_some()
+        if self.to_token().is_some() {
+            return false;
+        }
+
+        let node = self.to_node().unwrap();
+        let mut chunk_end = node.child_count();
+        let chunk_size = chunk_end.isqrt();
+        'by_chunk: while chunk_end > 0 {
+            let chunk_start = chunk_end.saturating_sub(chunk_size);
+
+            for i in chunk_start..chunk_end {
+                let Some(child) = node.child(i) else {
+                    continue;
+                };
+
+                let Some(range) = child.range() else {
+                    continue;
+                };
+
+                if range.start() >= byte {
+                    chunk_end = chunk_start;
+                    continue 'by_chunk;
+                }
+
+                // range.start() < byte
+                for j in (i + 1..chunk_end).rev() {
+                    if let Some(child) = node.child(j)
+                        && let Some(range) = child.range()
+                        && range.start() < byte
+                    {
+                        self.path.push((node, j));
+                        self.elem = child;
+                        return true;
+                    }
+                }
+
+                self.path.push((node, i));
+                self.elem = child;
+                return true;
+            }
+            chunk_end = chunk_start;
+        }
+
+        false
     }
 }
 
