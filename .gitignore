@@ -16,3 +16,12 @@ CMakeUserPresets.json
 .ccls
 _version.py
 *.code-workspace
+
+# rust
+debug/
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+tags
+generated.rs
