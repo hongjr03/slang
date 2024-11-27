@@ -8,8 +8,12 @@ fn main() {
     let dst = dst
         .env("CMAKE_BUILD_PARALLEL_LEVEL", "16")
         .define("SLANG_MASTER_PROJECT", "OFF")
+        .define("SLANG_INCLUDE_TESTS", "OFF")
+        .define("SLANG_INCLUDE_TOOLS", "OFF")
+        .define("SLANG_INCLUDE_INSTALL", "OFF")
         .define("CMAKE_BUILD_TYPE", if debug { "Debug" } else { "Release" })
-        .define("SLANG_BOOST_SINGLE_HEADER", "");
+        .define("SLANG_BOOST_SINGLE_HEADER", "")
+        .define("CMAKE_VERBOSE_MAKEFILE", "ON"); // for debugging
 
     if !debug {
         dst.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");

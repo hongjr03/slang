@@ -146,11 +146,10 @@ impl<'a> SyntaxCursor<'a> {
     // assert_eq!(cursor.node.range(), Some(5..10));
     // ```
     pub fn goto_first_child_after_pos(&mut self, byte: usize) -> bool {
-        if self.to_token().is_some() {
+        let Some(node) = self.to_node() else {
             return false;
-        }
+        };
 
-        let node = self.to_node().unwrap();
         let tot = node.child_count();
 
         let mut left: i32 = 0;
@@ -188,7 +187,7 @@ impl<'a> SyntaxCursor<'a> {
             self.elem = child;
             return true;
         }
-    
+
         false
     }
 
@@ -214,11 +213,10 @@ impl<'a> SyntaxCursor<'a> {
     // assert_eq!(cursor.node.range(), Some(0..5));
     // ```
     pub fn goto_last_child_before_pos(&mut self, byte: usize) -> bool {
-        if self.to_token().is_some() {
+        let Some(node) = self.to_node() else {
             return false;
-        }
+        };
 
-        let node = self.to_node().unwrap();
         let tot = node.child_count();
 
         let mut left: i32 = 0;
