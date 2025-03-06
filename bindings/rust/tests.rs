@@ -21,9 +21,11 @@ fn get_multi_module_tree() -> SyntaxTree {
 fn get_tree_with_trivia() -> SyntaxTree {
     SyntaxTree::from_text(
         r#"
-// testA
-// testB
-wire a = 1;
+module A();
+
+C #(.l(1)) c();
+endmodule
+
 "#,
         "source",
         "",
@@ -33,8 +35,12 @@ wire a = 1;
 fn get_complex_tree() -> SyntaxTree {
     SyntaxTree::from_text(
         r#"
-module A (input a,);
-endmodule"#,
+module A(
+  input a,
+  /decode,
+  output b,
+);
+endmodule;"#,
         "source",
         "",
     )
@@ -224,38 +230,69 @@ fn parse_complex() {
     dfs(root, 0, &mut ans);
 
     let expected = expect![[r#"
-        CompilationUnit 1..31 (cnt: 2)
-          SyntaxList 1..31 (cnt: 1)
-            ModuleDeclaration 1..31 (cnt: 5)
+        CompilationUnit 1..58 (cnt: 2)
+          SyntaxList 1..58 (cnt: 2)
+            ModuleDeclaration 1..57 (cnt: 5)
               SyntaxList (cnt: 0)
-              ModuleHeader 1..21 (cnt: 7)
+              ModuleHeader 1..47 (cnt: 7)
                 EndOfLine 0..1 (trivia)
                 ModuleKeyword 1..7
                 Whitespace 7..8 (trivia)
                 Identifier 8..9
                 SyntaxList (cnt: 0)
-                AnsiPortList 10..20 (cnt: 3)
-                  Whitespace 9..10 (trivia)
-                  OpenParenthesis 10..11
-                  SeparatedList 11..19 (cnt: 2)
-                    ImplicitAnsiPort 11..18 (cnt: 3)
+                AnsiPortList 9..46 (cnt: 3)
+                  OpenParenthesis 9..10
+                  SeparatedList 13..44 (cnt: 6)
+                    ImplicitAnsiPort 13..20 (cnt: 3)
                       SyntaxList (cnt: 0)
-                      VariablePortHeader 11..17 (cnt: 4)
-                        InputKeyword 11..16
-                        ImplicitType 17..17 (cnt: 3)
+                      VariablePortHeader 13..19 (cnt: 4)
+                        EndOfLine 10..11 (trivia)
+                        Whitespace 11..13 (trivia)
+                        InputKeyword 13..18
+                        ImplicitType 19..19 (cnt: 3)
                           SyntaxList (cnt: 0)
-                          Placeholder 17..17
-                      Declarator 17..18 (cnt: 3)
-                        Whitespace 16..17 (trivia)
-                        Identifier 17..18
+                          Placeholder 19..19
+                      Declarator 19..20 (cnt: 3)
+                        Whitespace 18..19 (trivia)
+                        Identifier 19..20
                         SyntaxList (cnt: 0)
-                    Comma 18..19
-                  CloseParenthesis 19..20
-                Semicolon 20..21
+                    Comma 20..21
+                    ImplicitAnsiPort 24..21 (cnt: 3)
+                      SyntaxList (cnt: 0)
+                      VariablePortHeader 24..24 (cnt: 4)
+                        ImplicitType 24..24 (cnt: 3)
+                          SyntaxList (cnt: 0)
+                          Placeholder 24..24
+                      Declarator 21..21 (cnt: 3)
+                        Identifier 21..21
+                        SyntaxList (cnt: 0)
+                    SkippedTokens 31..31 (trivia)
+                    Comma 31..32
+                    ImplicitAnsiPort 35..43 (cnt: 3)
+                      SyntaxList (cnt: 0)
+                      VariablePortHeader 35..42 (cnt: 4)
+                        EndOfLine 32..33 (trivia)
+                        Whitespace 33..35 (trivia)
+                        OutputKeyword 35..41
+                        ImplicitType 42..42 (cnt: 3)
+                          SyntaxList (cnt: 0)
+                          Placeholder 42..42
+                      Declarator 42..43 (cnt: 3)
+                        Whitespace 41..42 (trivia)
+                        Identifier 42..43
+                        SyntaxList (cnt: 0)
+                    Comma 43..44
+                  EndOfLine 44..45 (trivia)
+                  CloseParenthesis 45..46
+                Semicolon 46..47
               SyntaxList (cnt: 0)
-              EndOfLine 21..22 (trivia)
-              EndModuleKeyword 22..31
-          EndOfFile 31..31
+              EndOfLine 47..48 (trivia)
+              EndModuleKeyword 48..57
+            EmptyMember 57..58 (cnt: 3)
+              SyntaxList (cnt: 0)
+              TokenList (cnt: 0)
+              Semicolon 57..58
+          EndOfFile 58..58
     "#]];
     expected.assert_eq(&ans);
 }
@@ -266,7 +303,7 @@ fn test_literals() {
         r#"
 module A();
   wire y = 3s;
-  wire x = 3'b101;
+  wire x = 7'b0010xx10;
   wire z = 12;
   wire p = 'x;
   wire empty = ;
@@ -308,12 +345,12 @@ endmodule;"#,
     };
     assert_eq!(
         vec_lit.size().unwrap().int().unwrap().get_single_word(),
-        Some(3)
+        Some(7)
     );
     assert_eq!(vec_lit.base().unwrap().base(), Some(LiteralBase::Bin));
     assert_eq!(
-        vec_lit.value().unwrap().int().unwrap().get_single_word(),
-        Some(5)
+        vec_lit.value().unwrap().int().unwrap().serialize(2),
+        "10xx10"
     );
 
     let Expression::PrimaryExpression(PrimaryExpression::LiteralExpression(
@@ -342,12 +379,13 @@ endmodule;"#,
     let Expression::Name(Name::IdentifierName(name)) = literals.next().unwrap() else {
         unreachable!("expected identifier");
     };
-    assert!(name
-        .identifier()
-        .unwrap()
-        .value_text()
-        .to_string()
-        .is_empty());
+    assert!(
+        name.identifier()
+            .unwrap()
+            .value_text()
+            .to_string()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -358,48 +396,55 @@ fn test_trivia() {
     dfs(root, 0, &mut ans);
 
     let expected = expect![[r#"
-        CompilationUnit 19..31 (cnt: 2)
-          SyntaxList 19..30 (cnt: 1)
-            NetDeclaration 19..30 (cnt: 8)
+        CompilationUnit 1..41 (cnt: 2)
+          SyntaxList 1..39 (cnt: 1)
+            ModuleDeclaration 1..39 (cnt: 5)
               SyntaxList (cnt: 0)
-              EndOfLine 0..1 (trivia)
-              LineComment 1..9 (trivia)
-              EndOfLine 9..10 (trivia)
-              LineComment 10..18 (trivia)
-              EndOfLine 18..19 (trivia)
-              WireKeyword 19..23
-              ImplicitType 24..24 (cnt: 3)
+              ModuleHeader 1..12 (cnt: 7)
+                EndOfLine 0..1 (trivia)
+                ModuleKeyword 1..7
+                Whitespace 7..8 (trivia)
+                Identifier 8..9
                 SyntaxList (cnt: 0)
-                Placeholder 24..24
-              SeparatedList 24..29 (cnt: 1)
-                Declarator 24..29 (cnt: 3)
-                  Whitespace 23..24 (trivia)
-                  Identifier 24..25
+                AnsiPortList 9..11 (cnt: 3)
+                  OpenParenthesis 9..10
+                  SeparatedList (cnt: 0)
+                  CloseParenthesis 10..11
+                Semicolon 11..12
+              SyntaxList 14..29 (cnt: 1)
+                HierarchyInstantiation 14..29 (cnt: 5)
                   SyntaxList (cnt: 0)
-                  EqualsValueClause 26..29 (cnt: 2)
-                    Whitespace 25..26 (trivia)
-                    Equals 26..27
-                    IntegerLiteralExpression 28..29 (cnt: 1)
-                      Whitespace 27..28 (trivia)
-                      IntegerLiteral 28..29
-              Semicolon 29..30
-          EndOfLine 30..31 (trivia)
-          EndOfFile 31..31
+                  EndOfLine 12..13 (trivia)
+                  EndOfLine 13..14 (trivia)
+                  Identifier 14..15
+                  ParameterValueAssignment 16..24 (cnt: 4)
+                    Whitespace 15..16 (trivia)
+                    Hash 16..17
+                    OpenParenthesis 17..18
+                    SeparatedList 18..23 (cnt: 1)
+                      NamedParamAssignment 18..23 (cnt: 5)
+                        Dot 18..19
+                        Identifier 19..20
+                        OpenParenthesis 20..21
+                        IntegerLiteralExpression 21..22 (cnt: 1)
+                          IntegerLiteral 21..22
+                        CloseParenthesis 22..23
+                    CloseParenthesis 23..24
+                  SeparatedList 25..28 (cnt: 1)
+                    HierarchicalInstance 25..28 (cnt: 4)
+                      InstanceName 25..26 (cnt: 2)
+                        Whitespace 24..25 (trivia)
+                        Identifier 25..26
+                        SyntaxList (cnt: 0)
+                      OpenParenthesis 26..27
+                      SeparatedList (cnt: 0)
+                      CloseParenthesis 27..28
+                  Semicolon 28..29
+              EndOfLine 29..30 (trivia)
+              EndModuleKeyword 30..39
+          EndOfLine 39..40 (trivia)
+          EndOfLine 40..41 (trivia)
+          EndOfFile 41..41
     "#]];
     expected.assert_eq(&ans);
-
-    let wire = root.child_node(0).unwrap().child_node(0).unwrap();
-    let trivias = wire
-        .child_token(1)
-        .unwrap()
-        .trivias_with_loc()
-        .map(|((start, end), trivia)| format!("{:?} {start:?}..{end:?}", trivia.kind()))
-        .join("\n");
-    let ans = expect![[r#"
-        EndOfLine 0..1
-        LineComment 1..9
-        EndOfLine 9..10
-        LineComment 10..18
-        EndOfLine 18..19"#]];
-    ans.assert_eq(&trivias);
 }

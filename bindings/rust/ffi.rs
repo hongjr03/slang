@@ -56,7 +56,7 @@ mod slang_ffi {
         fn getRawPtr(self: &SVInt) -> *const u64;
 
         #[namespace = "wrapper"]
-        fn SVInt_toString(svint: &SVInt) -> String;
+        fn SVInt_toString(svint: &SVInt, base: usize) -> String;
 
         #[namespace = "wrapper"]
         fn SVInt_clone(svint: &SVInt) -> UniquePtr<SVInt>;
@@ -250,7 +250,7 @@ impl_functions! {
 impl_functions! {
     impl SVInt {
         fn clone(&self) -> UniquePtr<SVInt> |> SVInt_clone;
-        fn toString(&self) -> String |> SVInt_toString;
+        fn toString(&self, base: usize) -> String |> SVInt_toString;
         fn eq(&self, rhs: &SVInt) -> UniquePtr<SVLogic> |> SVInt_eq;
     }
 }

@@ -5,7 +5,7 @@ version = "0.0.1"
 keywords = ["parsing", "verilog"]
 categories = ["parsing", "text-editors"]
 repository = "https://github.com/MikePopoloski/slang"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 
 build = "bindings/rust/build.rs"
@@ -31,11 +31,11 @@ smol_str = "0.3.1"
 Inflector = "0.11.4"
 cmake = "0.1.50"
 cxx-build = "1.0.124"
-itertools = "0.13.0"
+itertools = "0.14.0"
 proc-macro2 = "1.0.86"
 quote = "1.0.36"
 regex = "1.11.1"
-which = "6.0.3"
+which = "7.0.2"
 
 [profile.release-lto]
 inherits = "release"

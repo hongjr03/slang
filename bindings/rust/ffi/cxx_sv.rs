@@ -1,5 +1,5 @@
 use core::str;
-use cxx::{type_id, ExternType};
+use cxx::{ExternType, type_id};
 use smol_str::{SmolStr, ToSmolStr};
 use std::{
     ffi::{c_char, c_uchar, c_void},

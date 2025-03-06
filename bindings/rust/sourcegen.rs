@@ -48,7 +48,7 @@ pub mod loader {
     use itertools::Itertools;
     use regex::Regex;
 
-    use crate::sourcegen::{reader_from_file, trim_name, Tag, Ty, TypeInfo};
+    use crate::sourcegen::{Tag, Ty, TypeInfo, reader_from_file, trim_name};
 
     pub fn load_types() -> (HashMap<String, TypeInfo>, BTreeMap<String, String>) {
         let mut all_types = HashMap::new();
@@ -200,6 +200,11 @@ pub mod loader {
                     value,
                     name.to_screaming_snake_case()
                 ));
+            } else if value == "##" {
+                macro_str.push_str(&format!(
+                    "    [# #] => {{ $crate::TokenKind::{} }}; \n",
+                    name.to_screaming_snake_case()
+                ));
             } else {
                 macro_str.push_str(&format!(
                     "    [{}] => {{ $crate::TokenKind::{} }}; \n",
@@ -229,9 +234,9 @@ pub mod generator {
     use inflector::Inflector;
     use itertools::Itertools;
     use proc_macro2::TokenStream;
-    use quote::{format_ident, quote, ToTokens};
+    use quote::{ToTokens, format_ident, quote};
 
-    use super::{reader_from_file, Ty, TypeInfo};
+    use super::{Ty, TypeInfo, reader_from_file};
 
     // From https://docs.rs/bindgen/0.51.1/src/bindgen/lib.rs.html#1945
     fn rustfmt_path() -> io::Result<OsString> {

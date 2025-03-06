@@ -1,4 +1,6 @@
 #pragma once
+#include <cassert>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -32,9 +34,19 @@ namespace wrapper {
     return logic.value;
   }
 
-  inline static rust::string SVInt_toString(const SVInt& svint) {
-    auto str = svint.toString(slang::LiteralBase::Decimal, false);
-    return rust::String(str);
+  inline static rust::string SVInt_toString(const SVInt& svint, size_t base) {
+    switch (base) {
+      case 2:
+        return rust::String(svint.toString(slang::LiteralBase::Binary, false));
+      case 8:
+        return rust::String(svint.toString(slang::LiteralBase::Octal, false));
+      case 16:
+        return rust::String(svint.toString(slang::LiteralBase::Hex, false));
+      case 10:
+        return rust::String(svint.toString(slang::LiteralBase::Decimal, false));
+      default:
+        assert(false);
+    }
   }
 
   inline static std::unique_ptr<slang::SVInt> SVInt_clone(const SVInt& svint) {

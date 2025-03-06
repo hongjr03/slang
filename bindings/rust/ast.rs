@@ -2,7 +2,7 @@
 #![allow(unused)]
 #![allow(clippy::enum_variant_names)]
 
-use crate::{syntax::SyntaxKind, SyntaxChildren, SyntaxNode, SyntaxToken};
+use crate::{SyntaxChildren, SyntaxNode, SyntaxToken, syntax::SyntaxKind};
 
 pub trait AstNode<'a>: Copy + Clone {
     fn can_cast(kind: SyntaxKind) -> bool
@@ -125,7 +125,7 @@ include!(concat!(env!("OUT_DIR"), "/ast.rs"));
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{syntax::SyntaxKind, SyntaxTree, TokenKind};
+    use crate::{SyntaxTree, TokenKind, syntax::SyntaxKind};
 
     fn get_test_tree() -> SyntaxTree {
         SyntaxTree::from_text("module AB(input a); wire x; endmodule;", "source", "")

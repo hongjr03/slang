@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![feature(trait_alias)]
 
 pub mod ast;
 mod ffi;
@@ -15,12 +16,12 @@ use std::{
     pin::Pin,
 };
 pub use syntax::{
+    SyntaxKind, TokenKind, TriviaKind,
     cursor::SyntaxCursor,
     iter::{
         SyntaxAncestors, SyntaxChildren, SyntaxElemPreorder, SyntaxIdxChildren, SyntaxNodePreorder,
         WalkEvent,
     },
-    SyntaxKind, TokenKind, TriviaKind,
 };
 
 pub struct SVInt {
@@ -69,6 +70,19 @@ pub enum TimeUnit {
     Femtoseconds,
 }
 
+impl fmt::Display for TimeUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TimeUnit::Seconds => write!(f, "s"),
+            TimeUnit::Milliseconds => write!(f, "ms"),
+            TimeUnit::Microseconds => write!(f, "us"),
+            TimeUnit::Nanoseconds => write!(f, "ns"),
+            TimeUnit::Picoseconds => write!(f, "ps"),
+            TimeUnit::Femtoseconds => write!(f, "fs"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiteralBase {
     Bin,
@@ -85,12 +99,23 @@ pub enum Bit {
     Z,
 }
 
+impl fmt::Display for Bit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Bit::L => write!(f, "0"),
+            Bit::H => write!(f, "1"),
+            Bit::X => write!(f, "x"),
+            Bit::Z => write!(f, "z"),
+        }
+    }
+}
+
 impl SourceLocation {
     const NO_LOCATION: usize = (1usize << 36) - 1;
 
     #[inline]
     pub fn from_unique_ptr(_ptr: UniquePtr<ffi::SourceLocation>) -> Option<Self> {
-        _ptr.is_null().not().then_some(SourceLocation { _ptr })
+        _ptr.is_null().not().then(|| SourceLocation { _ptr })
     }
 
     #[inline]
@@ -119,7 +144,7 @@ impl Eq for SourceLocation {}
 impl SourceRange {
     #[inline]
     fn from_unique_ptr(_ptr: UniquePtr<ffi::SourceRange>) -> Option<Self> {
-        _ptr.is_null().not().then_some(SourceRange { _ptr })
+        _ptr.is_null().not().then(|| SourceRange { _ptr })
     }
 
     #[inline]
@@ -219,6 +244,11 @@ impl SVInt {
         let logic = self._ptr.eq(&other._ptr);
         SVLogic { _ptr: logic }
     }
+
+    #[inline]
+    pub fn serialize(&self, base: usize) -> String {
+        self._ptr.toString(base)
+    }
 }
 
 unsafe impl Send for SVInt {}
@@ -258,7 +288,7 @@ impl hash::Hash for SVInt {
 
 impl ToString for SVInt {
     fn to_string(&self) -> String {
-        self._ptr.toString()
+        self._ptr.toString(10)
     }
 }
 
@@ -270,6 +300,8 @@ impl fmt::Debug for SyntaxTrivia<'_> {
             .finish()
     }
 }
+
+pub trait ChildrenIter<It> = DoubleEndedIterator<Item = It> + ExactSizeIterator + Clone;
 
 impl SyntaxTrivia<'_> {
     #[inline]
@@ -294,7 +326,7 @@ impl SyntaxTrivia<'_> {
 impl<'a> SyntaxToken<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxToken) -> Option<Self> {
-        _ptr.is_null().not().then_some(SyntaxToken {
+        _ptr.is_null().not().then(|| SyntaxToken {
             _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
         })
     }
@@ -370,9 +402,7 @@ impl<'a> SyntaxToken<'a> {
     }
 
     #[inline]
-    pub fn trivias(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = SyntaxTrivia<'a>> + ExactSizeIterator + use<'a> {
+    pub fn trivias(&self) -> impl ChildrenIter<SyntaxTrivia<'a>> + use<'a> {
         SyntaxTriviaIter {
             tok: *self,
             idx: 0,
@@ -383,8 +413,7 @@ impl<'a> SyntaxToken<'a> {
     #[inline]
     pub fn trivias_with_loc(
         &self,
-    ) -> impl DoubleEndedIterator<Item = ((usize, usize), SyntaxTrivia<'a>)> + ExactSizeIterator + use<'a>
-    {
+    ) -> impl ChildrenIter<((usize, usize), SyntaxTrivia<'a>)> + use<'a> {
         let Some(range) = self.range() else {
             return Either::Left(iter::empty());
         };
@@ -462,7 +491,7 @@ impl<'a> ExactSizeIterator for SyntaxTriviaIter<'a> {
 impl<'a> SyntaxNode<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxNode) -> Option<Self> {
-        _ptr.is_null().not().then_some(SyntaxNode {
+        _ptr.is_null().not().then(|| SyntaxNode {
             _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
         })
     }
