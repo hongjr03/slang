@@ -10,6 +10,7 @@
 #include "slang/numeric/SVInt.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
+#include "slang/ast/Compilation.h"
 #include "rust/cxx.h"
 
 namespace wrapper {
@@ -20,6 +21,7 @@ namespace wrapper {
   using SourceRange = ::slang::SourceRange;
   using SyntaxTree = ::slang::syntax::SyntaxTree;
   using SyntaxNode = ::slang::syntax::SyntaxNode;
+  using Compilation = ::slang::ast::Compilation;
 
   // SourceRange
   inline static size_t source_range_start(const slang::SourceRange& range) {
@@ -125,6 +127,26 @@ namespace wrapper {
 
     inline static uint16_t SyntaxNode_kind(const SyntaxNode& node) {
       return static_cast<uint16_t>(node.kind);
+    }
+  }
+
+  namespace ast {
+    inline static std::unique_ptr<Compilation> Compilation_new() {
+        return std::unique_ptr<Compilation>(new Compilation());
+    }
+
+    inline static void Compilation_add_syntax_tree(Compilation& compilation, std::shared_ptr<SyntaxTree> tree) {
+        compilation.addSyntaxTree(tree);
+    }
+
+    inline static rust::Vec<std::unique_ptr<Diagnositc>> Compilation_get_all_diagnostics(const Compilation& compilation) {
+
+    }
+  }
+
+  namespace diagnostics {
+    inline static uint16_t code(const Diagnostic& diag) {
+        return diag.code.getCode();
     }
   }
 }

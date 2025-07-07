@@ -448,3 +448,10 @@ fn test_trivia() {
     "#]];
     expected.assert_eq(&ans);
 }
+
+#[test]
+fn test_compilation() {
+    let mut compilation = Compilation::new();
+    let tree = get_test_tree();
+    compilation.add_syntax_tree(tree);
+}

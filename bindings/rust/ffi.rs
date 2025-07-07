@@ -7,6 +7,7 @@ use cxx::{SharedPtr, UniquePtr};
 
 pub use cxx_sv::CxxSV;
 pub use slang_ffi::*;
+pub use std::pin::Pin;
 
 #[cxx::bridge]
 mod slang_ffi {
@@ -160,6 +161,30 @@ mod slang_ffi {
 
     impl SharedPtr<SyntaxTree> {}
 
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/ast/Compilation.h");
+
+        type Compilation;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_new() -> UniquePtr<Compilation>;
+        #[namespace = "wrapper::ast"]
+        fn Compilation_add_syntax_tree(
+            compilation: Pin<&mut Compilation>,
+            tree: SharedPtr<SyntaxTree>,
+        );
+    }
+
+    impl UniquePtr<Compilation> {}
+
+    #[namespace = "slang::diagnostics"]
+    unsafe extern "C++" {
+        include!("slang/include/diagnostics/Diagnositcs.h");
+
+        type Diagnositc;
+    }
+
     // StringView
     unsafe extern "C++" {
         include!("slang/bindings/rust/ffi/string_view.h");
@@ -252,5 +277,12 @@ impl_functions! {
         fn clone(&self) -> UniquePtr<SVInt> |> SVInt_clone;
         fn toString(&self, base: usize) -> String |> SVInt_toString;
         fn eq(&self, rhs: &SVInt) -> UniquePtr<SVLogic> |> SVInt_eq;
+    }
+}
+
+impl_functions! {
+    impl Compilation {
+        fn new() -> UniquePtr<Compilation> |> Compilation_new;
+        fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
     }
 }

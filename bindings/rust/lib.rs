@@ -801,5 +801,21 @@ impl From<TokenKind> for SyntaxElementKind {
     }
 }
 
+pub struct Compilation {
+    _ptr: UniquePtr<ffi::Compilation>,
+}
+
+impl Compilation {
+    pub fn new() -> Self {
+        Compilation {
+            _ptr: ffi::Compilation::new(),
+        }
+    }
+
+    pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
+        ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
+    }
+}
+
 #[cfg(test)]
 mod tests;
