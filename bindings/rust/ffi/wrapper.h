@@ -11,6 +11,7 @@
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
+#include "slang/diagnostics/Diagnostics.h"
 #include "rust/cxx.h"
 
 namespace wrapper {
@@ -22,6 +23,7 @@ namespace wrapper {
   using SyntaxTree = ::slang::syntax::SyntaxTree;
   using SyntaxNode = ::slang::syntax::SyntaxNode;
   using Compilation = ::slang::ast::Compilation;
+  using Diagnostic = ::slang::Diagnostic;
 
   // SourceRange
   inline static size_t source_range_start(const slang::SourceRange& range) {
@@ -139,7 +141,7 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-    inline static rust::Vec<std::unique_ptr<Diagnositc>> Compilation_get_all_diagnostics(const Compilation& compilation) {
+    inline static rust::Vec<std::unique_ptr<Diagnostic>> Compilation_get_all_diagnostics(const Compilation& compilation) {
 
     }
   }
