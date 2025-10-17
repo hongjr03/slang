@@ -10,7 +10,14 @@
 #include "slang/numeric/SVInt.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
+#include "slang/text/SourceManager.h"
 #include "slang/ast/Compilation.h"
+#include "slang/ast/Symbol.h"
+#include "slang/ast/Scope.h"
+#include "slang/ast/types/Type.h"
+#include "slang/ast/types/DeclaredType.h"
+#include "slang/ast/symbols/ValueSymbol.h"
+#include "slang/numeric/ConstantValue.h"
 #include "slang/diagnostics/Diagnostics.h"
 #include "rust/cxx.h"
 
@@ -131,6 +138,20 @@ namespace wrapper {
     }
   }
 
+  // SourceManager wrappers
+  inline static rust::String SourceManager_getFileName(const ::slang::SourceManager& sm, const ::slang::SourceLocation& loc) {
+    std::string_view sv = sm.getFileName(loc);
+    return rust::String(std::string(sv));
+  }
+
+  inline static uint32_t SourceManager_getLineNumber(const ::slang::SourceManager& sm, const ::slang::SourceLocation& loc) {
+    return sm.getLineNumber(loc);
+  }
+
+  inline static uint32_t SourceManager_getColumnNumber(const ::slang::SourceManager& sm, const ::slang::SourceLocation& loc) {
+    return sm.getColumnNumber(loc);
+  }
+
   namespace ast {
     inline static std::unique_ptr<Compilation> Compilation_new() {
         return std::unique_ptr<Compilation>(new Compilation());
@@ -140,15 +161,123 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-  inline static rust::Vec<std::unique_ptr<::slang::Diagnostic>> Compilation_get_all_diagnostics(Compilation& compilation) {
-    rust::Vec<std::unique_ptr<::slang::Diagnostic>> out;
-    const ::slang::Diagnostics& diags = compilation.getAllDiagnostics();
-    for (const auto& d : diags) {
-      out.push_back(std::make_unique<::slang::Diagnostic>(d));
+    inline static const ::slang::SourceManager* Compilation_getSourceManager(Compilation& comp) {
+        return comp.getSourceManager();
     }
-    return out;
+
+    inline static const ::slang::ast::Symbol* Compilation_getRoot(Compilation& comp) {
+        // RootSymbol inherits from Symbol, use reinterpret_cast for incomplete type
+        return reinterpret_cast<const ::slang::ast::Symbol*>(&comp.getRoot());
+    }
+
+    // Symbol wrappers
+    inline static uint16_t Symbol_kind(const ::slang::ast::Symbol& symbol) {
+        return static_cast<uint16_t>(symbol.kind);
+    }
+
+    inline static const ::slang::ast::Symbol* Symbol_getNextSibling(const ::slang::ast::Symbol& symbol) {
+        return symbol.getNextSibling();
+    }
+
+    // Scope wrappers
+    inline static const ::slang::ast::Symbol* Scope_asSymbol(const ::slang::ast::Scope& scope) {
+        const ::slang::ast::Symbol& sym = scope.asSymbol();
+        return &sym;
+    }
+
+    inline static const ::slang::ast::Symbol* Scope_getFirstMember(const ::slang::ast::Scope& scope) {
+        return scope.getFirstMember();
+    }
+
+    // LookupLocation wrappers
+    inline static std::unique_ptr<::slang::ast::LookupLocation> LookupLocation_max() {
+        return std::make_unique<::slang::ast::LookupLocation>(::slang::ast::LookupLocation::max);
+    }
+
+    inline static std::unique_ptr<::slang::ast::LookupLocation> LookupLocation_before(const ::slang::ast::Symbol& symbol) {
+        return std::make_unique<::slang::ast::LookupLocation>(::slang::ast::LookupLocation::before(symbol));
+    }
+
+    inline static std::unique_ptr<::slang::ast::LookupLocation> LookupLocation_after(const ::slang::ast::Symbol& symbol) {
+        return std::make_unique<::slang::ast::LookupLocation>(::slang::ast::LookupLocation::after(symbol));
+    }
+
+    // LookupResult wrappers
+    inline static std::unique_ptr<::slang::ast::LookupResult> LookupResult_new() {
+        return std::make_unique<::slang::ast::LookupResult>();
+    }
+
+    inline static const ::slang::ast::Symbol* LookupResult_found(const ::slang::ast::LookupResult& result) {
+        return result.found;
+    }
+
+    inline static bool LookupResult_hasError(const ::slang::ast::LookupResult& result) {
+        return result.hasError();
+    }
+
+    // Scope lookup wrappers
+    inline static const ::slang::ast::Symbol* Scope_lookupName(
+        const ::slang::ast::Scope& scope,
+        std::string_view name,
+        const ::slang::ast::LookupLocation& location
+    ) {
+        return scope.lookupName(name, location);
+    }
+
+    inline static const ::slang::ast::Symbol* Scope_find(
+        const ::slang::ast::Scope& scope,
+        std::string_view name
+    ) {
+        return scope.find(name);
+    }
+
+    // Type wrappers
+    inline static rust::String Type_toString(const ::slang::ast::Type& ty) {
+        return rust::String(ty.toString());
+    }
+
+    inline static uint16_t Type_kind(const ::slang::ast::Type& ty) {
+        return static_cast<uint16_t>(ty.kind);
+    }
+
+    // ValueSymbol wrappers
+    inline static const ::slang::ast::ValueSymbol* Symbol_asValueSymbol(const ::slang::ast::Symbol& symbol) {
+        return symbol.as_if<::slang::ast::ValueSymbol>();
+    }
+
+    inline static const ::slang::ast::DeclaredType* ValueSymbol_getType(const ::slang::ast::ValueSymbol& vs) {
+        return vs.getDeclaredType();
+    }
+
+    inline static const ::slang::ast::Type* DeclaredType_getType(const ::slang::ast::DeclaredType& dt) {
+        const ::slang::ast::Type& ty = dt.getType();
+        return &ty;
+    }
 
   }
+
+  // ConstantValue wrappers
+  inline static std::unique_ptr<SVInt> ConstantValue_integer(const ::slang::ConstantValue& cv) {
+      return std::make_unique<SVInt>(cv.integer());
+  }
+
+  inline static double ConstantValue_real(const ::slang::ConstantValue& cv) {
+      return cv.real();
+  }
+
+  inline static rust::String ConstantValue_str(const ::slang::ConstantValue& cv) {
+      return rust::String(std::string(cv.str()));
+  }
+
+  namespace ast {
+  inline static rust::Vec<std::unique_ptr<::slang::Diagnostic>> Compilation_get_all_diagnostics(Compilation& compilation) {
+      rust::Vec<std::unique_ptr<::slang::Diagnostic>> out;
+      const ::slang::Diagnostics& diags = compilation.getAllDiagnostics();
+      for (const auto& d : diags) {
+        out.push_back(std::make_unique<::slang::Diagnostic>(d));
+      }
+      return out;
+    }
   }
 
   namespace diagnostics {

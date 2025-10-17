@@ -3,6 +3,7 @@
 
 pub mod ast;
 mod ffi;
+pub mod ffi_ext;
 mod syntax;
 mod token;
 

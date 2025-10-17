@@ -25,6 +25,8 @@ cxx = "1.0.124"
 expect-test = "1.5.0"
 itertools = "0.13.0"
 smol_str = "0.3.1"
+text-size = "1.1.1"
+thiserror = "2.0.0"
 
 
 [build-dependencies]

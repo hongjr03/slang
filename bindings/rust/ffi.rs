@@ -161,6 +161,22 @@ mod slang_ffi {
 
     impl SharedPtr<SyntaxTree> {}
 
+    #[namespace = "slang"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/text/SourceManager.h");
+
+        type SourceManager;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getFileName(sm: &SourceManager, loc: &SourceLocation) -> String;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getLineNumber(sm: &SourceManager, loc: &SourceLocation) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getColumnNumber(sm: &SourceManager, loc: &SourceLocation) -> u32;
+    }
+
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
         include!("slang/include/slang/ast/Compilation.h");
@@ -169,14 +185,148 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Compilation_new() -> UniquePtr<Compilation>;
+        
         #[namespace = "wrapper::ast"]
         fn Compilation_add_syntax_tree(
             compilation: Pin<&mut Compilation>,
             tree: SharedPtr<SyntaxTree>,
         );
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_getSourceManager(comp: Pin<&mut Compilation>) -> *const SourceManager;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_getRoot(comp: Pin<&mut Compilation>) -> *const Symbol;
     }
 
     impl UniquePtr<Compilation> {}
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/ast/Symbol.h");
+        include!("slang/include/slang/ast/Scope.h");
+
+        type Symbol;
+        type Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_kind(symbol: &Symbol) -> u16;
+
+        fn getParentScope(self: &Symbol) -> *const Scope;
+
+        fn getSyntax(self: &Symbol) -> *const SyntaxNode;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_getNextSibling(symbol: &Symbol) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Scope_asSymbol(scope: &Scope) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Scope_getFirstMember(scope: &Scope) -> *const Symbol;
+    }
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/ast/Lookup.h");
+
+        type LookupLocation;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupLocation_max() -> UniquePtr<LookupLocation>;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupLocation_before(symbol: &Symbol) -> UniquePtr<LookupLocation>;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupLocation_after(symbol: &Symbol) -> UniquePtr<LookupLocation>;
+
+        type LookupResult;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupResult_new() -> UniquePtr<LookupResult>;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupResult_found(result: &LookupResult) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn LookupResult_hasError(result: &LookupResult) -> bool;
+    }
+
+    impl UniquePtr<LookupLocation> {}
+    impl UniquePtr<LookupResult> {}
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        #[namespace = "wrapper::ast"]
+        fn Scope_lookupName(
+            scope: &Scope,
+            name: CxxSV,
+            location: &LookupLocation,
+        ) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Scope_find(scope: &Scope, name: CxxSV) -> *const Symbol;
+    }
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/ast/types/Type.h");
+        include!("slang/include/slang/ast/types/DeclaredType.h");
+
+        type Type;
+        type DeclaredType;
+
+        fn isIntegral(self: &Type) -> bool;
+        fn isFloating(self: &Type) -> bool;
+        fn isNumeric(self: &Type) -> bool;
+        fn isAggregate(self: &Type) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_toString(ty: &Type) -> String;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_kind(ty: &Type) -> u16;
+
+        #[namespace = "wrapper::ast"]
+        fn DeclaredType_getType(dt: &DeclaredType) -> *const Type;
+    }
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/ast/symbols/ValueSymbol.h");
+
+        type ValueSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asValueSymbol(symbol: &Symbol) -> *const ValueSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn ValueSymbol_getType(vs: &ValueSymbol) -> *const DeclaredType;
+    }
+
+    #[namespace = "slang"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/numeric/ConstantValue.h");
+
+        type ConstantValue;
+
+        fn isInteger(self: &ConstantValue) -> bool;
+        fn isReal(self: &ConstantValue) -> bool;
+        fn isUnpacked(self: &ConstantValue) -> bool;
+        fn isString(self: &ConstantValue) -> bool;
+
+        #[namespace = "wrapper"]
+        fn ConstantValue_integer(cv: &ConstantValue) -> UniquePtr<SVInt>;
+
+        #[namespace = "wrapper"]
+        fn ConstantValue_real(cv: &ConstantValue) -> f64;
+
+        #[namespace = "wrapper"]
+        fn ConstantValue_str(cv: &ConstantValue) -> String;
+    }
+
+    impl UniquePtr<ConstantValue> {}
 
     #[namespace = "slang"]
     unsafe extern "C++" {
@@ -284,5 +434,80 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
+        fn getSourceManager(self_: Pin<&mut Compilation>) -> *const SourceManager |> Compilation_getSourceManager;
+        fn getRoot(self_: Pin<&mut Compilation>) -> *const Symbol |> Compilation_getRoot;
+    }
+}
+
+impl_functions! {
+    impl SourceManager {
+        fn getFileName(&self, loc: &SourceLocation) -> String |> SourceManager_getFileName;
+        fn getLineNumber(&self, loc: &SourceLocation) -> u32 |> SourceManager_getLineNumber;
+        fn getColumnNumber(&self, loc: &SourceLocation) -> u32 |> SourceManager_getColumnNumber;
+    }
+}
+
+impl_functions! {
+    impl Symbol {
+        fn kind(&self) -> u16 |> Symbol_kind;
+        fn getNextSibling(&self) -> *const Symbol |> Symbol_getNextSibling;
+    }
+}
+
+impl_functions! {
+    impl Scope {
+        fn asSymbol(&self) -> *const Symbol |> Scope_asSymbol;
+        fn getFirstMember(&self) -> *const Symbol |> Scope_getFirstMember;
+        fn lookupName(&self, name: CxxSV, location: &LookupLocation) -> *const Symbol |> Scope_lookupName;
+        fn find(&self, name: CxxSV) -> *const Symbol |> Scope_find;
+    }
+}
+
+impl_functions! {
+    impl LookupLocation {
+        fn max() -> UniquePtr<LookupLocation> |> LookupLocation_max;
+        fn before(symbol: &Symbol) -> UniquePtr<LookupLocation> |> LookupLocation_before;
+        fn after(symbol: &Symbol) -> UniquePtr<LookupLocation> |> LookupLocation_after;
+    }
+}
+
+impl_functions! {
+    impl LookupResult {
+        fn new() -> UniquePtr<LookupResult> |> LookupResult_new;
+        fn found(&self) -> *const Symbol |> LookupResult_found;
+        fn hasError(&self) -> bool |> LookupResult_hasError;
+    }
+}
+
+impl_functions! {
+    impl Type {
+        fn toString(&self) -> String |> Type_toString;
+        fn kind(&self) -> u16 |> Type_kind;
+    }
+}
+
+impl_functions! {
+    impl Symbol {
+        fn asValueSymbol(&self) -> *const ValueSymbol |> Symbol_asValueSymbol;
+    }
+}
+
+impl_functions! {
+    impl ValueSymbol {
+        fn getType(&self) -> *const DeclaredType |> ValueSymbol_getType;
+    }
+}
+
+impl_functions! {
+    impl DeclaredType {
+        fn getType(&self) -> *const Type |> DeclaredType_getType;
+    }
+}
+
+impl_functions! {
+    impl ConstantValue {
+        fn integer(&self) -> UniquePtr<SVInt> |> ConstantValue_integer;
+        fn real(&self) -> f64 |> ConstantValue_real;
+        fn str(&self) -> String |> ConstantValue_str;
     }
 }
