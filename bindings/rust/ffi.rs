@@ -3,11 +3,11 @@
 
 mod cxx_sv;
 
-use cxx::{SharedPtr, UniquePtr};
+pub use std::pin::Pin;
 
+use cxx::{SharedPtr, UniquePtr};
 pub use cxx_sv::CxxSV;
 pub use slang_ffi::*;
-pub use std::pin::Pin;
 
 #[cxx::bridge]
 mod slang_ffi {
@@ -185,7 +185,7 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Compilation_new() -> UniquePtr<Compilation>;
-        
+
         #[namespace = "wrapper::ast"]
         fn Compilation_add_syntax_tree(
             compilation: Pin<&mut Compilation>,
@@ -259,11 +259,8 @@ mod slang_ffi {
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
         #[namespace = "wrapper::ast"]
-        fn Scope_lookupName(
-            scope: &Scope,
-            name: CxxSV,
-            location: &LookupLocation,
-        ) -> *const Symbol;
+        fn Scope_lookupName(scope: &Scope, name: CxxSV, location: &LookupLocation)
+        -> *const Symbol;
 
         #[namespace = "wrapper::ast"]
         fn Scope_find(scope: &Scope, name: CxxSV) -> *const Symbol;

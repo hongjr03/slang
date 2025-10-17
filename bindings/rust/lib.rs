@@ -7,15 +7,16 @@ pub mod ffi_ext;
 mod syntax;
 mod token;
 
-use cxx::{SharedPtr, UniquePtr};
-pub use ffi::CxxSV;
-use itertools::{Either, Itertools};
 use std::{
     ffi::c_char,
     fmt, hash, iter,
     ops::{self, Not},
     pin::Pin,
 };
+
+use cxx::{SharedPtr, UniquePtr};
+pub use ffi::CxxSV;
+use itertools::{Either, Itertools};
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
     cursor::SyntaxCursor,
@@ -128,9 +129,7 @@ impl SourceLocation {
 
 impl fmt::Debug for SourceLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceLocation")
-            .field("offset", &self.offset())
-            .finish()
+        f.debug_struct("SourceLocation").field("offset", &self.offset()).finish()
     }
 }
 
@@ -236,8 +235,7 @@ impl SVInt {
 
     #[inline]
     pub fn get_single_word(&self) -> Option<u64> {
-        self.is_single_word()
-            .then(|| unsafe { *self._ptr.getRawPtr() })
+        self.is_single_word().then(|| unsafe { *self._ptr.getRawPtr() })
     }
 
     #[inline]
@@ -258,17 +256,13 @@ unsafe impl Sync for SVInt {}
 
 impl fmt::Debug for SVInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SVInt")
-            .field("to_string", &self.to_string())
-            .finish()
+        f.debug_struct("SVInt").field("to_string", &self.to_string()).finish()
     }
 }
 
 impl Clone for SVInt {
     fn clone(&self) -> Self {
-        SVInt {
-            _ptr: self._ptr.clone(),
-        }
+        SVInt { _ptr: self._ptr.clone() }
     }
 }
 
@@ -308,9 +302,7 @@ impl SyntaxTrivia<'_> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
         assert!(_ptr.is_null().not());
-        Some(SyntaxTrivia {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        Some(SyntaxTrivia { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -327,9 +319,7 @@ impl SyntaxTrivia<'_> {
 impl<'a> SyntaxToken<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxToken) -> Option<Self> {
-        _ptr.is_null().not().then(|| SyntaxToken {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        _ptr.is_null().not().then(|| SyntaxToken { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -359,25 +349,20 @@ impl<'a> SyntaxToken<'a> {
 
     #[inline]
     pub fn int(&self) -> Option<SVInt> {
-        matches!(self.kind(), TokenKind::INTEGER_LITERAL).then(|| SVInt {
-            _ptr: self._ptr.intValue(),
-        })
+        matches!(self.kind(), TokenKind::INTEGER_LITERAL)
+            .then(|| SVInt { _ptr: self._ptr.intValue() })
     }
 
     #[inline]
     pub fn bits(&self) -> Option<SVLogic> {
-        matches!(self.kind(), TokenKind::UNBASED_UNSIZED_LITERAL).then(|| SVLogic {
-            _ptr: self._ptr.bitValue(),
-        })
+        matches!(self.kind(), TokenKind::UNBASED_UNSIZED_LITERAL)
+            .then(|| SVLogic { _ptr: self._ptr.bitValue() })
     }
 
     #[inline]
     pub fn real(&self) -> Option<f64> {
-        matches!(
-            self.kind(),
-            TokenKind::REAL_LITERAL | TokenKind::TIME_LITERAL
-        )
-        .then(|| self._ptr.realValue())
+        matches!(self.kind(), TokenKind::REAL_LITERAL | TokenKind::TIME_LITERAL)
+            .then(|| self._ptr.realValue())
     }
 
     #[inline]
@@ -404,11 +389,7 @@ impl<'a> SyntaxToken<'a> {
 
     #[inline]
     pub fn trivias(&self) -> impl ChildrenIter<SyntaxTrivia<'a>> + use<'a> {
-        SyntaxTriviaIter {
-            tok: *self,
-            idx: 0,
-            total: self.trivia_count(),
-        }
+        SyntaxTriviaIter { tok: *self, idx: 0, total: self.trivia_count() }
     }
 
     #[inline]
@@ -492,9 +473,7 @@ impl<'a> ExactSizeIterator for SyntaxTriviaIter<'a> {
 impl<'a> SyntaxNode<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxNode) -> Option<Self> {
-        _ptr.is_null().not().then(|| SyntaxNode {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        _ptr.is_null().not().then(|| SyntaxNode { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -601,10 +580,7 @@ impl PartialEq for SyntaxNode<'_> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // Just compare pointer
-        std::ptr::eq(
-            Pin::as_ref(&self._ptr).get_ref(),
-            Pin::as_ref(&other._ptr).get_ref(),
-        )
+        std::ptr::eq(Pin::as_ref(&self._ptr).get_ref(), Pin::as_ref(&other._ptr).get_ref())
     }
 }
 
@@ -808,9 +784,7 @@ pub struct Compilation {
 
 impl Compilation {
     pub fn new() -> Self {
-        Compilation {
-            _ptr: ffi::Compilation::new(),
-        }
+        Compilation { _ptr: ffi::Compilation::new() }
     }
 
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {

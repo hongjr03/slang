@@ -16,13 +16,13 @@ pub type FfiResult<T> = Result<T, FfiError>;
 pub enum FfiError {
     #[error("Null pointer encountered")]
     NullPointer,
-    
+
     #[error("Invalid symbol kind: {0}")]
     InvalidSymbolKind(u16),
-    
+
     #[error("FFI call failed: {0}")]
     CallFailed(String),
-    
+
     #[error("Type mismatch")]
     TypeMismatch,
 }
@@ -41,13 +41,7 @@ macro_rules! safe_deref {
 /// 尝试安全解引用指针的宏
 #[macro_export]
 macro_rules! try_deref {
-    ($ptr:expr) => {{
-        if $ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { &*$ptr })
-        }
-    }};
+    ($ptr:expr) => {{ if $ptr.is_null() { None } else { Some(unsafe { &*$ptr }) } }};
 }
 
 /// SourceRange 扩展
@@ -58,10 +52,7 @@ pub trait SourceRangeExt {
 
 impl SourceRangeExt for SourceRange {
     fn to_text_range(&self) -> TextRange {
-        TextRange::new(
-            TextSize::from(self.start() as u32),
-            TextSize::from(self.end() as u32),
-        )
+        TextRange::new(TextSize::from(self.start() as u32), TextSize::from(self.end() as u32))
     }
 }
 
@@ -86,10 +77,7 @@ pub struct SymbolIterator<'a> {
 impl<'a> SymbolIterator<'a> {
     /// 创建新的符号迭代器
     pub fn new(first: *const Symbol) -> Self {
-        Self {
-            current: first,
-            _phantom: PhantomData,
-        }
+        Self { current: first, _phantom: PhantomData }
     }
 }
 
@@ -100,7 +88,7 @@ impl<'a> Iterator for SymbolIterator<'a> {
         if self.current.is_null() {
             return None;
         }
-        
+
         unsafe {
             let symbol = &*self.current;
             self.current = symbol.getNextSibling();
@@ -113,7 +101,7 @@ impl<'a> Iterator for SymbolIterator<'a> {
 pub trait ScopeExt {
     /// 迭代所有成员
     fn members(&self) -> SymbolIterator<'_>;
-    
+
     /// 迭代指定类型的成员
     fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol>;
 }
@@ -122,7 +110,7 @@ impl ScopeExt for crate::ffi::Scope {
     fn members(&self) -> SymbolIterator<'_> {
         SymbolIterator::new(self.getFirstMember())
     }
-    
+
     fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol> {
         self.members().filter(move |sym| sym.kind() == kind)
     }
