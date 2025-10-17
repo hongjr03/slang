@@ -11,6 +11,7 @@
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
+#include "slang/diagnostics/Diagnostics.h"
 #include "rust/cxx.h"
 
 namespace wrapper {
@@ -139,14 +140,20 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-    inline static rust::Vec<std::unique_ptr<Diagnositc>> Compilation_get_all_diagnostics(const Compilation& compilation) {
-
+  inline static rust::Vec<std::unique_ptr<::slang::Diagnostic>> Compilation_get_all_diagnostics(Compilation& compilation) {
+    rust::Vec<std::unique_ptr<::slang::Diagnostic>> out;
+    const ::slang::Diagnostics& diags = compilation.getAllDiagnostics();
+    for (const auto& d : diags) {
+      out.push_back(std::make_unique<::slang::Diagnostic>(d));
     }
+    return out;
+
+  }
   }
 
   namespace diagnostics {
-    inline static uint16_t code(const Diagnostic& diag) {
-        return diag.code.getCode();
-    }
+  inline static uint16_t code(const ::slang::Diagnostic& diag) {
+    return diag.code.getCode();
+  }
   }
 }

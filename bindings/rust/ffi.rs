@@ -178,11 +178,11 @@ mod slang_ffi {
 
     impl UniquePtr<Compilation> {}
 
-    #[namespace = "slang::diagnostics"]
+    #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/include/diagnostics/Diagnositcs.h");
+        include!("slang/diagnostics/Diagnostics.h");
 
-        type Diagnositc;
+        type Diagnostic;
     }
 
     // StringView
