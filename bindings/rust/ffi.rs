@@ -271,6 +271,7 @@ mod slang_ffi {
         type SubroutineSymbol;
         type FormalArgumentSymbol;
         type ValueSymbol;
+        type VariableSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Symbol_kind(symbol: &Symbol) -> u16;
@@ -284,6 +285,21 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Symbol_getNextSibling(symbol: &Symbol) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_isType(symbol: &Symbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_isValue(symbol: &Symbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asType(symbol: &Symbol) -> *const Type;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_getDeclaredType(symbol: &Symbol) -> *const DeclaredType;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asScope(symbol: &Symbol) -> *const Scope;
 
         #[namespace = "wrapper::ast"]
         fn Scope_asSymbol(scope: &Scope) -> *const Symbol;
@@ -304,6 +320,9 @@ mod slang_ffi {
         fn Symbol_asFormalArgumentSymbol(symbol: &Symbol) -> *const FormalArgumentSymbol;
 
         #[namespace = "wrapper::ast"]
+        fn Symbol_asVariableSymbol(symbol: &Symbol) -> *const VariableSymbol;
+
+        #[namespace = "wrapper::ast"]
         fn ParameterSymbol_asValueSymbol(symbol: &ParameterSymbol) -> *const ValueSymbol;
 
         #[namespace = "wrapper::ast"]
@@ -311,6 +330,9 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn ParameterSymbol_isPortParam(symbol: &ParameterSymbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn ParameterSymbol_getValue(symbol: &ParameterSymbol) -> *const ConstantValue;
 
         #[namespace = "wrapper::ast"]
         fn FieldSymbol_asValueSymbol(symbol: &FieldSymbol) -> *const ValueSymbol;
@@ -323,6 +345,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn FieldSymbol_randMode(symbol: &FieldSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn VariableSymbol_lifetime(symbol: &VariableSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn VariableSymbol_flags(symbol: &VariableSymbol) -> u16;
 
         #[namespace = "wrapper::ast"]
         fn SubroutineSymbol_asSymbol(symbol: &SubroutineSymbol) -> *const Symbol;
@@ -404,6 +432,14 @@ mod slang_ffi {
         -> *const Symbol;
 
         #[namespace = "wrapper::ast"]
+        unsafe fn Scope_lookupNameWithFlags(
+            scope: &Scope,
+            name: CxxSV,
+            location: *const LookupLocation,
+            flags: u32,
+        ) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
         fn Scope_find(scope: &Scope, name: CxxSV) -> *const Symbol;
 
         #[namespace = "wrapper::ast"]
@@ -427,6 +463,16 @@ mod slang_ffi {
         fn isFloating(self: &Type) -> bool;
         fn isNumeric(self: &Type) -> bool;
         fn isAggregate(self: &Type) -> bool;
+        fn isSigned(self: &Type) -> bool;
+        fn isFourState(self: &Type) -> bool;
+        fn isArray(self: &Type) -> bool;
+        fn isStruct(self: &Type) -> bool;
+        fn isString(self: &Type) -> bool;
+        fn isNull(self: &Type) -> bool;
+        fn hasFixedRange(self: &Type) -> bool;
+        fn getBitWidth(self: &Type) -> u32;
+        fn getBitstreamWidth(self: &Type) -> u64;
+        fn getSelectableWidth(self: &Type) -> u64;
 
         #[namespace = "wrapper::ast"]
         fn Type_toString(ty: &Type) -> String;
@@ -442,6 +488,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn DeclaredType_getType(dt: &DeclaredType) -> *const Type;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_getDefaultValue(ty: &Type) -> UniquePtr<ConstantValue>;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_getIntegralFlags(ty: &Type) -> u8;
     }
 
     #[namespace = "slang::ast"]
@@ -453,6 +505,39 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn ValueSymbol_getType(vs: &ValueSymbol) -> *const DeclaredType;
+    }
+
+    #[namespace = "slang"]
+    unsafe extern "C++" {
+        include!("slang/include/slang/numeric/ConstantValue.h");
+
+        type ConstantValue;
+
+        fn isInteger(self: &ConstantValue) -> bool;
+        fn isReal(self: &ConstantValue) -> bool;
+        fn isShortReal(self: &ConstantValue) -> bool;
+        fn isString(self: &ConstantValue) -> bool;
+        fn isNullHandle(self: &ConstantValue) -> bool;
+        fn isUnbounded(self: &ConstantValue) -> bool;
+        fn isUnpacked(self: &ConstantValue) -> bool;
+        fn isQueue(self: &ConstantValue) -> bool;
+        fn isMap(self: &ConstantValue) -> bool;
+        fn hasUnknown(self: &ConstantValue) -> bool;
+        fn isTrue(self: &ConstantValue) -> bool;
+        fn isFalse(self: &ConstantValue) -> bool;
+        fn size(self: &ConstantValue) -> usize;
+        fn empty(self: &ConstantValue) -> bool;
+    }
+
+    #[namespace = "wrapper::numeric"]
+    unsafe extern "C++" {
+        fn ConstantValue_isValid(value: &ConstantValue) -> bool;
+        fn ConstantValue_integer(value: &ConstantValue) -> UniquePtr<SVInt>;
+        fn ConstantValue_str(value: &ConstantValue) -> String;
+        fn ConstantValue_real(value: &ConstantValue) -> f64;
+        fn ConstantValue_shortReal(value: &ConstantValue) -> f32;
+        fn ConstantValue_toString(value: &ConstantValue, exact_unknowns: bool) -> String;
+        fn ConstantValue_clone(value: &ConstantValue) -> UniquePtr<ConstantValue>;
     }
 
     #[namespace = "slang"]
@@ -585,6 +670,11 @@ impl_functions! {
     impl Symbol {
         fn kind(&self) -> u16 |> Symbol_kind;
         fn getNextSibling(&self) -> *const Symbol |> Symbol_getNextSibling;
+        fn isType(&self) -> bool |> Symbol_isType;
+        fn isValue(&self) -> bool |> Symbol_isValue;
+        fn asType(&self) -> *const Type |> Symbol_asType;
+        fn getDeclaredType(&self) -> *const DeclaredType |> Symbol_getDeclaredType;
+        fn asScope(&self) -> *const Scope |> Symbol_asScope;
     }
 }
 

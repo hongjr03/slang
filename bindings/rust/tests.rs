@@ -544,6 +544,8 @@ fn scope_visible_symbols_collected() {
         .collect();
 
     for expected in [SmolStr::new("bar"), SmolStr::new("baz")] {
+        let sym = scope.lookup_name(expected.as_str(), None).expect("visible symbol");
+        assert!(sym.is_value(), "{} should be value", expected);
         assert!(names.contains(&expected), "missing symbol {expected}");
     }
 }
@@ -580,17 +582,87 @@ endpackage
         .collect();
 
     for expected in [SmolStr::new("imported_var"), SmolStr::new("own_var")] {
+        let sym = scope.lookup_name(expected.as_str(), None).expect("value symbol");
+        assert!(sym.is_value(), "{} should be value", expected);
         assert!(names.contains(&expected), "missing symbol {expected}");
     }
 
-    let type_names: std::collections::HashSet<_> = scope
-        .visible_symbols_with(scope, None, LookupFlags::TYPE)
-        .expect("type symbols")
-        .into_iter()
-        .map(|sym| sym.name())
-        .collect();
+    let type_symbols =
+        scope.visible_symbols_with(scope, None, LookupFlags::TYPE).expect("type symbols");
+    let type_names: std::collections::HashSet<_> =
+        type_symbols.iter().map(|sym| sym.name()).collect();
 
     assert!(type_names.contains(&SmolStr::new("imported_typedef")), "missing imported type");
+    let imported_type = type_symbols
+        .iter()
+        .copied()
+        .find(|sym| sym.name() == SmolStr::new("imported_typedef"))
+        .expect("imported typedef symbol");
+    assert!(imported_type.is_type(), "imported_typedef should be type");
+    assert!(imported_type.as_type().is_some(), "imported_typedef should cast to type");
+}
+
+#[test]
+fn scope_lookup_hierarchy() {
+    let tree = SyntaxTree::from_text(
+        r#"
+module leaf;
+  int value;
+endmodule
+
+module mid;
+  leaf u_leaf();
+endmodule
+
+module top;
+  mid u_mid();
+endmodule
+"#,
+        "hierarchy",
+        "",
+    );
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let root = compilation.root().expect("root symbol");
+    let root_scope = root.as_scope();
+
+    let leaf_instance = root_scope.lookup_hierarchy("top.u_mid.u_leaf").expect("leaf instance");
+    assert_eq!(leaf_instance.name(), SmolStr::new("u_leaf"));
+}
+
+macro_rules! lookup_symbol {
+    ($scope:expr, $path:expr, $desc:expr,as_variable) => {
+        $scope.lookup_hierarchy($path).expect($desc).as_variable().expect("variable symbol")
+    };
+    ($scope:expr, $path:expr, $desc:expr,as_type) => {
+        $scope.lookup_hierarchy($path).expect($desc).as_type().expect("type symbol")
+    };
+    ($scope:expr, $path:expr, $desc:expr,as_subroutine) => {
+        $scope.lookup_hierarchy($path).expect($desc).as_subroutine().expect("subroutine symbol")
+    };
+    ($scope:expr, $path:expr, $desc:expr,as_value_symbol) => {
+        $scope.lookup_hierarchy($path).expect($desc).as_value_symbol().expect("value symbol")
+    };
+}
+
+macro_rules! assert_var_lifetime {
+    ($scope:expr, $path:expr, $expected_lifetime:expr, $desc:expr) => {
+        let var = lookup_symbol!($scope, $path, $desc, as_variable);
+        assert_eq!(var.lifetime(), $expected_lifetime, "lifetime mismatch for {}", $desc);
+    };
+}
+
+macro_rules! assert_var_flags {
+    ($scope:expr, $path:expr, $flag:expr, $has_flag:expr, $desc:expr) => {
+        let var = lookup_symbol!($scope, $path, $desc, as_variable);
+        if $has_flag {
+            assert!(var.flags().contains($flag), "flag should be set for {}", $desc);
+        } else {
+            assert!(!var.flags().contains($flag), "flag should not be set for {}", $desc);
+        }
+    };
 }
 
 #[test]
@@ -619,14 +691,26 @@ endpackage
     let scope = package.scope().expect("package scope");
 
     let lp_symbol = scope.lookup_name("LP", None).expect("parameter symbol");
+    assert!(lp_symbol.is_value());
+    assert!(lp_symbol.ty().is_some());
     let parameter = lp_symbol.as_parameter().expect("parameter wrapper");
     assert!(parameter.is_local());
     assert!(!parameter.is_port());
+    let param_value = parameter.value().expect("parameter value");
+    assert!(param_value.is_valid());
+    assert_eq!(param_value.to_string(false), "42");
+    let param_svint = param_value.as_svint().expect("parameter as svint");
+    assert_eq!(param_svint.to_string(), "42");
     let _param_type = parameter
         .declared_type()
         .expect("parameter declared type")
         .and_then(|dt| dt.ty())
         .expect("parameter type");
+
+    let typedef_symbol = scope.lookup_name("st_t", None).expect("typedef symbol");
+    assert!(typedef_symbol.is_type());
+    let typedef_type = typedef_symbol.as_type().expect("typedef type");
+    assert!(typedef_type.to_string().contains("struct"));
     let inst_symbol = scope.lookup_name("inst", None).expect("instance symbol");
     let inst_value = inst_symbol.as_value_symbol().expect("value symbol");
     let ty = inst_value.ty().expect("instance type");
@@ -641,9 +725,21 @@ endpackage
         .and_then(|dt| dt.ty())
         .expect("field type");
     assert_eq!(field_type.to_string(), "int");
+    assert_eq!(field_type.bit_width(), Some(32));
+    assert!(field_type.is_signed());
+    assert!(field_type
+        .integral_flags()
+        .contains(IntegralFlags::SIGNED));
+    let default_value = field_type.default_value().expect("default value");
+    assert!(default_value.is_valid());
+    assert!(default_value.is_integer());
+    assert_eq!(
+        default_value.as_svint().expect("default as svint").to_string(),
+        "0"
+    );
 
     let add_symbol = scope.lookup_name("add", None).expect("function symbol");
-    let subroutine = add_symbol.as_subroutine().expect("subroutine");
+    let subroutine = lookup_symbol!(scope, "add", "function symbol", as_subroutine);
     assert_eq!(subroutine.kind(), Some(SubroutineKind::Function));
     assert_eq!(subroutine.visibility(), Some(Visibility::Public));
     assert_eq!(subroutine.return_type().expect("return type").to_string(), "int");

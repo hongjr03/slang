@@ -288,6 +288,27 @@ inline static const ::slang::ast::Symbol* Symbol_getNextSibling(
     return symbol.getNextSibling();
 }
 
+inline static bool Symbol_isType(const ::slang::ast::Symbol& symbol) {
+    return symbol.isType();
+}
+
+inline static bool Symbol_isValue(const ::slang::ast::Symbol& symbol) {
+    return symbol.isValue();
+}
+
+inline static const ::slang::ast::Type* Symbol_asType(const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::Type>();
+}
+
+inline static const ::slang::ast::DeclaredType* Symbol_getDeclaredType(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.getDeclaredType();
+}
+
+inline static const ::slang::ast::Scope* Symbol_asScope(const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::Scope>();
+}
+
 // Scope wrappers
 inline static const ::slang::ast::Symbol* Scope_asSymbol(const ::slang::ast::Scope& scope) {
     const ::slang::ast::Symbol& sym = scope.asSymbol();
@@ -320,6 +341,11 @@ inline static const ::slang::ast::SubroutineSymbol* Symbol_asSubroutineSymbol(
 inline static const ::slang::ast::FormalArgumentSymbol* Symbol_asFormalArgumentSymbol(
     const ::slang::ast::Symbol& symbol) {
     return symbol.as_if<::slang::ast::FormalArgumentSymbol>();
+}
+
+inline static const ::slang::ast::VariableSymbol* Symbol_asVariableSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::VariableSymbol>();
 }
 
 // LookupLocation wrappers
@@ -358,6 +384,24 @@ inline static const ::slang::ast::Symbol* Scope_lookupName(
     const ::slang::ast::Scope& scope, std::string_view name,
     const ::slang::ast::LookupLocation& location) {
     return scope.lookupName(name, location);
+}
+
+inline static const ::slang::ast::Symbol* Scope_lookupNameWithFlags(
+    const ::slang::ast::Scope& scope, std::string_view name,
+    const ::slang::ast::LookupLocation* location, uint32_t rawFlags) {
+    auto flags = slang::bitmask<::slang::ast::LookupFlags>(
+        static_cast<::slang::ast::LookupFlags>(rawFlags));
+    if (!location)
+        return scope.lookupName(name, ::slang::ast::LookupLocation::max, flags);
+    return scope.lookupName(name, *location, flags);
+}
+
+inline static uint8_t VariableSymbol_lifetime(const ::slang::ast::VariableSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.lifetime);
+}
+
+inline static uint16_t VariableSymbol_flags(const ::slang::ast::VariableSymbol& symbol) {
+    return static_cast<uint16_t>(symbol.flags.bits());
 }
 
 inline static const ::slang::ast::Symbol* Scope_find(const ::slang::ast::Scope& scope,
@@ -463,6 +507,11 @@ inline static bool ParameterSymbol_isLocalParam(const ::slang::ast::ParameterSym
 
 inline static bool ParameterSymbol_isPortParam(const ::slang::ast::ParameterSymbol& symbol) {
     return symbol.isPortParam();
+}
+
+inline static const ::slang::ConstantValue* ParameterSymbol_getValue(
+    const ::slang::ast::ParameterSymbol& symbol) {
+    return &symbol.getValue();
 }
 
 inline static const ::slang::ast::ValueSymbol* FieldSymbol_asValueSymbol(
@@ -585,6 +634,16 @@ inline static const ::slang::ast::FieldSymbol* Type_getField(const ::slang::ast:
     }
 }
 
+inline static std::unique_ptr<::slang::ConstantValue> Type_getDefaultValue(
+    const ::slang::ast::Type& type) {
+    return std::make_unique<::slang::ConstantValue>(type.getDefaultValue());
+}
+
+inline static uint8_t Type_getIntegralFlags(const ::slang::ast::Type& type) {
+    auto flags = type.getIntegralFlags();
+    return static_cast<uint8_t>(flags.bits());
+}
+
 inline static bool Lookup_isVisibleFrom(const ::slang::ast::Symbol& symbol,
                                         const ::slang::ast::Scope& scope) {
     return ::slang::ast::Lookup::isVisibleFrom(symbol, scope);
@@ -617,7 +676,48 @@ inline static const ::slang::ast::Type* DeclaredType_getType(const ::slang::ast:
 
 } // namespace ast
 
-// ConstantValue wrappers
+namespace numeric {
+inline static bool ConstantValue_isValid(const ::slang::ConstantValue& value) {
+    return static_cast<bool>(value);
+}
+
+inline static std::unique_ptr<::slang::SVInt> ConstantValue_integer(
+    const ::slang::ConstantValue& value) {
+    if (!value.isInteger())
+        return nullptr;
+    return std::make_unique<::slang::SVInt>(value.integer());
+}
+
+inline static rust::String ConstantValue_str(const ::slang::ConstantValue& value) {
+    if (!value.isString())
+        return rust::String();
+    return rust::String(value.str());
+}
+
+inline static double ConstantValue_real(const ::slang::ConstantValue& value) {
+    if (!value.isReal())
+        return 0.0;
+    return static_cast<double>(value.real());
+}
+
+inline static float ConstantValue_shortReal(const ::slang::ConstantValue& value) {
+    if (!value.isShortReal())
+        return 0.0f;
+    return static_cast<float>(value.shortReal());
+}
+
+inline static rust::String ConstantValue_toString(const ::slang::ConstantValue& value,
+                                                  bool exact_unknowns) {
+    return rust::String(value.toString(
+        ::slang::SVInt::DefaultStringAbbreviationThresholdBits, exact_unknowns, false));
+}
+
+inline static std::unique_ptr<::slang::ConstantValue> ConstantValue_clone(
+    const ::slang::ConstantValue& value) {
+    return std::make_unique<::slang::ConstantValue>(value);
+}
+} // namespace numeric
+
 namespace ast {
 inline static rust::Vec<std::unique_ptr<::slang::Diagnostic>> Compilation_get_all_diagnostics(
     Compilation& compilation) {

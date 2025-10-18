@@ -44,6 +44,15 @@ pub struct SVLogic {
     _ptr: UniquePtr<ffi::SVLogic>,
 }
 
+pub struct ConstantValue {
+    ptr: UniquePtr<ffi::ConstantValue>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ConstantValueRef<'a> {
+    ptr: &'a ffi::ConstantValue,
+}
+
 pub struct SourceLocation {
     _ptr: UniquePtr<ffi::SourceLocation>,
 }
@@ -240,6 +249,8 @@ impl LookupFlags {
     pub const ALWAYS_ALLOW_UPWARD: LookupFlags = LookupFlags(1 << 13);
     pub const DISALLOW_UNIT_REFERENCES: LookupFlags = LookupFlags(1 << 14);
     pub const DISALLOW_WILDCARD_IMPORT: LookupFlags = LookupFlags(1 << 2);
+    pub const FORCE_HIERARCHICAL: LookupFlags =
+        LookupFlags(Self::ALLOW_DECLARED_AFTER.0 | Self::NO_UNDECLARED_ERROR_IF_UNINSTANTIATED.0);
     pub const IFACE_PORT_CONN: LookupFlags = LookupFlags(1 << 10);
     pub const NONE: LookupFlags = LookupFlags(0);
     pub const NO_PARENT_SCOPE: LookupFlags = LookupFlags(1 << 6);
@@ -307,8 +318,43 @@ impl<'a> SymbolRef<'a> {
     }
 
     #[inline]
+    pub fn is_type(self) -> bool {
+        self.ptr.isType()
+    }
+
+    #[inline]
+    pub fn is_value(self) -> bool {
+        self.ptr.isValue()
+    }
+
+    #[inline]
+    pub fn as_type(self) -> Option<TypeRef<'a>> {
+        unsafe { self.ptr.asType().as_ref() }.map(TypeRef::new)
+    }
+
+    #[inline]
+    pub fn declared_type(self) -> Option<DeclaredTypeRef<'a>> {
+        unsafe { self.ptr.getDeclaredType().as_ref() }.map(DeclaredTypeRef::new)
+    }
+
+    #[inline]
+    pub fn ty(self) -> Option<TypeRef<'a>> {
+        self.declared_type().and_then(|dt| dt.ty())
+    }
+
+    #[inline]
+    pub fn as_scope(self) -> Option<ScopeRef<'a>> {
+        unsafe { self.ptr.asScope().as_ref() }.map(ScopeRef::new)
+    }
+
+    #[inline]
     pub fn as_value_symbol(self) -> Option<ValueSymbolRef<'a>> {
         unsafe { ffi::Symbol_asValueSymbol(self.ptr).as_ref() }.map(ValueSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_variable(self) -> Option<VariableSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asVariableSymbol(self.ptr).as_ref() }.map(VariableSymbolRef::new)
     }
 
     #[inline]
@@ -374,6 +420,75 @@ impl Visibility {
             2 => Some(Visibility::Local),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableLifetime {
+    Automatic,
+    Static,
+}
+
+impl VariableLifetime {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(VariableLifetime::Automatic),
+            1 => Some(VariableLifetime::Static),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VariableFlags(u16);
+
+impl VariableFlags {
+    pub const CHECKER_FREE_VARIABLE: VariableFlags = VariableFlags(1 << 4);
+    pub const COMPILER_GENERATED: VariableFlags = VariableFlags(1 << 1);
+    pub const CONST: VariableFlags = VariableFlags(1 << 0);
+    pub const COVERAGE_SAMPLE_FORMAL: VariableFlags = VariableFlags(1 << 3);
+    pub const IMMUTABLE_COVERAGE_OPTION: VariableFlags = VariableFlags(1 << 2);
+    pub const NONE: VariableFlags = VariableFlags(0);
+    pub const REF_STATIC: VariableFlags = VariableFlags(1 << 5);
+
+    #[inline]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn from_bits(bits: u16) -> VariableFlags {
+        VariableFlags(bits)
+    }
+
+    #[inline]
+    pub const fn contains(self, other: VariableFlags) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntegralFlags(u8);
+
+impl IntegralFlags {
+    pub const NONE: IntegralFlags = IntegralFlags(0);
+    pub const SIGNED: IntegralFlags = IntegralFlags(1 << 0);
+    pub const FOUR_STATE: IntegralFlags = IntegralFlags(1 << 1);
+    pub const REG: IntegralFlags = IntegralFlags(1 << 2);
+
+    #[inline]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        IntegralFlags(bits)
+    }
+
+    #[inline]
+    pub const fn contains(self, other: IntegralFlags) -> bool {
+        (self.0 & other.0) == other.0
     }
 }
 
@@ -463,6 +578,89 @@ impl<'a> TypeRef<'a> {
         }
         Ok(fields)
     }
+
+    #[inline]
+    pub fn is_integral(self) -> bool {
+        self.ptr.isIntegral()
+    }
+
+    #[inline]
+    pub fn is_floating(self) -> bool {
+        self.ptr.isFloating()
+    }
+
+    #[inline]
+    pub fn is_numeric(self) -> bool {
+        self.ptr.isNumeric()
+    }
+
+    #[inline]
+    pub fn is_aggregate(self) -> bool {
+        self.ptr.isAggregate()
+    }
+
+    #[inline]
+    pub fn is_signed(self) -> bool {
+        self.ptr.isSigned()
+    }
+
+    #[inline]
+    pub fn is_four_state(self) -> bool {
+        self.ptr.isFourState()
+    }
+
+    #[inline]
+    pub fn is_array(self) -> bool {
+        self.ptr.isArray()
+    }
+
+    #[inline]
+    pub fn is_struct(self) -> bool {
+        self.ptr.isStruct()
+    }
+
+    #[inline]
+    pub fn is_string(self) -> bool {
+        self.ptr.isString()
+    }
+
+    #[inline]
+    pub fn is_null(self) -> bool {
+        self.ptr.isNull()
+    }
+
+    #[inline]
+    pub fn has_fixed_range(self) -> bool {
+        self.ptr.hasFixedRange()
+    }
+
+    #[inline]
+    pub fn bit_width(self) -> Option<usize> {
+        let width = self.ptr.getBitWidth() as usize;
+        (width != 0).then_some(width)
+    }
+
+    #[inline]
+    pub fn bitstream_width(self) -> Option<u64> {
+        let width = self.ptr.getBitstreamWidth();
+        (width != 0).then_some(width)
+    }
+
+    #[inline]
+    pub fn selectable_width(self) -> Option<u64> {
+        let width = self.ptr.getSelectableWidth();
+        (width != 0).then_some(width)
+    }
+
+    #[inline]
+    pub fn integral_flags(self) -> IntegralFlags {
+        IntegralFlags::from_bits(ffi::Type_getIntegralFlags(self.ptr))
+    }
+
+    #[inline]
+    pub fn default_value(self) -> Option<ConstantValue> {
+        ConstantValue::from_unique(ffi::Type_getDefaultValue(self.ptr))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -488,6 +686,37 @@ impl<'a> ValueSymbolRef<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct VariableSymbolRef<'a> {
+    ptr: &'a ffi::VariableSymbol,
+}
+
+impl<'a> VariableSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::VariableSymbol) -> Self {
+        VariableSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn value_symbol(self) -> ValueSymbolRef<'a> {
+        // VariableSymbol inherits from ValueSymbol so this cast is safe.
+        let ptr = self.ptr as *const ffi::VariableSymbol as *const ffi::ValueSymbol;
+        // SAFETY: ptr is valid due to inheritance.
+        let value = unsafe { &*ptr };
+        ValueSymbolRef::new(value)
+    }
+
+    #[inline]
+    pub fn lifetime(self) -> Option<VariableLifetime> {
+        VariableLifetime::from_raw(ffi::VariableSymbol_lifetime(self.ptr))
+    }
+
+    #[inline]
+    pub fn flags(self) -> VariableFlags {
+        VariableFlags::from_bits(ffi::VariableSymbol_flags(self.ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct ParameterSymbolRef<'a> {
     ptr: &'a ffi::ParameterSymbol,
 }
@@ -507,6 +736,12 @@ impl<'a> ParameterSymbolRef<'a> {
     #[inline]
     pub fn declared_type(self) -> FfiResult<Option<DeclaredTypeRef<'a>>> {
         Ok(self.value_symbol()?.declared_type())
+    }
+
+    #[inline]
+    pub fn value(self) -> FfiResult<ConstantValueRef<'a>> {
+        let ptr = require_ptr(ffi::ParameterSymbol_getValue(self.ptr))?;
+        Ok(ConstantValueRef::new(ptr))
     }
 
     #[inline]
@@ -674,14 +909,26 @@ impl<'a> ScopeRef<'a> {
         name: &str,
         location: Option<&LookupLocation>,
     ) -> Option<SymbolRef<'a>> {
-        if let Some(loc) = location {
-            let loc_ref = loc.as_ref()?;
-            unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
-        } else {
-            let fallback = LookupLocation::max();
-            let loc_ref = fallback.as_ref()?;
-            unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
-        }
+        self.lookup_name_with_flags(name, location, LookupFlags::NONE)
+    }
+
+    pub fn lookup_name_with_flags(
+        self,
+        name: &str,
+        location: Option<&LookupLocation>,
+        flags: LookupFlags,
+    ) -> Option<SymbolRef<'a>> {
+        let loc_raw = location
+            .and_then(|loc| loc.as_ref())
+            .map_or(std::ptr::null(), |ptr| ptr as *const ffi::LookupLocation);
+        let symbol = unsafe {
+            ffi::Scope_lookupNameWithFlags(self.ptr, CxxSV::new(name), loc_raw, flags.bits())
+        };
+        unsafe { symbol.as_ref() }.map(SymbolRef::new)
+    }
+
+    pub fn lookup_hierarchy(self, path: &str) -> Option<SymbolRef<'a>> {
+        self.lookup_name_with_flags(path, None, LookupFlags::FORCE_HIERARCHICAL)
     }
 
     #[inline]
@@ -900,6 +1147,11 @@ impl SVLogic {
 
 impl SVInt {
     #[inline]
+    pub(crate) fn from_unique_ptr(ptr: UniquePtr<ffi::SVInt>) -> Option<Self> {
+        ptr.is_null().not().then(|| SVInt { _ptr: ptr })
+    }
+
+    #[inline]
     pub fn is_signed(&self) -> bool {
         self._ptr.isSigned()
     }
@@ -972,6 +1224,216 @@ impl hash::Hash for SVInt {
 impl ToString for SVInt {
     fn to_string(&self) -> String {
         self._ptr.toString(10)
+    }
+}
+
+impl<'a> ConstantValueRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::ConstantValue) -> Self {
+        ConstantValueRef { ptr }
+    }
+
+    #[inline]
+    pub fn is_valid(self) -> bool {
+        ffi::ConstantValue_isValid(self.ptr)
+    }
+
+    #[inline]
+    pub fn is_integer(self) -> bool {
+        self.ptr.isInteger()
+    }
+
+    #[inline]
+    pub fn is_real(self) -> bool {
+        self.ptr.isReal()
+    }
+
+    #[inline]
+    pub fn is_short_real(self) -> bool {
+        self.ptr.isShortReal()
+    }
+
+    #[inline]
+    pub fn is_string(self) -> bool {
+        self.ptr.isString()
+    }
+
+    #[inline]
+    pub fn is_null(self) -> bool {
+        self.ptr.isNullHandle()
+    }
+
+    #[inline]
+    pub fn is_unbounded(self) -> bool {
+        self.ptr.isUnbounded()
+    }
+
+    #[inline]
+    pub fn has_unknown(self) -> bool {
+        self.ptr.hasUnknown()
+    }
+
+    #[inline]
+    pub fn is_true(self) -> bool {
+        self.ptr.isTrue()
+    }
+
+    #[inline]
+    pub fn is_false(self) -> bool {
+        self.ptr.isFalse()
+    }
+
+    #[inline]
+    pub fn len(self) -> usize {
+        self.ptr.size()
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.ptr.empty()
+    }
+
+    #[inline]
+    pub fn as_svint(self) -> Option<SVInt> {
+        SVInt::from_unique_ptr(ffi::ConstantValue_integer(self.ptr))
+    }
+
+    #[inline]
+    pub fn as_real(self) -> Option<f64> {
+        self.is_real().then(|| ffi::ConstantValue_real(self.ptr))
+    }
+
+    #[inline]
+    pub fn as_short_real(self) -> Option<f32> {
+        self.is_short_real().then(|| ffi::ConstantValue_shortReal(self.ptr))
+    }
+
+    #[inline]
+    pub fn as_string(self) -> Option<String> {
+        self.is_string().then(|| ffi::ConstantValue_str(self.ptr))
+    }
+
+    #[inline]
+    pub fn to_string(self, exact_unknowns: bool) -> String {
+        ffi::ConstantValue_toString(self.ptr, exact_unknowns)
+    }
+
+    #[inline]
+    pub fn to_owned(self) -> ConstantValue {
+        ConstantValue::from_unique(ffi::ConstantValue_clone(self.ptr)).expect("clone constant")
+    }
+}
+
+impl ConstantValue {
+    #[inline]
+    pub(crate) fn from_unique(ptr: UniquePtr<ffi::ConstantValue>) -> Option<Self> {
+        ptr.is_null().not().then(|| ConstantValue { ptr })
+    }
+
+    #[inline]
+    fn as_ref(&self) -> Option<ConstantValueRef<'_>> {
+        self.ptr.as_ref().map(ConstantValueRef::new)
+    }
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_valid()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_integer(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_integer()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_real(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_real()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_short_real(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_short_real()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_string(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_string()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_null()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn is_unbounded(&self) -> bool {
+        self.as_ref().map(|cv| cv.is_unbounded()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn has_unknown(&self) -> bool {
+        self.as_ref().map(|cv| cv.has_unknown()).unwrap_or(false)
+    }
+
+    #[inline]
+    pub fn len(&self) -> Option<usize> {
+        self.as_ref().map(|cv| cv.len())
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> Option<bool> {
+        self.as_ref().map(|cv| cv.is_empty())
+    }
+
+    #[inline]
+    pub fn as_svint(&self) -> Option<SVInt> {
+        self.as_ref().and_then(|cv| cv.as_svint())
+    }
+
+    #[inline]
+    pub fn as_real(&self) -> Option<f64> {
+        self.as_ref().and_then(|cv| cv.as_real())
+    }
+
+    #[inline]
+    pub fn as_short_real(&self) -> Option<f32> {
+        self.as_ref().and_then(|cv| cv.as_short_real())
+    }
+
+    #[inline]
+    pub fn as_string(&self) -> Option<String> {
+        self.as_ref().and_then(|cv| cv.as_string())
+    }
+
+    #[inline]
+    pub fn to_string(&self, exact_unknowns: bool) -> String {
+        self.as_ref().map(|cv| cv.to_string(exact_unknowns)).unwrap_or_default()
+    }
+}
+
+impl Clone for ConstantValue {
+    fn clone(&self) -> Self {
+        match self.ptr.as_ref() {
+            Some(inner) => {
+                ConstantValue::from_unique(ffi::ConstantValue_clone(inner)).expect("clone constant")
+            }
+            None => ConstantValue { ptr: UniquePtr::null() },
+        }
+    }
+}
+
+impl fmt::Debug for ConstantValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConstantValue")
+            .field("valid", &self.is_valid())
+            .field("repr", &self.to_string(false))
+            .finish()
+    }
+}
+
+impl<'a> From<ConstantValueRef<'a>> for ConstantValue {
+    fn from(value: ConstantValueRef<'a>) -> Self {
+        value.to_owned()
     }
 }
 
