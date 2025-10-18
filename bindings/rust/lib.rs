@@ -1614,7 +1614,7 @@ impl fmt::Debug for SyntaxTrivia<'_> {
 
 pub trait ChildrenIter<It> = DoubleEndedIterator<Item = It> + ExactSizeIterator + Clone;
 
-impl SyntaxTrivia<'_> {
+impl<'a> SyntaxTrivia<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
         assert!(_ptr.is_null().not());
@@ -1629,6 +1629,11 @@ impl SyntaxTrivia<'_> {
     #[inline]
     pub fn kind(&self) -> TriviaKind {
         TriviaKind::from_id(self._ptr.kind())
+    }
+
+    #[inline]
+    pub fn syntax(&self) -> Option<SyntaxNode<'a>> {
+        SyntaxNode::from_raw_ptr(self._ptr.syntax())
     }
 }
 

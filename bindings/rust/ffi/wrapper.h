@@ -768,3 +768,12 @@ inline static uint16_t code(const ::slang::Diagnostic& diag) {
 }
 } // namespace diagnostics
 } // namespace wrapper
+
+namespace slang {
+namespace parsing {
+inline static const ::slang::syntax::SyntaxNode*
+SyntaxTrivia_syntax(const ::slang::parsing::Trivia& trivia) {
+    return trivia.syntax();
+}
+} // namespace parsing
+} // namespace slang
