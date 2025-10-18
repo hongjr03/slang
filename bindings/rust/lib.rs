@@ -2356,6 +2356,8 @@ pub struct Compilation {
     anonymous: Vec<SyntaxTree>,
 }
 
+unsafe impl Send for Compilation {}
+
 struct TrackedTree {
     version: u64,
     tree: SyntaxTree,
