@@ -149,7 +149,7 @@ impl SourceLocation {
     pub fn buffer_id(&self) -> Option<source_manager::BufferId> {
         self._ptr
             .as_ref()
-            .map(|loc| source_manager::BufferId(ffi::SourceLocation_buffer(loc)))
+            .and_then(|loc| source_manager::BufferId::from_raw(ffi::SourceLocation_buffer(loc)))
             .filter(|id| id.is_valid())
     }
 }
@@ -443,6 +443,34 @@ impl<'a> SymbolRef<'a> {
     pub fn as_formal_argument(self) -> Option<FormalArgumentSymbolRef<'a>> {
         unsafe { ffi::Symbol_asFormalArgumentSymbol(self.ptr).as_ref() }
             .map(FormalArgumentSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_port(self) -> Option<PortSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asPortSymbol(self.ptr).as_ref() }.map(PortSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_multi_port(self) -> Option<MultiPortSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asMultiPortSymbol(self.ptr).as_ref() }.map(MultiPortSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn direction(self) -> Option<ArgumentDirection> {
+        if let Some(arg) = self.as_formal_argument() {
+            arg.direction()
+        } else if let Some(port) = self.as_port() {
+            port.direction()
+        } else if let Some(port) = self.as_multi_port() {
+            port.direction()
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn lifetime(self) -> Option<VariableLifetime> {
+        self.as_variable().and_then(|var| var.lifetime())
     }
 
     #[inline]
@@ -856,6 +884,40 @@ impl<'a> FieldSymbolRef<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct PortSymbolRef<'a> {
+    ptr: &'a ffi::PortSymbol,
+}
+
+impl<'a> PortSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::PortSymbol) -> Self {
+        PortSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn direction(self) -> Option<ArgumentDirection> {
+        ArgumentDirection::from_raw(ffi::PortSymbol_direction(self.ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MultiPortSymbolRef<'a> {
+    ptr: &'a ffi::MultiPortSymbol,
+}
+
+impl<'a> MultiPortSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::MultiPortSymbol) -> Self {
+        MultiPortSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn direction(self) -> Option<ArgumentDirection> {
+        ArgumentDirection::from_raw(ffi::MultiPortSymbol_direction(self.ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct FormalArgumentSymbolRef<'a> {
     ptr: &'a ffi::FormalArgumentSymbol,
 }
@@ -880,6 +942,11 @@ impl<'a> FormalArgumentSymbolRef<'a> {
     #[inline]
     pub fn direction(self) -> Option<ArgumentDirection> {
         ArgumentDirection::from_raw(ffi::FormalArgumentSymbol_direction(self.ptr))
+    }
+
+    #[inline]
+    pub fn lifetime(self) -> Option<VariableLifetime> {
+        VariableLifetime::from_raw(ffi::FormalArgumentSymbol_lifetime(self.ptr))
     }
 }
 
@@ -955,9 +1022,9 @@ pub struct ScopeRef<'a> {
 
 impl<'a> ScopeRef<'a> {
     #[inline]
-    pub fn as_symbol(self) -> SymbolRef<'a> {
-        let ptr = unsafe { ffi::Scope_asSymbol(self.ptr).as_ref().expect("scope symbol") };
-        SymbolRef::new(ptr)
+    pub fn as_symbol(self) -> FfiResult<SymbolRef<'a>> {
+        let ptr = require_ptr(ffi::Scope_asSymbol(self.ptr))?;
+        Ok(SymbolRef::new(ptr))
     }
 
     #[inline]
@@ -1019,7 +1086,7 @@ impl<'a> ScopeRef<'a> {
         let mut current = Some(self);
         while let Some(scope) = current {
             scope.collect_visible_symbols_into(view, location, flags, &mut seen, &mut symbols)?;
-            current = scope.as_symbol().parent_scope();
+            current = scope.as_symbol()?.parent_scope();
         }
         Ok(symbols)
     }
@@ -1087,15 +1154,15 @@ pub struct RootSymbol<'a> {
 
 impl<'a> RootSymbol<'a> {
     #[inline]
-    pub fn as_scope(self) -> ScopeRef<'a> {
-        let scope = unsafe { ffi::RootSymbol_asScope(self.ptr).as_ref().expect("root scope") };
-        ScopeRef::new(scope)
+    pub fn as_scope(self) -> FfiResult<ScopeRef<'a>> {
+        let scope = require_ptr(ffi::RootSymbol_asScope(self.ptr))?;
+        Ok(ScopeRef::new(scope))
     }
 
     #[inline]
-    pub fn as_symbol(self) -> SymbolRef<'a> {
-        let sym = unsafe { ffi::RootSymbol_asSymbol(self.ptr).as_ref().expect("root symbol") };
-        SymbolRef::new(sym)
+    pub fn as_symbol(self) -> FfiResult<SymbolRef<'a>> {
+        let sym = require_ptr(ffi::RootSymbol_asSymbol(self.ptr))?;
+        Ok(SymbolRef::new(sym))
     }
 
     #[inline]
@@ -1116,19 +1183,32 @@ impl<'a> SourceManagerRef<'a> {
     }
 
     #[inline]
-    fn as_pin(&mut self) -> Pin<&mut ffi::SourceManager> {
-        unsafe { Pin::new_unchecked(&mut *self.ptr) }
+    fn as_pin(&mut self) -> FfiResult<Pin<&mut ffi::SourceManager>> {
+        if self.ptr.is_null() {
+            Err(FfiError::NullPointer)
+        } else {
+            // SAFETY: pointer validity checked above.
+            Ok(unsafe { Pin::new_unchecked(&mut *self.ptr) })
+        }
     }
 
     #[inline]
-    fn as_ref(&self) -> &ffi::SourceManager {
-        unsafe { &*self.ptr }
+    fn as_ref(&self) -> FfiResult<&ffi::SourceManager> {
+        if self.ptr.is_null() {
+            Err(FfiError::NullPointer)
+        } else {
+            // SAFETY: pointer validity checked above.
+            Ok(unsafe { &*self.ptr })
+        }
     }
 
     #[inline]
-    pub fn assign_text(&mut self, text: &str) -> Option<source_manager::BufferId> {
-        let id = ffi::SourceManager_assignText(self.as_pin(), CxxSV::new(text));
-        (id != 0).then_some(source_manager::BufferId(id))
+    pub fn assign_text(&mut self, text: &str) -> FfiResult<source_manager::BufferId> {
+        let mut pin = self.as_pin()?;
+        let id = ffi::SourceManager_assignText(pin.as_mut(), CxxSV::new(text));
+        source_manager::BufferId::from_raw(id).ok_or_else(|| {
+            FfiError::CallFailed("SourceManager::assign_text returned invalid buffer".into())
+        })
     }
 
     #[inline]
@@ -1136,25 +1216,27 @@ impl<'a> SourceManagerRef<'a> {
         &mut self,
         path: &str,
         text: &str,
-    ) -> Option<source_manager::BufferId> {
-        let id = ffi::SourceManager_assignTextWithPath(
-            self.as_pin(),
-            CxxSV::new(path),
-            CxxSV::new(text),
-        );
-        (id != 0).then_some(source_manager::BufferId(id))
+    ) -> FfiResult<source_manager::BufferId> {
+        let mut pin = self.as_pin()?;
+        let id =
+            ffi::SourceManager_assignTextWithPath(pin.as_mut(), CxxSV::new(path), CxxSV::new(text));
+        source_manager::BufferId::from_raw(id).ok_or_else(|| {
+            FfiError::CallFailed(
+                "SourceManager::assign_text_with_path returned invalid buffer".into(),
+            )
+        })
     }
 
     #[inline]
-    pub fn source_text(&self, buffer: source_manager::BufferId) -> Option<String> {
+    pub fn source_text(&self, buffer: source_manager::BufferId) -> FfiResult<String> {
         if !buffer.is_valid() {
-            return None;
+            return Err(FfiError::InvalidBuffer);
         }
-        let mut text = ffi::SourceManager_getSourceText(self.as_ref(), buffer.raw());
+        let mut text = ffi::SourceManager_getSourceText(self.as_ref()?, buffer.raw());
         if text.ends_with('\0') {
             text.pop();
         }
-        Some(text)
+        Ok(text)
     }
 
     #[inline]
@@ -1162,13 +1244,13 @@ impl<'a> SourceManagerRef<'a> {
         &self,
         buffer: source_manager::BufferId,
         offset: text_size::TextSize,
-    ) -> Option<SourceLocation> {
+    ) -> FfiResult<SourceLocation> {
         if !buffer.is_valid() {
-            return None;
+            return Err(FfiError::InvalidBuffer);
         }
         let offset_u32: u32 = offset.into();
         let ptr = ffi::SourceManager_makeLocation(buffer.raw(), offset_u32 as usize);
-        SourceLocation::from_unique_ptr(ptr)
+        SourceLocation::from_unique_ptr(ptr).ok_or_else(|| FfiError::InvalidSourceLocation)
     }
 
     #[inline]
@@ -1176,25 +1258,31 @@ impl<'a> SourceManagerRef<'a> {
         &self,
         buffer: source_manager::BufferId,
         range: text_size::TextRange,
-    ) -> Option<SourceRange> {
+    ) -> FfiResult<SourceRange> {
         let start = self.make_location(buffer, range.start())?;
         let end = self.make_location(buffer, range.end())?;
-        SourceRange::from_locations(&start, &end)
+        SourceRange::from_locations(&start, &end).ok_or(FfiError::InvalidSourceLocation)
     }
 
     #[inline]
-    pub fn file_name(&self, loc: &SourceLocation) -> String {
-        self.as_ref().getFileName(loc._ptr.as_ref().expect("source location"))
+    pub fn file_name(&self, loc: &SourceLocation) -> FfiResult<String> {
+        let manager = self.as_ref()?;
+        let loc_ref = loc._ptr.as_ref().ok_or(FfiError::InvalidSourceLocation)?;
+        Ok(manager.getFileName(loc_ref))
     }
 
     #[inline]
-    pub fn line_number(&self, loc: &SourceLocation) -> u32 {
-        self.as_ref().getLineNumber(loc._ptr.as_ref().expect("source location"))
+    pub fn line_number(&self, loc: &SourceLocation) -> FfiResult<u32> {
+        let manager = self.as_ref()?;
+        let loc_ref = loc._ptr.as_ref().ok_or(FfiError::InvalidSourceLocation)?;
+        Ok(manager.getLineNumber(loc_ref))
     }
 
     #[inline]
-    pub fn column_number(&self, loc: &SourceLocation) -> u32 {
-        self.as_ref().getColumnNumber(loc._ptr.as_ref().expect("source location"))
+    pub fn column_number(&self, loc: &SourceLocation) -> FfiResult<u32> {
+        let manager = self.as_ref()?;
+        let loc_ref = loc._ptr.as_ref().ok_or(FfiError::InvalidSourceLocation)?;
+        Ok(manager.getColumnNumber(loc_ref))
     }
 }
 
@@ -2036,6 +2124,7 @@ pub mod source_manager {
     use text_size::TextSize;
 
     use super::{CxxSV, ffi};
+    use crate::ffi_ext::{FfiError, FfiResult};
 
     /// 由 `SourceManager` 分配的缓冲区 ID。
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2048,6 +2137,11 @@ pub mod source_manager {
             self.0
         }
 
+        #[inline]
+        pub fn from_raw(raw: u32) -> Option<Self> {
+            (raw != 0).then_some(BufferId(raw))
+        }
+
         /// 判断 ID 是否有效。
         #[inline]
         pub fn is_valid(self) -> bool {
@@ -2057,40 +2151,48 @@ pub mod source_manager {
 
     /// 将内存中的文本注册到默认 `SourceManager`，返回缓冲区 ID。
     #[inline]
-    pub fn assign_text(text: &str) -> Option<BufferId> {
+    pub fn assign_text(text: &str) -> FfiResult<BufferId> {
         let id = ffi::SourceManager_assignTextDefault(CxxSV::new(text));
-        (id != 0).then_some(BufferId(id))
+        BufferId::from_raw(id).ok_or_else(|| {
+            FfiError::CallFailed(
+                "SourceManager::assign_text_default returned invalid buffer".into(),
+            )
+        })
     }
 
     /// 将文本以指定路径注册到默认 `SourceManager`。
     #[inline]
-    pub fn assign_text_with_path(path: &str, text: &str) -> Option<BufferId> {
+    pub fn assign_text_with_path(path: &str, text: &str) -> FfiResult<BufferId> {
         let id = ffi::SourceManager_assignTextWithPathDefault(CxxSV::new(path), CxxSV::new(text));
-        (id != 0).then_some(BufferId(id))
+        BufferId::from_raw(id).ok_or_else(|| {
+            FfiError::CallFailed(
+                "SourceManager::assign_text_with_path_default returned invalid buffer".into(),
+            )
+        })
     }
 
     /// 从默认 `SourceManager` 中读取指定缓冲区的源文本。
     #[inline]
-    pub fn source_text(buffer: BufferId) -> Option<String> {
+    pub fn source_text(buffer: BufferId) -> FfiResult<String> {
         if !buffer.is_valid() {
-            return None;
+            return Err(FfiError::InvalidBuffer);
         }
         let mut text = ffi::SourceManager_getSourceTextDefault(buffer.raw());
         if text.ends_with('\0') {
             text.pop();
         }
-        Some(text)
+        Ok(text)
     }
 
     /// 创建给定缓冲区与偏移处的 `SourceLocation`。
     #[inline]
-    pub fn make_location(buffer: BufferId, offset: TextSize) -> Option<crate::SourceLocation> {
+    pub fn make_location(buffer: BufferId, offset: TextSize) -> FfiResult<crate::SourceLocation> {
         if !buffer.is_valid() {
-            return None;
+            return Err(FfiError::InvalidBuffer);
         }
         let offset_u32: u32 = offset.into();
         let ptr = ffi::SourceManager_makeLocation(buffer.raw(), offset_u32 as usize);
-        crate::SourceLocation::from_unique_ptr(ptr)
+        crate::SourceLocation::from_unique_ptr(ptr).ok_or(FfiError::InvalidSourceLocation)
     }
 }
 
@@ -2280,9 +2382,18 @@ impl Compilation {
         }
     }
 
-    pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
-        self.push_tree(&tree);
+    fn pin_mut(&mut self) -> FfiResult<Pin<&mut ffi::Compilation>> {
+        if self._ptr.is_null() { Err(FfiError::NullPointer) } else { Ok(self._ptr.pin_mut()) }
+    }
+
+    fn as_ref_ptr(&self) -> FfiResult<&ffi::Compilation> {
+        self._ptr.as_ref().ok_or(FfiError::NullPointer)
+    }
+
+    pub fn add_syntax_tree(&mut self, tree: SyntaxTree) -> FfiResult<()> {
+        self.push_tree(&tree)?;
         self.anonymous.push(tree);
+        Ok(())
     }
 
     pub fn upsert_syntax_tree(
@@ -2290,12 +2401,12 @@ impl Compilation {
         path: impl Into<SmolStr>,
         version: u64,
         tree: SyntaxTree,
-    ) -> bool {
+    ) -> FfiResult<bool> {
         let path = path.into();
         match self.tracked.entry(path) {
             Entry::Occupied(mut entry) => {
                 if entry.get().version == version {
-                    return false;
+                    return Ok(false);
                 }
                 entry.insert(TrackedTree { version, tree });
             }
@@ -2303,29 +2414,29 @@ impl Compilation {
                 entry.insert(TrackedTree { version, tree });
             }
         }
-        self.rebuild_all();
-        true
+        self.rebuild_all()?;
+        Ok(true)
     }
 
-    pub fn remove_syntax_tree(&mut self, path: &str) -> bool {
+    pub fn remove_syntax_tree(&mut self, path: &str) -> FfiResult<bool> {
         if self.tracked.remove(path).is_some() {
-            self.rebuild_all();
-            true
+            self.rebuild_all()?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
     pub fn root(&mut self) -> FfiResult<RootSymbol<'_>> {
-        let compilation = self._ptr.as_mut().ok_or(FfiError::NullPointer)?;
-        let root_ptr = ffi::Compilation::getRoot(compilation);
+        let mut pin = self.pin_mut()?;
+        let root_ptr = ffi::Compilation::getRoot(pin.as_mut());
         let root = require_ptr(root_ptr)?;
         Ok(RootSymbol::new(root))
     }
 
     pub fn source_manager(&mut self) -> FfiResult<SourceManagerRef<'_>> {
-        let compilation = self._ptr.as_mut().ok_or(FfiError::NullPointer)?;
-        let ptr = ffi::Compilation::getSourceManager(compilation);
+        let mut pin = self.pin_mut()?;
+        let ptr = ffi::Compilation::getSourceManager(pin.as_mut());
         if let Some(sm) = SourceManagerRef::new(ptr) {
             return Ok(sm);
         }
@@ -2333,29 +2444,37 @@ impl Compilation {
         SourceManagerRef::new(default).ok_or(FfiError::NullPointer)
     }
 
-    pub fn get_package(&self, name: &str) -> Option<PackageSymbol<'_>> {
-        let ptr = ffi::Compilation::getPackage(self._ptr.as_ref().unwrap(), CxxSV::new(name));
-        PackageSymbol::from_ptr(ptr)
+    pub fn get_package(&self, name: &str) -> FfiResult<Option<PackageSymbol<'_>>> {
+        let compilation = self.as_ref_ptr()?;
+        let ptr = ffi::Compilation::getPackage(compilation, CxxSV::new(name));
+        Ok(PackageSymbol::from_ptr(ptr))
     }
 
-    fn push_tree(&mut self, tree: &SyntaxTree) {
-        ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr.clone());
+    fn push_tree(&mut self, tree: &SyntaxTree) -> FfiResult<()> {
+        let mut pin = self.pin_mut()?;
+        ffi::Compilation::add_syntax_tree(pin.as_mut(), tree._ptr.clone());
+        Ok(())
     }
 
-    fn rebuild_all(&mut self) {
+    fn rebuild_all(&mut self) -> FfiResult<()> {
         let mut new_ptr = ffi::Compilation::new();
 
+        if new_ptr.is_null() {
+            return Err(FfiError::NullPointer);
+        }
+        let mut pin = new_ptr.pin_mut();
         for tree in &self.anonymous {
-            ffi::Compilation::add_syntax_tree(new_ptr.as_mut().unwrap(), tree._ptr.clone());
+            ffi::Compilation::add_syntax_tree(pin.as_mut(), tree._ptr.clone());
         }
 
         let mut tracked: Vec<_> = self.tracked.iter().collect();
         tracked.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (_, entry) in tracked {
-            ffi::Compilation::add_syntax_tree(new_ptr.as_mut().unwrap(), entry.tree._ptr.clone());
+            ffi::Compilation::add_syntax_tree(pin.as_mut(), entry.tree._ptr.clone());
         }
 
         self._ptr = new_ptr;
+        Ok(())
     }
 }
 

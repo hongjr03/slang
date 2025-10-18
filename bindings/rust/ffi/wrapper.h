@@ -16,6 +16,7 @@
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
+#include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/SubroutineSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
@@ -355,6 +356,16 @@ inline static const ::slang::ast::VariableSymbol* Symbol_asVariableSymbol(
     return symbol.as_if<::slang::ast::VariableSymbol>();
 }
 
+inline static const ::slang::ast::PortSymbol* Symbol_asPortSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::PortSymbol>();
+}
+
+inline static const ::slang::ast::MultiPortSymbol* Symbol_asMultiPortSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::MultiPortSymbol>();
+}
+
 // LookupLocation wrappers
 inline static std::unique_ptr<::slang::ast::LookupLocation> LookupLocation_max() {
     return std::make_unique<::slang::ast::LookupLocation>(::slang::ast::LookupLocation::max);
@@ -593,6 +604,20 @@ inline static const ::slang::ast::ValueSymbol* FormalArgumentSymbol_asValueSymbo
 
 inline static uint8_t FormalArgumentSymbol_direction(
     const ::slang::ast::FormalArgumentSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.direction);
+}
+
+inline static uint8_t FormalArgumentSymbol_lifetime(
+    const ::slang::ast::FormalArgumentSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.lifetime);
+}
+
+inline static uint8_t PortSymbol_direction(const ::slang::ast::PortSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.direction);
+}
+
+inline static uint8_t MultiPortSymbol_direction(
+    const ::slang::ast::MultiPortSymbol& symbol) {
     return static_cast<uint8_t>(symbol.direction);
 }
 

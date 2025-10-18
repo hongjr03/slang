@@ -435,7 +435,7 @@ fn test_trivia() {
 fn test_compilation() {
     let mut compilation = Compilation::new();
     let tree = get_test_tree();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 }
 
 #[test]
@@ -470,9 +470,9 @@ fn compilation_get_package_and_scope_lookup() {
     let tree = SyntaxTree::from_text("package foo; int bar; int baz; endpackage", "source", "");
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
-    let package = compilation.get_package("foo").expect("package symbol");
+    let package = compilation.get_package("foo").expect("get package").expect("package symbol");
     let scope = package.scope().expect("package scope");
 
     assert!(scope.find_member("bar").is_some());
@@ -483,10 +483,10 @@ fn compilation_get_package_and_scope_lookup() {
 fn compilation_root_scope_iteration() {
     let tree = SyntaxTree::from_text("module foo; endmodule", "source", "");
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
     let root = compilation.root().expect("root symbol");
-    let scope = root.as_scope();
+    let scope = root.as_scope().expect("root scope");
 
     let mut members = scope.members();
     assert!(members.next().is_some(), "expected root scope to contain members");
@@ -497,20 +497,20 @@ fn compilation_upsert_rebuilds_on_version_change() {
     let mut compilation = Compilation::new();
 
     let tree_v1 = SyntaxTree::from_text("module foo; endmodule", "foo", "");
-    assert!(compilation.upsert_syntax_tree("foo.sv", 1, tree_v1));
+    assert!(compilation.upsert_syntax_tree("foo.sv", 1, tree_v1).expect("upsert tree"));
 
     // Calling root finalizes current compilation; subsequent upserts should
     // rebuild.
     assert!(compilation.root().is_ok());
 
     let tree_same = SyntaxTree::from_text("module foo; endmodule", "foo", "");
-    assert!(!compilation.upsert_syntax_tree("foo.sv", 1, tree_same));
+    assert!(!compilation.upsert_syntax_tree("foo.sv", 1, tree_same).expect("upsert tree"));
 
     let tree_v2 = SyntaxTree::from_text("module foo; wire x; endmodule", "foo", "");
-    assert!(compilation.upsert_syntax_tree("foo.sv", 2, tree_v2));
+    assert!(compilation.upsert_syntax_tree("foo.sv", 2, tree_v2).expect("upsert tree"));
 
-    assert!(compilation.remove_syntax_tree("foo.sv"));
-    assert!(!compilation.remove_syntax_tree("missing.sv"));
+    assert!(compilation.remove_syntax_tree("foo.sv").expect("remove tree"));
+    assert!(!compilation.remove_syntax_tree("missing.sv").expect("remove tree"));
 }
 
 #[test]
@@ -531,9 +531,9 @@ fn scope_visible_symbols_collected() {
     let tree = SyntaxTree::from_text("package foo; int bar; int baz; endpackage", "source", "");
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
-    let package = compilation.get_package("foo").expect("package symbol");
+    let package = compilation.get_package("foo").expect("get package").expect("package symbol");
     let scope = package.scope().expect("package scope");
 
     let names: std::collections::HashSet<_> = scope
@@ -569,9 +569,9 @@ endpackage
     );
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
-    let package = compilation.get_package("user").expect("user package");
+    let package = compilation.get_package("user").expect("get package").expect("user package");
     let scope = package.scope().expect("package scope");
 
     let names: std::collections::HashSet<_> = scope
@@ -623,10 +623,10 @@ endmodule
     );
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
     let root = compilation.root().expect("root symbol");
-    let root_scope = root.as_scope();
+    let root_scope = root.as_scope().expect("root scope");
 
     let leaf_instance = root_scope.lookup_hierarchy("top.u_mid.u_leaf").expect("leaf instance");
     assert_eq!(leaf_instance.name(), SmolStr::new("u_leaf"));
@@ -685,9 +685,9 @@ endpackage
     );
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
-    let package = compilation.get_package("foo").expect("package symbol");
+    let package = compilation.get_package("foo").expect("get package").expect("package symbol");
     let scope = package.scope().expect("package scope");
 
     let lp_symbol = scope.lookup_name("LP", None).expect("parameter symbol");
@@ -727,16 +727,11 @@ endpackage
     assert_eq!(field_type.to_string(), "int");
     assert_eq!(field_type.bit_width(), Some(32));
     assert!(field_type.is_signed());
-    assert!(field_type
-        .integral_flags()
-        .contains(IntegralFlags::SIGNED));
+    assert!(field_type.integral_flags().contains(IntegralFlags::SIGNED));
     let default_value = field_type.default_value().expect("default value");
     assert!(default_value.is_valid());
     assert!(default_value.is_integer());
-    assert_eq!(
-        default_value.as_svint().expect("default as svint").to_string(),
-        "0"
-    );
+    assert_eq!(default_value.as_svint().expect("default as svint").to_string(), "0");
 
     let add_symbol = scope.lookup_name("add", None).expect("function symbol");
     let subroutine = lookup_symbol!(scope, "add", "function symbol", as_subroutine);
@@ -757,6 +752,57 @@ endpackage
             .to_string(),
         "int"
     );
+}
+
+#[test]
+fn symbol_direction_and_lifetime() {
+    let tree = SyntaxTree::from_text(
+        r#"
+module top(
+  input logic a,
+  output logic b,
+  inout wire c
+);
+  int module_var;
+
+  function automatic void foo(input int arg_in, ref int arg_ref);
+    automatic int local_auto;
+    static int local_static;
+  endfunction
+endmodule
+
+"#,
+        "dir-life",
+        "",
+    );
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
+
+    let root = compilation.root().expect("root symbol");
+    let scope = root.as_scope().expect("root scope");
+
+    let module_var = scope.lookup_hierarchy("top.module_var").expect("module var");
+    assert_eq!(module_var.lifetime(), Some(VariableLifetime::Static));
+    assert!(module_var.direction().is_none());
+
+    let foo_symbol = scope.lookup_hierarchy("top.foo").expect("foo function");
+    let foo_subroutine = foo_symbol.as_subroutine().expect("foo subroutine");
+    let foo_scope = foo_subroutine.scope().expect("foo scope");
+
+    let arg_in = foo_scope.lookup_name("arg_in", None).expect("arg_in");
+    assert_eq!(arg_in.direction(), Some(ArgumentDirection::In));
+    assert_eq!(arg_in.lifetime(), Some(VariableLifetime::Automatic));
+
+    let arg_ref = foo_scope.lookup_name("arg_ref", None).expect("arg_ref");
+    assert_eq!(arg_ref.direction(), Some(ArgumentDirection::Ref));
+
+    let local_auto = foo_scope.lookup_name("local_auto", None).expect("local_auto");
+    assert_eq!(local_auto.lifetime(), Some(VariableLifetime::Automatic));
+    assert!(local_auto.direction().is_none());
+
+    let local_static = foo_scope.lookup_name("local_static", None).expect("local_static");
+    assert_eq!(local_static.lifetime(), Some(VariableLifetime::Static));
 }
 
 #[test]
@@ -786,26 +832,17 @@ endmodule
     );
 
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
     let root = compilation.root().expect("root");
-    let scope = root.as_scope();
+    let scope = root.as_scope().expect("root scope");
 
     let foo = scope.lookup_hierarchy("top.foo").expect("foo symbol");
-    assert_eq!(
-        foo.doc_comment().as_deref(),
-        Some("Adds foo.\nMultiline doc.")
-    );
-    assert_eq!(
-        foo.leading_comment_lines().unwrap(),
-        vec!["Adds foo.", "Multiline doc."]
-    );
+    assert_eq!(foo.doc_comment().as_deref(), Some("Adds foo.\nMultiline doc."));
+    assert_eq!(foo.leading_comment_lines().unwrap(), vec!["Adds foo.", "Multiline doc."]);
 
     let bar = scope.lookup_hierarchy("top.bar").expect("bar symbol");
-    assert_eq!(
-        bar.doc_comment().as_deref(),
-        Some("Block doc summary\n\nmore detail")
-    );
+    assert_eq!(bar.doc_comment().as_deref(), Some("Block doc summary\n\nmore detail"));
 
     let baz = scope.lookup_hierarchy("top.baz").expect("baz symbol");
     assert!(baz.doc_comment().is_none());
@@ -816,7 +853,7 @@ endmodule
 fn source_range_from_text_range() {
     let tree = SyntaxTree::from_text("module p; endmodule", "buffer", "");
     let mut compilation = Compilation::new();
-    compilation.add_syntax_tree(tree);
+    compilation.add_syntax_tree(tree).expect("add syntax tree");
 
     let mut source_manager = compilation.source_manager().expect("source manager");
     let buffer = source_manager.assign_text("module p; endmodule").expect("buffer id");

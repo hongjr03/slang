@@ -268,6 +268,7 @@ mod slang_ffi {
         include!("slang/include/slang/ast/Scope.h");
         include!("slang/include/slang/ast/symbols/ParameterSymbols.h");
         include!("slang/include/slang/ast/symbols/VariableSymbols.h");
+        include!("slang/include/slang/ast/symbols/PortSymbols.h");
         include!("slang/include/slang/ast/symbols/SubroutineSymbols.h");
 
         type Symbol;
@@ -278,6 +279,8 @@ mod slang_ffi {
         type FormalArgumentSymbol;
         type ValueSymbol;
         type VariableSymbol;
+        type PortSymbol;
+        type MultiPortSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Symbol_kind(symbol: &Symbol) -> u16;
@@ -327,6 +330,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Symbol_asVariableSymbol(symbol: &Symbol) -> *const VariableSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asPortSymbol(symbol: &Symbol) -> *const PortSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asMultiPortSymbol(symbol: &Symbol) -> *const MultiPortSymbol;
 
         #[namespace = "wrapper::ast"]
         fn ParameterSymbol_asValueSymbol(symbol: &ParameterSymbol) -> *const ValueSymbol;
@@ -396,6 +405,15 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn FormalArgumentSymbol_direction(symbol: &FormalArgumentSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn FormalArgumentSymbol_lifetime(symbol: &FormalArgumentSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn PortSymbol_direction(symbol: &PortSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn MultiPortSymbol_direction(symbol: &MultiPortSymbol) -> u8;
     }
 
     #[namespace = "slang::ast"]

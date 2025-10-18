@@ -18,6 +18,12 @@ pub enum FfiError {
     #[error("Null pointer encountered")]
     NullPointer,
 
+    #[error("Invalid buffer id")]
+    InvalidBuffer,
+
+    #[error("Invalid source location")]
+    InvalidSourceLocation,
+
     #[error("Invalid symbol kind: {0}")]
     InvalidSymbolKind(u16),
 
