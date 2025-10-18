@@ -244,6 +244,16 @@ impl<'a> SymbolRef<'a> {
     }
 
     #[inline]
+    pub fn name(self) -> SmolStr {
+        SmolStr::new(&ffi::Symbol_name(self.ptr))
+    }
+
+    #[inline]
+    pub fn is_visible_from(self, scope: ScopeRef<'_>) -> bool {
+        ffi::Lookup_isVisibleFrom(self.ptr, scope.ptr)
+    }
+
+    #[inline]
     pub fn raw(self) -> &'a ffi::Symbol {
         self.ptr
     }
@@ -282,15 +292,24 @@ impl<'a> ScopeRef<'a> {
         name: &str,
         location: Option<&LookupLocation>,
     ) -> Option<SymbolRef<'a>> {
-        let mut temp_holder: Option<LookupLocation> = None;
-        let loc_ref = match location {
-            Some(loc) => loc.as_ref(),
-            None => {
-                temp_holder = Some(LookupLocation::max());
-                temp_holder.as_ref().and_then(|loc| loc.as_ref())
-            }
-        }?;
-        unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
+        if let Some(loc) = location {
+            let loc_ref = loc.as_ref()?;
+            unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
+        } else {
+            let fallback = LookupLocation::max();
+            let loc_ref = fallback.as_ref()?;
+            unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
+        }
+    }
+
+    #[inline]
+    pub fn visible_symbols(self) -> Vec<SymbolRef<'a>> {
+        self.visible_symbols_from(self)
+    }
+
+    #[inline]
+    pub fn visible_symbols_from(self, view: ScopeRef<'_>) -> Vec<SymbolRef<'a>> {
+        self.members().filter(|sym| sym.is_visible_from(view)).collect::<Vec<_>>()
     }
 
     #[inline]

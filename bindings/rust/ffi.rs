@@ -267,6 +267,9 @@ mod slang_ffi {
         #[namespace = "wrapper::ast"]
         fn Symbol_kind(symbol: &Symbol) -> u16;
 
+        #[namespace = "wrapper::ast"]
+        fn Symbol_name(symbol: &Symbol) -> String;
+
         fn getParentScope(self: &Symbol) -> *const Scope;
 
         fn getSyntax(self: &Symbol) -> *const SyntaxNode;
@@ -306,6 +309,9 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn LookupResult_hasError(result: &LookupResult) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn Lookup_isVisibleFrom(symbol: &Symbol, scope: &Scope) -> bool;
     }
 
     impl UniquePtr<LookupLocation> {}

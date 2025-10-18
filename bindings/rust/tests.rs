@@ -523,3 +523,19 @@ fn source_manager_instance_assign_text() {
     let loc = sm.make_location(buffer, TextSize::from(0u32)).expect("location");
     assert_eq!(loc.offset(), Some(0));
 }
+
+#[test]
+fn scope_visible_symbols_collected() {
+    let tree = SyntaxTree::from_text("package foo; int bar; int baz; endpackage", "source", "");
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let package = compilation.get_package("foo").expect("package symbol");
+    let scope = package.scope();
+
+    let mut names: Vec<_> = scope.visible_symbols().into_iter().map(|sym| sym.name()).collect();
+    names.sort();
+
+    assert_eq!(names, vec![SmolStr::new("bar"), SmolStr::new("baz")]);
+}

@@ -286,6 +286,10 @@ inline static const ::slang::ast::Symbol* Scope_asSymbol(const ::slang::ast::Sco
     return &sym;
 }
 
+inline static rust::String Symbol_name(const ::slang::ast::Symbol& symbol) {
+    return rust::String(std::string(symbol.name));
+}
+
 inline static const ::slang::ast::Symbol* Scope_getFirstMember(const ::slang::ast::Scope& scope) {
     return scope.getFirstMember();
 }
@@ -331,6 +335,11 @@ inline static const ::slang::ast::Symbol* Scope_lookupName(
 inline static const ::slang::ast::Symbol* Scope_find(const ::slang::ast::Scope& scope,
                                                      std::string_view name) {
     return scope.find(name);
+}
+
+inline static bool Lookup_isVisibleFrom(const ::slang::ast::Symbol& symbol,
+                                        const ::slang::ast::Scope& scope) {
+    return ::slang::ast::Lookup::isVisibleFrom(symbol, scope);
 }
 
 // Type wrappers
