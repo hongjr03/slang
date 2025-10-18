@@ -14,6 +14,7 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/Symbol.h"
 #include "slang/ast/Scope.h"
+#include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/types/Type.h"
 #include "slang/ast/types/DeclaredType.h"
 #include "slang/ast/symbols/ValueSymbol.h"
@@ -199,10 +200,18 @@ namespace wrapper {
         return comp.getSourceManager();
     }
 
-    inline static const ::slang::ast::Symbol* Compilation_getRoot(Compilation& comp) {
-        // RootSymbol inherits from Symbol, use reinterpret_cast for incomplete type
-        return reinterpret_cast<const ::slang::ast::Symbol*>(&comp.getRoot());
-    }
+  inline static const ::slang::ast::Symbol* Compilation_getRoot(Compilation& comp) {
+      // RootSymbol inherits from Symbol, use reinterpret_cast for incomplete type
+      return reinterpret_cast<const ::slang::ast::Symbol*>(&comp.getRoot());
+  }
+
+  inline static const ::slang::ast::PackageSymbol* Compilation_getPackage(const Compilation& comp, std::string_view name) {
+      return comp.getPackage(name);
+  }
+
+  inline static const ::slang::ast::Scope* PackageSymbol_asScope(const ::slang::ast::PackageSymbol& pkg) {
+      return static_cast<const ::slang::ast::Scope*>(&pkg);
+  }
 
     // Symbol wrappers
     inline static uint16_t Symbol_kind(const ::slang::ast::Symbol& symbol) {

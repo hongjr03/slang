@@ -10,6 +10,7 @@ mod token;
 use std::{
     ffi::c_char,
     fmt, hash, iter,
+    marker::PhantomData,
     ops::{self, Not},
     pin::Pin,
 };
@@ -853,6 +854,23 @@ pub struct Compilation {
     _ptr: UniquePtr<ffi::Compilation>,
 }
 
+pub struct PackageSymbol<'a> {
+    ptr: *const ffi::PackageSymbol,
+    _marker: PhantomData<&'a ffi::PackageSymbol>,
+}
+
+impl<'a> PackageSymbol<'a> {
+    fn from_ptr(ptr: *const ffi::PackageSymbol) -> Option<Self> {
+        (!ptr.is_null()).then_some(Self { ptr, _marker: PhantomData })
+    }
+
+    pub fn scope(&self) -> &'a ffi::Scope {
+        let pkg = unsafe { &*self.ptr };
+        let scope_ptr = pkg.asScope();
+        unsafe { scope_ptr.as_ref().expect("package scope") }
+    }
+}
+
 impl Compilation {
     pub fn new() -> Self {
         Compilation { _ptr: ffi::Compilation::new() }
@@ -860,6 +878,11 @@ impl Compilation {
 
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
         ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
+    }
+
+    pub fn get_package(&self, name: &str) -> Option<PackageSymbol<'_>> {
+        let ptr = ffi::Compilation::getPackage(self._ptr.as_ref().unwrap(), CxxSV::new(name));
+        PackageSymbol::from_ptr(ptr)
     }
 }
 

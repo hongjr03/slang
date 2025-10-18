@@ -198,8 +198,10 @@ mod slang_ffi {
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
         include!("slang/include/slang/ast/Compilation.h");
+        include!("slang/include/slang/ast/symbols/CompilationUnitSymbols.h");
 
         type Compilation;
+        type PackageSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Compilation_new() -> UniquePtr<Compilation>;
@@ -215,9 +217,18 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Compilation_getRoot(comp: Pin<&mut Compilation>) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_getPackage(comp: &Compilation, name: CxxSV) -> *const PackageSymbol;
     }
 
     impl UniquePtr<Compilation> {}
+
+    #[namespace = "slang::ast"]
+    unsafe extern "C++" {
+        #[namespace = "wrapper::ast"]
+        fn PackageSymbol_asScope(pkg: &PackageSymbol) -> *const Scope;
+    }
 
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
@@ -451,6 +462,13 @@ impl_functions! {
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
         fn getSourceManager(self_: Pin<&mut Compilation>) -> *const SourceManager |> Compilation_getSourceManager;
         fn getRoot(self_: Pin<&mut Compilation>) -> *const Symbol |> Compilation_getRoot;
+        fn getPackage(&self, name: CxxSV) -> *const PackageSymbol |> Compilation_getPackage;
+    }
+}
+
+impl_functions! {
+    impl PackageSymbol {
+        fn asScope(&self) -> *const Scope |> PackageSymbol_asScope;
     }
 }
 

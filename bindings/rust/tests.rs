@@ -5,6 +5,7 @@ use expect_test::expect;
 use text_size::TextSize;
 
 use super::*;
+use crate::ffi_ext::ScopeExt;
 
 fn get_test_tree() -> SyntaxTree {
     SyntaxTree::from_text("module A(input a); wire x; endmodule;", "source", "")
@@ -462,4 +463,18 @@ fn source_manager_location_roundtrip() {
     let loc = source_manager::make_location(buffer, offset).expect("location");
     assert_eq!(loc.offset(), Some(7));
     assert_eq!(loc.buffer_id(), Some(buffer));
+}
+
+#[test]
+fn compilation_get_package_and_scope_lookup() {
+    let tree = SyntaxTree::from_text("package foo; int bar; int baz; endpackage", "source", "");
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let package = compilation.get_package("foo").expect("package symbol");
+    let scope = package.scope();
+
+    assert!(scope.find_member("bar").is_some());
+    assert!(scope.lookup_name("baz").is_some());
 }

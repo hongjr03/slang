@@ -6,7 +6,10 @@ use std::marker::PhantomData;
 
 use text_size::{TextRange, TextSize};
 
-use crate::ffi::{SourceLocation, SourceRange, Symbol};
+use crate::{
+    CxxSV,
+    ffi::{LookupLocation, SourceLocation, SourceRange, Symbol},
+};
 
 /// FFI 操作的结果类型
 pub type FfiResult<T> = Result<T, FfiError>;
@@ -104,6 +107,12 @@ pub trait ScopeExt {
 
     /// 迭代指定类型的成员
     fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol>;
+
+    /// 查找直接子成员
+    fn find_member(&self, name: &str) -> Option<&Symbol>;
+
+    /// 按名称执行完整查找
+    fn lookup_name(&self, name: &str) -> Option<&Symbol>;
 }
 
 impl ScopeExt for crate::ffi::Scope {
@@ -113,6 +122,17 @@ impl ScopeExt for crate::ffi::Scope {
 
     fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol> {
         self.members().filter(move |sym| sym.kind() == kind)
+    }
+
+    fn find_member(&self, name: &str) -> Option<&Symbol> {
+        let ptr = self.find(CxxSV::new(name));
+        unsafe { ptr.as_ref() }
+    }
+
+    fn lookup_name(&self, name: &str) -> Option<&Symbol> {
+        let loc = LookupLocation::max();
+        let ptr = self.lookupName(CxxSV::new(name), loc.as_ref().unwrap());
+        unsafe { ptr.as_ref() }
     }
 }
 
