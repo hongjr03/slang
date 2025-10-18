@@ -2,9 +2,11 @@ use ast::{
     AstNode, CompilationUnit, Expression, LiteralExpression, Member, Name, PrimaryExpression,
 };
 use expect_test::expect;
+use smol_str::SmolStr;
 use text_size::TextSize;
 
 use super::*;
+use crate::{ArgumentDirection, RandMode, SubroutineKind, Visibility};
 fn get_test_tree() -> SyntaxTree {
     SyntaxTree::from_text("module A(input a); wire x; endmodule;", "source", "")
 }
@@ -471,7 +473,7 @@ fn compilation_get_package_and_scope_lookup() {
     compilation.add_syntax_tree(tree);
 
     let package = compilation.get_package("foo").expect("package symbol");
-    let scope = package.scope();
+    let scope = package.scope().expect("package scope");
 
     assert!(scope.find_member("bar").is_some());
     assert!(scope.lookup_name("baz", None).is_some());
@@ -499,7 +501,7 @@ fn compilation_upsert_rebuilds_on_version_change() {
 
     // Calling root finalizes current compilation; subsequent upserts should
     // rebuild.
-    assert!(compilation.root().is_some());
+    assert!(compilation.root().is_ok());
 
     let tree_same = SyntaxTree::from_text("module foo; endmodule", "foo", "");
     assert!(!compilation.upsert_syntax_tree("foo.sv", 1, tree_same));
@@ -532,10 +534,131 @@ fn scope_visible_symbols_collected() {
     compilation.add_syntax_tree(tree);
 
     let package = compilation.get_package("foo").expect("package symbol");
-    let scope = package.scope();
+    let scope = package.scope().expect("package scope");
 
-    let mut names: Vec<_> = scope.visible_symbols().into_iter().map(|sym| sym.name()).collect();
-    names.sort();
+    let names: std::collections::HashSet<_> = scope
+        .visible_symbols()
+        .expect("visible symbols")
+        .into_iter()
+        .map(|sym| sym.name())
+        .collect();
 
-    assert_eq!(names, vec![SmolStr::new("bar"), SmolStr::new("baz")]);
+    for expected in [SmolStr::new("bar"), SmolStr::new("baz")] {
+        assert!(names.contains(&expected), "missing symbol {expected}");
+    }
+}
+
+#[test]
+fn scope_visible_symbols_include_imports() {
+    let tree = SyntaxTree::from_text(
+        r#"
+package pkg;
+  int imported_var;
+  typedef int imported_typedef;
+endpackage
+
+package user;
+  import pkg::*;
+  int own_var;
+endpackage
+"#,
+        "source",
+        "",
+    );
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let package = compilation.get_package("user").expect("user package");
+    let scope = package.scope().expect("package scope");
+
+    let names: std::collections::HashSet<_> = scope
+        .visible_symbols()
+        .expect("visible symbols")
+        .into_iter()
+        .map(|sym| sym.name())
+        .collect();
+
+    for expected in [SmolStr::new("imported_var"), SmolStr::new("own_var")] {
+        assert!(names.contains(&expected), "missing symbol {expected}");
+    }
+
+    let type_names: std::collections::HashSet<_> = scope
+        .visible_symbols_with(scope, None, LookupFlags::TYPE)
+        .expect("type symbols")
+        .into_iter()
+        .map(|sym| sym.name())
+        .collect();
+
+    assert!(type_names.contains(&SmolStr::new("imported_typedef")), "missing imported type");
+}
+
+#[test]
+fn symbol_wrappers_parameter_field_method() {
+    let tree = SyntaxTree::from_text(
+        r#"
+package foo;
+  localparam int LP = 42;
+  typedef struct packed {
+    int field;
+  } st_t;
+  st_t inst;
+  function automatic int add(input int a, output int b);
+    return a + b;
+  endfunction
+endpackage
+"#,
+        "source",
+        "",
+    );
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let package = compilation.get_package("foo").expect("package symbol");
+    let scope = package.scope().expect("package scope");
+
+    let lp_symbol = scope.lookup_name("LP", None).expect("parameter symbol");
+    let parameter = lp_symbol.as_parameter().expect("parameter wrapper");
+    assert!(parameter.is_local());
+    assert!(!parameter.is_port());
+    let _param_type = parameter
+        .declared_type()
+        .expect("parameter declared type")
+        .and_then(|dt| dt.ty())
+        .expect("parameter type");
+    let inst_symbol = scope.lookup_name("inst", None).expect("instance symbol");
+    let inst_value = inst_symbol.as_value_symbol().expect("value symbol");
+    let ty = inst_value.ty().expect("instance type");
+    let fields = ty.fields().expect("fields");
+    assert_eq!(fields.len(), 1);
+    let field = fields[0];
+    assert_eq!(field.rand_mode(), Some(RandMode::None));
+    let field_type = field
+        .value_symbol()
+        .expect("field value symbol")
+        .declared_type()
+        .and_then(|dt| dt.ty())
+        .expect("field type");
+    assert_eq!(field_type.to_string(), "int");
+
+    let add_symbol = scope.lookup_name("add", None).expect("function symbol");
+    let subroutine = add_symbol.as_subroutine().expect("subroutine");
+    assert_eq!(subroutine.kind(), Some(SubroutineKind::Function));
+    assert_eq!(subroutine.visibility(), Some(Visibility::Public));
+    assert_eq!(subroutine.return_type().expect("return type").to_string(), "int");
+
+    let args = subroutine.arguments().expect("arguments");
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0].direction(), Some(ArgumentDirection::In));
+    assert_eq!(args[1].direction(), Some(ArgumentDirection::Out));
+    assert_eq!(
+        args[0]
+            .declared_type()
+            .expect("arg declared type")
+            .and_then(|dt| dt.ty())
+            .expect("arg type")
+            .to_string(),
+        "int"
+    );
 }

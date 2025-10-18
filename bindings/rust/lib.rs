@@ -8,7 +8,7 @@ mod syntax;
 mod token;
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     ffi::c_char,
     fmt, hash, iter,
     marker::PhantomData,
@@ -28,6 +28,13 @@ pub use syntax::{
         WalkEvent,
     },
 };
+
+use crate::ffi_ext::{FfiError, FfiResult};
+
+#[inline]
+fn require_ptr<'a, T>(ptr: *const T) -> FfiResult<&'a T> {
+    unsafe { ptr.as_ref() }.ok_or(FfiError::NullPointer)
+}
 
 pub struct SVInt {
     _ptr: UniquePtr<ffi::SVInt>,
@@ -222,6 +229,52 @@ impl LookupLocation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LookupFlags(u32);
+
+impl LookupFlags {
+    pub const ALLOW_DECLARED_AFTER: LookupFlags = LookupFlags(1 << 1);
+    pub const ALLOW_INCOMPLETE_FORWARD_TYPEDEFS: LookupFlags = LookupFlags(1 << 5);
+    pub const ALLOW_ROOT: LookupFlags = LookupFlags(1 << 8);
+    pub const ALLOW_UNIT: LookupFlags = LookupFlags(1 << 9);
+    pub const ALWAYS_ALLOW_UPWARD: LookupFlags = LookupFlags(1 << 13);
+    pub const DISALLOW_UNIT_REFERENCES: LookupFlags = LookupFlags(1 << 14);
+    pub const DISALLOW_WILDCARD_IMPORT: LookupFlags = LookupFlags(1 << 2);
+    pub const IFACE_PORT_CONN: LookupFlags = LookupFlags(1 << 10);
+    pub const NONE: LookupFlags = LookupFlags(0);
+    pub const NO_PARENT_SCOPE: LookupFlags = LookupFlags(1 << 6);
+    pub const NO_SELECTORS: LookupFlags = LookupFlags(1 << 7);
+    pub const NO_UNDECLARED_ERROR: LookupFlags = LookupFlags(1 << 3);
+    pub const NO_UNDECLARED_ERROR_IF_UNINSTANTIATED: LookupFlags = LookupFlags(1 << 4);
+    pub const STATIC_INITIALIZER: LookupFlags = LookupFlags(1 << 11);
+    pub const TYPE: LookupFlags = LookupFlags(1 << 0);
+    pub const TYPE_REFERENCE: LookupFlags = LookupFlags(1 << 12);
+
+    #[inline]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn from_bits(bits: u32) -> LookupFlags {
+        LookupFlags(bits)
+    }
+}
+
+impl std::ops::BitOr for LookupFlags {
+    type Output = LookupFlags;
+
+    fn bitor(self, rhs: LookupFlags) -> LookupFlags {
+        LookupFlags(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for LookupFlags {
+    fn bitor_assign(&mut self, rhs: LookupFlags) {
+        self.0 |= rhs.0;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct SymbolRef<'a> {
     ptr: &'a ffi::Symbol,
@@ -254,6 +307,32 @@ impl<'a> SymbolRef<'a> {
     }
 
     #[inline]
+    pub fn as_value_symbol(self) -> Option<ValueSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asValueSymbol(self.ptr).as_ref() }.map(ValueSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_parameter(self) -> Option<ParameterSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asParameterSymbol(self.ptr).as_ref() }.map(ParameterSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_field(self) -> Option<FieldSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asFieldSymbol(self.ptr).as_ref() }.map(FieldSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_subroutine(self) -> Option<SubroutineSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asSubroutineSymbol(self.ptr).as_ref() }.map(SubroutineSymbolRef::new)
+    }
+
+    #[inline]
+    pub fn as_formal_argument(self) -> Option<FormalArgumentSymbolRef<'a>> {
+        unsafe { ffi::Symbol_asFormalArgumentSymbol(self.ptr).as_ref() }
+            .map(FormalArgumentSymbolRef::new)
+    }
+
+    #[inline]
     pub fn raw(self) -> &'a ffi::Symbol {
         self.ptr
     }
@@ -261,6 +340,309 @@ impl<'a> SymbolRef<'a> {
     #[inline]
     fn new(ptr: &'a ffi::Symbol) -> Self {
         SymbolRef { ptr }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubroutineKind {
+    Function,
+    Task,
+}
+
+impl SubroutineKind {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(SubroutineKind::Function),
+            1 => Some(SubroutineKind::Task),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Local,
+}
+
+impl Visibility {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Visibility::Public),
+            1 => Some(Visibility::Protected),
+            2 => Some(Visibility::Local),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RandMode {
+    None,
+    Rand,
+    RandC,
+}
+
+impl RandMode {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(RandMode::None),
+            1 => Some(RandMode::Rand),
+            2 => Some(RandMode::RandC),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentDirection {
+    In,
+    Out,
+    InOut,
+    Ref,
+}
+
+impl ArgumentDirection {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(ArgumentDirection::In),
+            1 => Some(ArgumentDirection::Out),
+            2 => Some(ArgumentDirection::InOut),
+            3 => Some(ArgumentDirection::Ref),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DeclaredTypeRef<'a> {
+    ptr: &'a ffi::DeclaredType,
+}
+
+impl<'a> DeclaredTypeRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::DeclaredType) -> Self {
+        DeclaredTypeRef { ptr }
+    }
+
+    #[inline]
+    pub fn ty(self) -> Option<TypeRef<'a>> {
+        unsafe { self.ptr.getType().as_ref() }.map(TypeRef::new)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TypeRef<'a> {
+    ptr: &'a ffi::Type,
+}
+
+impl<'a> TypeRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::Type) -> Self {
+        TypeRef { ptr }
+    }
+
+    #[inline]
+    pub fn to_string(self) -> String {
+        self.ptr.toString()
+    }
+
+    #[inline]
+    pub fn kind(self) -> u16 {
+        self.ptr.kind()
+    }
+
+    #[inline]
+    pub fn fields(self) -> FfiResult<Vec<FieldSymbolRef<'a>>> {
+        let count = self.ptr.fieldCount();
+        let mut fields = Vec::with_capacity(count);
+        for idx in 0..count {
+            let field = require_ptr(self.ptr.getField(idx))?;
+            fields.push(FieldSymbolRef::new(field));
+        }
+        Ok(fields)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ValueSymbolRef<'a> {
+    ptr: &'a ffi::ValueSymbol,
+}
+
+impl<'a> ValueSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::ValueSymbol) -> Self {
+        ValueSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn declared_type(self) -> Option<DeclaredTypeRef<'a>> {
+        unsafe { self.ptr.getType().as_ref() }.map(DeclaredTypeRef::new)
+    }
+
+    #[inline]
+    pub fn ty(self) -> Option<TypeRef<'a>> {
+        self.declared_type().and_then(|dt| dt.ty())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ParameterSymbolRef<'a> {
+    ptr: &'a ffi::ParameterSymbol,
+}
+
+impl<'a> ParameterSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::ParameterSymbol) -> Self {
+        ParameterSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn value_symbol(self) -> FfiResult<ValueSymbolRef<'a>> {
+        let ptr = require_ptr(ffi::ParameterSymbol_asValueSymbol(self.ptr))?;
+        Ok(ValueSymbolRef::new(ptr))
+    }
+
+    #[inline]
+    pub fn declared_type(self) -> FfiResult<Option<DeclaredTypeRef<'a>>> {
+        Ok(self.value_symbol()?.declared_type())
+    }
+
+    #[inline]
+    pub fn is_local(self) -> bool {
+        ffi::ParameterSymbol_isLocalParam(self.ptr)
+    }
+
+    #[inline]
+    pub fn is_port(self) -> bool {
+        ffi::ParameterSymbol_isPortParam(self.ptr)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FieldSymbolRef<'a> {
+    ptr: &'a ffi::FieldSymbol,
+}
+
+impl<'a> FieldSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::FieldSymbol) -> Self {
+        FieldSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn value_symbol(self) -> FfiResult<ValueSymbolRef<'a>> {
+        let ptr = require_ptr(ffi::FieldSymbol_asValueSymbol(self.ptr))?;
+        Ok(ValueSymbolRef::new(ptr))
+    }
+
+    #[inline]
+    pub fn bit_offset(self) -> u64 {
+        ffi::FieldSymbol_bitOffset(self.ptr)
+    }
+
+    #[inline]
+    pub fn field_index(self) -> u32 {
+        ffi::FieldSymbol_fieldIndex(self.ptr)
+    }
+
+    #[inline]
+    pub fn rand_mode(self) -> Option<RandMode> {
+        RandMode::from_raw(ffi::FieldSymbol_randMode(self.ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FormalArgumentSymbolRef<'a> {
+    ptr: &'a ffi::FormalArgumentSymbol,
+}
+
+impl<'a> FormalArgumentSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::FormalArgumentSymbol) -> Self {
+        FormalArgumentSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn value_symbol(self) -> FfiResult<ValueSymbolRef<'a>> {
+        let ptr = require_ptr(ffi::FormalArgumentSymbol_asValueSymbol(self.ptr))?;
+        Ok(ValueSymbolRef::new(ptr))
+    }
+
+    #[inline]
+    pub fn declared_type(self) -> FfiResult<Option<DeclaredTypeRef<'a>>> {
+        Ok(self.value_symbol()?.declared_type())
+    }
+
+    #[inline]
+    pub fn direction(self) -> Option<ArgumentDirection> {
+        ArgumentDirection::from_raw(ffi::FormalArgumentSymbol_direction(self.ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SubroutineSymbolRef<'a> {
+    ptr: &'a ffi::SubroutineSymbol,
+}
+
+impl<'a> SubroutineSymbolRef<'a> {
+    #[inline]
+    fn new(ptr: &'a ffi::SubroutineSymbol) -> Self {
+        SubroutineSymbolRef { ptr }
+    }
+
+    #[inline]
+    pub fn symbol(self) -> FfiResult<SymbolRef<'a>> {
+        let ptr = require_ptr(ffi::SubroutineSymbol_asSymbol(self.ptr))?;
+        Ok(SymbolRef::new(ptr))
+    }
+
+    #[inline]
+    pub fn scope(self) -> FfiResult<ScopeRef<'a>> {
+        let ptr = require_ptr(ffi::SubroutineSymbol_asScope(self.ptr))?;
+        Ok(ScopeRef::new(ptr))
+    }
+
+    #[inline]
+    pub fn kind(self) -> Option<SubroutineKind> {
+        SubroutineKind::from_raw(self.ptr.kind())
+    }
+
+    #[inline]
+    pub fn method_flags(self) -> u32 {
+        self.ptr.methodFlags()
+    }
+
+    #[inline]
+    pub fn visibility(self) -> Option<Visibility> {
+        Visibility::from_raw(self.ptr.visibility())
+    }
+
+    #[inline]
+    pub fn has_output_args(self) -> bool {
+        self.ptr.hasOutputArgs()
+    }
+
+    #[inline]
+    pub fn is_virtual(self) -> bool {
+        self.ptr.isVirtual()
+    }
+
+    #[inline]
+    pub fn return_type(self) -> FfiResult<TypeRef<'a>> {
+        Ok(TypeRef::new(require_ptr(self.ptr.getReturnType())?))
+    }
+
+    #[inline]
+    pub fn arguments(self) -> FfiResult<Vec<FormalArgumentSymbolRef<'a>>> {
+        let count = self.ptr.argumentCount();
+        let mut args = Vec::with_capacity(count);
+        for idx in 0..count {
+            let arg = require_ptr(self.ptr.argumentAt(idx))?;
+            args.push(FormalArgumentSymbolRef::new(arg));
+        }
+        Ok(args)
     }
 }
 
@@ -303,13 +685,53 @@ impl<'a> ScopeRef<'a> {
     }
 
     #[inline]
-    pub fn visible_symbols(self) -> Vec<SymbolRef<'a>> {
-        self.visible_symbols_from(self)
+    pub fn visible_symbols(self) -> FfiResult<Vec<SymbolRef<'a>>> {
+        self.visible_symbols_with(self, None, LookupFlags::NONE)
     }
 
     #[inline]
-    pub fn visible_symbols_from(self, view: ScopeRef<'_>) -> Vec<SymbolRef<'a>> {
-        self.members().filter(|sym| sym.is_visible_from(view)).collect::<Vec<_>>()
+    pub fn visible_symbols_from(self, view: ScopeRef<'_>) -> FfiResult<Vec<SymbolRef<'a>>> {
+        self.visible_symbols_with(view, None, LookupFlags::NONE)
+    }
+
+    pub fn visible_symbols_with(
+        self,
+        view: ScopeRef<'_>,
+        location: Option<&LookupLocation>,
+        flags: LookupFlags,
+    ) -> FfiResult<Vec<SymbolRef<'a>>> {
+        let mut seen: HashSet<*const ffi::Symbol> = HashSet::new();
+        let mut symbols = Vec::new();
+        let mut current = Some(self);
+        while let Some(scope) = current {
+            scope.collect_visible_symbols_into(view, location, flags, &mut seen, &mut symbols)?;
+            current = scope.as_symbol().parent_scope();
+        }
+        Ok(symbols)
+    }
+
+    fn collect_visible_symbols_into(
+        self,
+        view: ScopeRef<'_>,
+        location: Option<&LookupLocation>,
+        flags: LookupFlags,
+        seen: &mut HashSet<*const ffi::Symbol>,
+        out: &mut Vec<SymbolRef<'a>>,
+    ) -> FfiResult<()> {
+        let loc_ptr = location.and_then(|loc| loc.as_ref()).map_or(std::ptr::null(), |ptr| ptr);
+        let raw =
+            unsafe { ffi::Scope_getVisibleSymbols(self.ptr, view.ptr, loc_ptr, flags.bits()) };
+        for ptr in raw {
+            if ptr == 0 {
+                return Err(FfiError::NullPointer);
+            }
+            let symbol =
+                unsafe { (ptr as *const ffi::Symbol).as_ref() }.ok_or(FfiError::NullPointer)?;
+            if seen.insert(symbol as *const _) {
+                out.push(SymbolRef::new(symbol));
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -1128,10 +1550,10 @@ impl<'a> PackageSymbol<'a> {
         (!ptr.is_null()).then_some(Self { ptr, _marker: PhantomData })
     }
 
-    pub fn scope(&self) -> ScopeRef<'a> {
-        let pkg = unsafe { &*self.ptr };
-        let scope_ptr = unsafe { ffi::PackageSymbol_asScope(pkg).as_ref().expect("package scope") };
-        ScopeRef::new(scope_ptr)
+    pub fn scope(&self) -> FfiResult<ScopeRef<'a>> {
+        let pkg = unsafe { self.ptr.as_ref() }.ok_or(FfiError::NullPointer)?;
+        let scope = require_ptr(ffi::PackageSymbol_asScope(pkg))?;
+        Ok(ScopeRef::new(scope))
     }
 }
 
@@ -1180,18 +1602,21 @@ impl Compilation {
         }
     }
 
-    pub fn root(&mut self) -> Option<RootSymbol<'_>> {
-        unsafe { ffi::Compilation::getRoot(self._ptr.as_mut().unwrap()).as_ref() }
-            .map(|root| RootSymbol::new(root))
+    pub fn root(&mut self) -> FfiResult<RootSymbol<'_>> {
+        let compilation = self._ptr.as_mut().ok_or(FfiError::NullPointer)?;
+        let root_ptr = ffi::Compilation::getRoot(compilation);
+        let root = require_ptr(root_ptr)?;
+        Ok(RootSymbol::new(root))
     }
 
-    pub fn source_manager(&mut self) -> Option<SourceManagerRef<'_>> {
-        let ptr = ffi::Compilation::getSourceManager(self._ptr.as_mut().unwrap());
+    pub fn source_manager(&mut self) -> FfiResult<SourceManagerRef<'_>> {
+        let compilation = self._ptr.as_mut().ok_or(FfiError::NullPointer)?;
+        let ptr = ffi::Compilation::getSourceManager(compilation);
         if let Some(sm) = SourceManagerRef::new(ptr) {
-            return Some(sm);
+            return Ok(sm);
         }
         let default = ffi::SourceManager_getDefault();
-        SourceManagerRef::new(default)
+        SourceManagerRef::new(default).ok_or(FfiError::NullPointer)
     }
 
     pub fn get_package(&self, name: &str) -> Option<PackageSymbol<'_>> {

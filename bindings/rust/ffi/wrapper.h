@@ -1,6 +1,7 @@
 #pragma once
 #include "rust/cxx.h"
 #include <cassert>
+#include <compare>
 #include <cstddef>
 #include <iostream>
 #include <memory>
@@ -10,10 +11,17 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/Scope.h"
 #include "slang/ast/Symbol.h"
+#include "slang/ast/SemanticFacts.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
+#include "slang/ast/symbols/ParameterSymbols.h"
+#include "slang/ast/symbols/SubroutineSymbols.h"
+#include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/ast/types/DeclaredType.h"
 #include "slang/ast/types/Type.h"
+#include "slang/ast/types/AllTypes.h"
 #include "slang/diagnostics/Diagnostics.h"
 #include "slang/numeric/ConstantValue.h"
 #include "slang/numeric/SVInt.h"
@@ -294,6 +302,26 @@ inline static const ::slang::ast::Symbol* Scope_getFirstMember(const ::slang::as
     return scope.getFirstMember();
 }
 
+inline static const ::slang::ast::ParameterSymbol* Symbol_asParameterSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::ParameterSymbol>();
+}
+
+inline static const ::slang::ast::FieldSymbol* Symbol_asFieldSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::FieldSymbol>();
+}
+
+inline static const ::slang::ast::SubroutineSymbol* Symbol_asSubroutineSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::SubroutineSymbol>();
+}
+
+inline static const ::slang::ast::FormalArgumentSymbol* Symbol_asFormalArgumentSymbol(
+    const ::slang::ast::Symbol& symbol) {
+    return symbol.as_if<::slang::ast::FormalArgumentSymbol>();
+}
+
 // LookupLocation wrappers
 inline static std::unique_ptr<::slang::ast::LookupLocation> LookupLocation_max() {
     return std::make_unique<::slang::ast::LookupLocation>(::slang::ast::LookupLocation::max);
@@ -337,6 +365,226 @@ inline static const ::slang::ast::Symbol* Scope_find(const ::slang::ast::Scope& 
     return scope.find(name);
 }
 
+inline static rust::Vec<slang::uintptr_t> Scope_getVisibleSymbols(
+    const ::slang::ast::Scope& scope, const ::slang::ast::Scope& view,
+    const ::slang::ast::LookupLocation* location, uint32_t rawFlags) {
+    rust::Vec<slang::uintptr_t> out;
+    slang::flat_hash_set<const ::slang::ast::Symbol*> seen;
+    auto flags = slang::bitmask<::slang::ast::LookupFlags>(
+        static_cast<::slang::ast::LookupFlags>(rawFlags));
+
+    auto tryAdd = [&](const ::slang::ast::Symbol& candidate) {
+        const ::slang::ast::Symbol* symbol = &candidate;
+        if (symbol->kind == ::slang::ast::SymbolKind::TransparentMember)
+            symbol = &symbol->as<::slang::ast::TransparentMemberSymbol>().wrapped;
+
+        if (symbol->name.empty())
+            return;
+
+        if (!::slang::ast::Lookup::isVisibleFrom(*symbol, view))
+            return;
+
+        if (flags.has(::slang::ast::LookupFlags::Type)) {
+            if (!symbol->isType() && symbol->kind != ::slang::ast::SymbolKind::TypeParameter &&
+                symbol->kind != ::slang::ast::SymbolKind::GenericClassDef) {
+                return;
+            }
+        }
+        else {
+            switch (symbol->kind) {
+                case ::slang::ast::SymbolKind::Subroutine:
+                case ::slang::ast::SymbolKind::InstanceArray:
+                case ::slang::ast::SymbolKind::Sequence:
+                case ::slang::ast::SymbolKind::Property:
+                case ::slang::ast::SymbolKind::Checker:
+                case ::slang::ast::SymbolKind::UninstantiatedDef:
+                    break;
+                case ::slang::ast::SymbolKind::Instance:
+                    if (!symbol->as<::slang::ast::InstanceSymbol>().isInterface())
+                        return;
+                    break;
+                default:
+                    if (!symbol->isValue())
+                        return;
+                    break;
+            }
+        }
+
+        if (symbol->kind == ::slang::ast::SymbolKind::Subroutine &&
+            symbol->as<::slang::ast::SubroutineSymbol>().flags.has(
+                ::slang::ast::MethodFlags::Constructor)) {
+            return;
+        }
+
+        if (::slang::ast::VariableSymbol::isKind(symbol->kind) &&
+            symbol->as<::slang::ast::VariableSymbol>().flags.has(
+                ::slang::ast::VariableFlags::CompilerGenerated)) {
+            return;
+        }
+
+        if (location && !flags.has(::slang::ast::LookupFlags::AllowDeclaredAfter)) {
+            auto parentScope = symbol->getParentScope();
+            if (parentScope && parentScope == location->getScope()) {
+                auto beforeLoc = ::slang::ast::LookupLocation::before(*symbol);
+                if (beforeLoc > *location)
+                    return;
+            }
+        }
+
+        if (seen.emplace(symbol).second)
+            out.push_back(reinterpret_cast<slang::uintptr_t>(symbol));
+    };
+
+    for (auto& member : scope.members())
+        tryAdd(member);
+
+    if (auto* importData = scope.getWildcardImportData()) {
+        for (auto* import : importData->wildcardImports) {
+            if (!import)
+                continue;
+            if (const auto* package = import->getPackage()) {
+                for (auto& member : package->members())
+                    tryAdd(member);
+            }
+        }
+    }
+
+    return out;
+}
+
+inline static const ::slang::ast::ValueSymbol* ParameterSymbol_asValueSymbol(
+    const ::slang::ast::ParameterSymbol& symbol) {
+    return static_cast<const ::slang::ast::ValueSymbol*>(&symbol);
+}
+
+inline static bool ParameterSymbol_isLocalParam(const ::slang::ast::ParameterSymbol& symbol) {
+    return symbol.isLocalParam();
+}
+
+inline static bool ParameterSymbol_isPortParam(const ::slang::ast::ParameterSymbol& symbol) {
+    return symbol.isPortParam();
+}
+
+inline static const ::slang::ast::ValueSymbol* FieldSymbol_asValueSymbol(
+    const ::slang::ast::FieldSymbol& symbol) {
+    return static_cast<const ::slang::ast::ValueSymbol*>(&symbol);
+}
+
+inline static uint64_t FieldSymbol_bitOffset(const ::slang::ast::FieldSymbol& symbol) {
+    return symbol.bitOffset;
+}
+
+inline static uint32_t FieldSymbol_fieldIndex(const ::slang::ast::FieldSymbol& symbol) {
+    return symbol.fieldIndex;
+}
+
+inline static uint8_t FieldSymbol_randMode(const ::slang::ast::FieldSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.randMode);
+}
+
+inline static const ::slang::ast::Symbol* SubroutineSymbol_asSymbol(
+    const ::slang::ast::SubroutineSymbol& symbol) {
+    return static_cast<const ::slang::ast::Symbol*>(&symbol);
+}
+
+inline static const ::slang::ast::Scope* SubroutineSymbol_asScope(
+    const ::slang::ast::SubroutineSymbol& symbol) {
+    return static_cast<const ::slang::ast::Scope*>(&symbol);
+}
+
+inline static uint8_t SubroutineSymbol_kind(const ::slang::ast::SubroutineSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.subroutineKind);
+}
+
+inline static uint32_t SubroutineSymbol_methodFlags(const ::slang::ast::SubroutineSymbol& symbol) {
+    return static_cast<uint32_t>(symbol.flags.bits());
+}
+
+inline static uint8_t SubroutineSymbol_visibility(const ::slang::ast::SubroutineSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.visibility);
+}
+
+inline static bool SubroutineSymbol_hasOutputArgs(const ::slang::ast::SubroutineSymbol& symbol) {
+    return symbol.hasOutputArgs();
+}
+
+inline static bool SubroutineSymbol_isVirtual(const ::slang::ast::SubroutineSymbol& symbol) {
+    return symbol.isVirtual();
+}
+
+inline static const ::slang::ast::Type* SubroutineSymbol_getReturnType(
+    const ::slang::ast::SubroutineSymbol& symbol) {
+    return &symbol.getReturnType();
+}
+
+inline static size_t SubroutineSymbol_argumentCount(
+    const ::slang::ast::SubroutineSymbol& symbol) {
+    return symbol.getArguments().size();
+}
+
+inline static const ::slang::ast::FormalArgumentSymbol* SubroutineSymbol_argumentAt(
+    const ::slang::ast::SubroutineSymbol& symbol, size_t index) {
+    auto args = symbol.getArguments();
+    if (index >= args.size())
+        return nullptr;
+    return args[index];
+}
+
+inline static const ::slang::ast::ValueSymbol* FormalArgumentSymbol_asValueSymbol(
+    const ::slang::ast::FormalArgumentSymbol& symbol) {
+    return static_cast<const ::slang::ast::ValueSymbol*>(&symbol);
+}
+
+inline static uint8_t FormalArgumentSymbol_direction(
+    const ::slang::ast::FormalArgumentSymbol& symbol) {
+    return static_cast<uint8_t>(symbol.direction);
+}
+
+inline static size_t Type_fieldCount(const ::slang::ast::Type& type) {
+    const auto& canonical = type.getCanonicalType();
+    switch (canonical.kind) {
+        case ::slang::ast::SymbolKind::PackedStructType: {
+            auto& packed = static_cast<const ::slang::ast::PackedStructType&>(canonical);
+            size_t count = 0;
+            for (auto member = packed.getFirstMember(); member; member = member->getNextSibling())
+                if (member->kind == ::slang::ast::SymbolKind::Field)
+                    count++;
+            return count;
+        }
+        case ::slang::ast::SymbolKind::UnpackedStructType: {
+            auto& structType = static_cast<const ::slang::ast::UnpackedStructType&>(canonical);
+            return structType.fields.size();
+        }
+        default:
+            return 0;
+    }
+}
+
+inline static const ::slang::ast::FieldSymbol* Type_getField(const ::slang::ast::Type& type,
+                                                             size_t index) {
+    const auto& canonical = type.getCanonicalType();
+    switch (canonical.kind) {
+        case ::slang::ast::SymbolKind::PackedStructType: {
+            auto& packed = static_cast<const ::slang::ast::PackedStructType&>(canonical);
+            size_t current = 0;
+            for (auto member = packed.getFirstMember(); member; member = member->getNextSibling()) {
+                if (member->kind == ::slang::ast::SymbolKind::Field) {
+                    if (current == index)
+                        return static_cast<const ::slang::ast::FieldSymbol*>(member);
+                    current++;
+                }
+            }
+            return nullptr;
+        }
+        case ::slang::ast::SymbolKind::UnpackedStructType: {
+            auto& structType = static_cast<const ::slang::ast::UnpackedStructType&>(canonical);
+            return index < structType.fields.size() ? structType.fields[index] : nullptr;
+        }
+        default:
+            return nullptr;
+    }
+}
+
 inline static bool Lookup_isVisibleFrom(const ::slang::ast::Symbol& symbol,
                                         const ::slang::ast::Scope& scope) {
     return ::slang::ast::Lookup::isVisibleFrom(symbol, scope);
@@ -370,18 +618,6 @@ inline static const ::slang::ast::Type* DeclaredType_getType(const ::slang::ast:
 } // namespace ast
 
 // ConstantValue wrappers
-inline static std::unique_ptr<SVInt> ConstantValue_integer(const ::slang::ConstantValue& cv) {
-    return std::make_unique<SVInt>(cv.integer());
-}
-
-inline static double ConstantValue_real(const ::slang::ConstantValue& cv) {
-    return cv.real();
-}
-
-inline static rust::String ConstantValue_str(const ::slang::ConstantValue& cv) {
-    return rust::String(std::string(cv.str()));
-}
-
 namespace ast {
 inline static rust::Vec<std::unique_ptr<::slang::Diagnostic>> Compilation_get_all_diagnostics(
     Compilation& compilation) {

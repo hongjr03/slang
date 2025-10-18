@@ -260,9 +260,17 @@ mod slang_ffi {
     unsafe extern "C++" {
         include!("slang/include/slang/ast/Symbol.h");
         include!("slang/include/slang/ast/Scope.h");
+        include!("slang/include/slang/ast/symbols/ParameterSymbols.h");
+        include!("slang/include/slang/ast/symbols/VariableSymbols.h");
+        include!("slang/include/slang/ast/symbols/SubroutineSymbols.h");
 
         type Symbol;
         type Scope;
+        type ParameterSymbol;
+        type FieldSymbol;
+        type SubroutineSymbol;
+        type FormalArgumentSymbol;
+        type ValueSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Symbol_kind(symbol: &Symbol) -> u16;
@@ -282,6 +290,78 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Scope_getFirstMember(scope: &Scope) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asParameterSymbol(symbol: &Symbol) -> *const ParameterSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asFieldSymbol(symbol: &Symbol) -> *const FieldSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asSubroutineSymbol(symbol: &Symbol) -> *const SubroutineSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_asFormalArgumentSymbol(symbol: &Symbol) -> *const FormalArgumentSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn ParameterSymbol_asValueSymbol(symbol: &ParameterSymbol) -> *const ValueSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn ParameterSymbol_isLocalParam(symbol: &ParameterSymbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn ParameterSymbol_isPortParam(symbol: &ParameterSymbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn FieldSymbol_asValueSymbol(symbol: &FieldSymbol) -> *const ValueSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn FieldSymbol_bitOffset(symbol: &FieldSymbol) -> u64;
+
+        #[namespace = "wrapper::ast"]
+        fn FieldSymbol_fieldIndex(symbol: &FieldSymbol) -> u32;
+
+        #[namespace = "wrapper::ast"]
+        fn FieldSymbol_randMode(symbol: &FieldSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_asSymbol(symbol: &SubroutineSymbol) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_asScope(symbol: &SubroutineSymbol) -> *const Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_kind(symbol: &SubroutineSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_methodFlags(symbol: &SubroutineSymbol) -> u32;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_visibility(symbol: &SubroutineSymbol) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_hasOutputArgs(symbol: &SubroutineSymbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_isVirtual(symbol: &SubroutineSymbol) -> bool;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_getReturnType(symbol: &SubroutineSymbol) -> *const Type;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_argumentCount(symbol: &SubroutineSymbol) -> usize;
+
+        #[namespace = "wrapper::ast"]
+        fn SubroutineSymbol_argumentAt(
+            symbol: &SubroutineSymbol,
+            index: usize,
+        ) -> *const FormalArgumentSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn FormalArgumentSymbol_asValueSymbol(symbol: &FormalArgumentSymbol) -> *const ValueSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn FormalArgumentSymbol_direction(symbol: &FormalArgumentSymbol) -> u8;
     }
 
     #[namespace = "slang::ast"]
@@ -325,6 +405,14 @@ mod slang_ffi {
 
         #[namespace = "wrapper::ast"]
         fn Scope_find(scope: &Scope, name: CxxSV) -> *const Symbol;
+
+        #[namespace = "wrapper::ast"]
+        unsafe fn Scope_getVisibleSymbols(
+            scope: &Scope,
+            view: &Scope,
+            location: *const LookupLocation,
+            flags: u32,
+        ) -> Vec<usize>;
     }
 
     #[namespace = "slang::ast"]
@@ -347,6 +435,12 @@ mod slang_ffi {
         fn Type_kind(ty: &Type) -> u16;
 
         #[namespace = "wrapper::ast"]
+        fn Type_fieldCount(ty: &Type) -> usize;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_getField(ty: &Type, index: usize) -> *const FieldSymbol;
+
+        #[namespace = "wrapper::ast"]
         fn DeclaredType_getType(dt: &DeclaredType) -> *const Type;
     }
 
@@ -354,37 +448,12 @@ mod slang_ffi {
     unsafe extern "C++" {
         include!("slang/include/slang/ast/symbols/ValueSymbol.h");
 
-        type ValueSymbol;
-
         #[namespace = "wrapper::ast"]
         fn Symbol_asValueSymbol(symbol: &Symbol) -> *const ValueSymbol;
 
         #[namespace = "wrapper::ast"]
         fn ValueSymbol_getType(vs: &ValueSymbol) -> *const DeclaredType;
     }
-
-    #[namespace = "slang"]
-    unsafe extern "C++" {
-        include!("slang/include/slang/numeric/ConstantValue.h");
-
-        type ConstantValue;
-
-        fn isInteger(self: &ConstantValue) -> bool;
-        fn isReal(self: &ConstantValue) -> bool;
-        fn isUnpacked(self: &ConstantValue) -> bool;
-        fn isString(self: &ConstantValue) -> bool;
-
-        #[namespace = "wrapper"]
-        fn ConstantValue_integer(cv: &ConstantValue) -> UniquePtr<SVInt>;
-
-        #[namespace = "wrapper"]
-        fn ConstantValue_real(cv: &ConstantValue) -> f64;
-
-        #[namespace = "wrapper"]
-        fn ConstantValue_str(cv: &ConstantValue) -> String;
-    }
-
-    impl UniquePtr<ConstantValue> {}
 
     #[namespace = "slang"]
     unsafe extern "C++" {
@@ -548,12 +617,18 @@ impl_functions! {
     impl Type {
         fn toString(&self) -> String |> Type_toString;
         fn kind(&self) -> u16 |> Type_kind;
+        fn fieldCount(&self) -> usize |> Type_fieldCount;
+        fn getField(&self, index: usize) -> *const FieldSymbol |> Type_getField;
     }
 }
 
 impl_functions! {
     impl Symbol {
         fn asValueSymbol(&self) -> *const ValueSymbol |> Symbol_asValueSymbol;
+        fn asParameterSymbol(&self) -> *const ParameterSymbol |> Symbol_asParameterSymbol;
+        fn asFieldSymbol(&self) -> *const FieldSymbol |> Symbol_asFieldSymbol;
+        fn asSubroutineSymbol(&self) -> *const SubroutineSymbol |> Symbol_asSubroutineSymbol;
+        fn asFormalArgumentSymbol(&self) -> *const FormalArgumentSymbol |> Symbol_asFormalArgumentSymbol;
     }
 }
 
@@ -564,15 +639,47 @@ impl_functions! {
 }
 
 impl_functions! {
-    impl DeclaredType {
-        fn getType(&self) -> *const Type |> DeclaredType_getType;
+    impl ParameterSymbol {
+        fn asValueSymbol(&self) -> *const ValueSymbol |> ParameterSymbol_asValueSymbol;
+        fn isLocalParam(&self) -> bool |> ParameterSymbol_isLocalParam;
+        fn isPortParam(&self) -> bool |> ParameterSymbol_isPortParam;
     }
 }
 
 impl_functions! {
-    impl ConstantValue {
-        fn integer(&self) -> UniquePtr<SVInt> |> ConstantValue_integer;
-        fn real(&self) -> f64 |> ConstantValue_real;
-        fn str(&self) -> String |> ConstantValue_str;
+    impl FieldSymbol {
+        fn asValueSymbol(&self) -> *const ValueSymbol |> FieldSymbol_asValueSymbol;
+        fn bitOffset(&self) -> u64 |> FieldSymbol_bitOffset;
+        fn fieldIndex(&self) -> u32 |> FieldSymbol_fieldIndex;
+        fn randMode(&self) -> u8 |> FieldSymbol_randMode;
+    }
+}
+
+impl_functions! {
+    impl SubroutineSymbol {
+        fn asSymbol(&self) -> *const Symbol |> SubroutineSymbol_asSymbol;
+        fn asScope(&self) -> *const Scope |> SubroutineSymbol_asScope;
+        fn kind(&self) -> u8 |> SubroutineSymbol_kind;
+        fn methodFlags(&self) -> u32 |> SubroutineSymbol_methodFlags;
+        fn visibility(&self) -> u8 |> SubroutineSymbol_visibility;
+        fn hasOutputArgs(&self) -> bool |> SubroutineSymbol_hasOutputArgs;
+        fn isVirtual(&self) -> bool |> SubroutineSymbol_isVirtual;
+        fn getReturnType(&self) -> *const Type |> SubroutineSymbol_getReturnType;
+        fn argumentCount(&self) -> usize |> SubroutineSymbol_argumentCount;
+        fn argumentAt(&self, index: usize) -> *const FormalArgumentSymbol
+            |> SubroutineSymbol_argumentAt;
+    }
+}
+
+impl_functions! {
+    impl FormalArgumentSymbol {
+        fn asValueSymbol(&self) -> *const ValueSymbol |> FormalArgumentSymbol_asValueSymbol;
+        fn direction(&self) -> u8 |> FormalArgumentSymbol_direction;
+    }
+}
+
+impl_functions! {
+    impl DeclaredType {
+        fn getType(&self) -> *const Type |> DeclaredType_getType;
     }
 }
