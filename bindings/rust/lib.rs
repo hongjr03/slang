@@ -175,6 +175,14 @@ impl SourceRange {
     }
 
     #[inline]
+    pub fn from_locations(start: &SourceLocation, end: &SourceLocation) -> Option<Self> {
+        let Some(start_ptr) = start._ptr.as_ref() else { return None };
+        let Some(end_ptr) = end._ptr.as_ref() else { return None };
+        let ptr = ffi::source_range_from_locations(start_ptr, end_ptr);
+        SourceRange::from_unique_ptr(ptr)
+    }
+
+    #[inline]
     pub fn start(&self) -> usize {
         self._ptr.start()
     }
@@ -348,6 +356,65 @@ impl<'a> SymbolRef<'a> {
     }
 
     #[inline]
+    pub fn syntax(self) -> Option<SyntaxNode<'a>> {
+        SyntaxNode::from_raw_ptr(self.ptr.getSyntax())
+    }
+
+    #[inline]
+    pub fn doc_comment_lines(self) -> Option<Vec<String>> {
+        self.collect_comment_lines(|token| token.doc_comment_lines())
+    }
+
+    #[inline]
+    pub fn doc_comment(self) -> Option<String> {
+        self.doc_comment_lines().map(|lines| lines.join("\n"))
+    }
+
+    #[inline]
+    pub fn leading_comment_lines(self) -> Option<Vec<String>> {
+        self.collect_comment_lines(|token| {
+            let lines = token.leading_comment_lines();
+            if lines.is_empty() { None } else { Some(lines) }
+        })
+    }
+
+    fn collect_comment_lines<F>(self, mut extractor: F) -> Option<Vec<String>>
+    where
+        F: FnMut(SyntaxToken<'a>) -> Option<Vec<String>>,
+    {
+        let mut node = self.syntax()?;
+
+        loop {
+            if !node.kind().is_list() {
+                if let Some(token) = node.first_token() {
+                    if let Some(lines) = extractor(token.tok) {
+                        return Some(lines);
+                    }
+                }
+            }
+
+            let mut parent = match node.parent() {
+                Some(parent) => parent,
+                None => return None,
+            };
+
+            while parent.kind().is_list() {
+                node = parent;
+                parent = match node.parent() {
+                    Some(p) => p,
+                    None => return None,
+                };
+            }
+
+            if is_comment_boundary(parent.kind()) {
+                return None;
+            }
+
+            node = parent;
+        }
+    }
+
+    #[inline]
     pub fn as_value_symbol(self) -> Option<ValueSymbolRef<'a>> {
         unsafe { ffi::Symbol_asValueSymbol(self.ptr).as_ref() }.map(ValueSymbolRef::new)
     }
@@ -471,10 +538,10 @@ impl VariableFlags {
 pub struct IntegralFlags(u8);
 
 impl IntegralFlags {
-    pub const NONE: IntegralFlags = IntegralFlags(0);
-    pub const SIGNED: IntegralFlags = IntegralFlags(1 << 0);
     pub const FOUR_STATE: IntegralFlags = IntegralFlags(1 << 1);
+    pub const NONE: IntegralFlags = IntegralFlags(0);
     pub const REG: IntegralFlags = IntegralFlags(1 << 2);
+    pub const SIGNED: IntegralFlags = IntegralFlags(1 << 0);
 
     #[inline]
     pub const fn bits(self) -> u8 {
@@ -1105,6 +1172,17 @@ impl<'a> SourceManagerRef<'a> {
     }
 
     #[inline]
+    pub fn source_range_from_text_range(
+        &self,
+        buffer: source_manager::BufferId,
+        range: text_size::TextRange,
+    ) -> Option<SourceRange> {
+        let start = self.make_location(buffer, range.start())?;
+        let end = self.make_location(buffer, range.end())?;
+        SourceRange::from_locations(&start, &end)
+    }
+
+    #[inline]
     pub fn file_name(&self, loc: &SourceLocation) -> String {
         self.as_ref().getFileName(loc._ptr.as_ref().expect("source location"))
     }
@@ -1560,6 +1638,180 @@ impl<'a> SyntaxToken<'a> {
             })
             .collect_vec();
         Either::Right(locs.into_iter().rev())
+    }
+
+    fn leading_comment_trivias(&self) -> Vec<SyntaxTrivia<'a>> {
+        let mut collected = Vec::new();
+        let mut collecting = false;
+
+        for trivia in self.trivias() {
+            match trivia.kind() {
+                kind if kind == TriviaKind::LINE_COMMENT || kind == TriviaKind::BLOCK_COMMENT => {
+                    if !collecting {
+                        collected.clear();
+                        collecting = true;
+                    }
+                    collected.push(trivia);
+                }
+                kind if kind == TriviaKind::END_OF_LINE => {
+                    if collecting {
+                        collected.push(trivia);
+                    }
+                }
+                kind if kind == TriviaKind::WHITESPACE => {}
+                _ => {
+                    collecting = false;
+                    collected.clear();
+                }
+            }
+        }
+
+        while collected.last().map_or(false, |t| t.kind() == TriviaKind::END_OF_LINE) {
+            collected.pop();
+        }
+
+        collected
+    }
+
+    fn strip_line_comment(raw: &str) -> String {
+        let mut content = raw.trim_start();
+        if content.starts_with("//") {
+            content = &content[2..];
+        }
+        if content.starts_with('/') || content.starts_with('!') {
+            content = &content[1..];
+        }
+        content.trim_start().to_string()
+    }
+
+    fn strip_block_comment(raw: &str) -> Vec<String> {
+        let mut body = raw.trim();
+        if let Some(stripped) = body.strip_prefix("/*") {
+            body = stripped;
+        }
+        if let Some(stripped) = body.strip_suffix("*/") {
+            body = stripped;
+        }
+
+        let mut lines: Vec<String> = body
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                let line = line.strip_prefix('*').map(|s| s.trim_start()).unwrap_or(line);
+                line.trim_end().to_string()
+            })
+            .collect();
+        trim_blank_lines(&mut lines);
+        lines
+    }
+
+    fn extract_doc_line(raw: &str) -> Option<String> {
+        let content = raw.trim_start();
+        if content.starts_with("///") || content.starts_with("//!") {
+            Some(content[3..].trim_start().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn extract_doc_block(raw: &str) -> Option<Vec<String>> {
+        let trimmed = raw.trim_start();
+        if !(trimmed.starts_with("/**") || trimmed.starts_with("/*!")) {
+            return None;
+        }
+        let lines = Self::strip_block_comment(raw);
+        if lines.is_empty() { Some(Vec::new()) } else { Some(lines) }
+    }
+
+    pub fn leading_comment_lines(&self) -> Vec<String> {
+        let trivias = self.leading_comment_trivias();
+        let mut lines = Vec::new();
+
+        for trivia in trivias {
+            match trivia.kind() {
+                kind if kind == TriviaKind::LINE_COMMENT => {
+                    let raw = trivia.get_raw_text().to_string();
+                    lines.push(Self::strip_line_comment(&raw));
+                }
+                kind if kind == TriviaKind::BLOCK_COMMENT => {
+                    let raw = trivia.get_raw_text().to_string();
+                    lines.extend(Self::strip_block_comment(&raw));
+                }
+                _ => {}
+            }
+        }
+
+        trim_blank_lines(&mut lines);
+        lines
+    }
+
+    pub fn doc_comment_lines(&self) -> Option<Vec<String>> {
+        let trivias = self.leading_comment_trivias();
+        if trivias.is_empty() {
+            return None;
+        }
+
+        if trivias.len() == 1 && trivias[0].kind() == TriviaKind::BLOCK_COMMENT {
+            let raw = trivias[0].get_raw_text().to_string();
+            let mut lines = Self::extract_doc_block(&raw)?;
+            trim_blank_lines(&mut lines);
+            if lines.is_empty() { None } else { Some(lines) }
+        } else {
+            let mut lines = Vec::new();
+            for trivia in trivias {
+                if trivia.kind() == TriviaKind::LINE_COMMENT {
+                    let raw = trivia.get_raw_text().to_string();
+                    let line = Self::extract_doc_line(&raw)?;
+                    lines.push(line);
+                }
+            }
+
+            if lines.is_empty() {
+                None
+            } else {
+                trim_blank_lines(&mut lines);
+                if lines.is_empty() { None } else { Some(lines) }
+            }
+        }
+    }
+
+    pub fn doc_comment(&self) -> Option<String> {
+        self.doc_comment_lines().map(|lines| lines.join("\n"))
+    }
+}
+
+#[inline]
+fn is_comment_boundary(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::COMPILATION_UNIT
+            | SyntaxKind::MODULE_DECLARATION
+            | SyntaxKind::INTERFACE_DECLARATION
+            | SyntaxKind::PROGRAM_DECLARATION
+            | SyntaxKind::PACKAGE_DECLARATION
+            | SyntaxKind::CLASS_DECLARATION
+            | SyntaxKind::COVERGROUP_DECLARATION
+            | SyntaxKind::CHECKER_DECLARATION
+            | SyntaxKind::CONFIG_DECLARATION
+    )
+}
+
+fn trim_blank_lines(lines: &mut Vec<String>) {
+    let mut start = 0;
+    while start < lines.len() && lines[start].trim().is_empty() {
+        start += 1;
+    }
+
+    let mut end = lines.len();
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+
+    if end < lines.len() {
+        lines.drain(end..);
+    }
+    if start > 0 {
+        lines.drain(0..start);
     }
 }
 

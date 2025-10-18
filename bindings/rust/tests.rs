@@ -3,7 +3,7 @@ use ast::{
 };
 use expect_test::expect;
 use smol_str::SmolStr;
-use text_size::TextSize;
+use text_size::{TextRange, TextSize};
 
 use super::*;
 use crate::{ArgumentDirection, RandMode, SubroutineKind, Visibility};
@@ -757,4 +757,74 @@ endpackage
             .to_string(),
         "int"
     );
+}
+
+#[test]
+fn doc_comment_extraction() {
+    let tree = SyntaxTree::from_text(
+        r#"
+module top;
+  /// Adds foo.
+  /// Multiline doc.
+  int foo;
+
+  /**
+   * Block doc summary
+   *
+   * more detail
+   */
+  function int bar();
+    return 0;
+  endfunction
+
+  // regular comment
+  int baz;
+endmodule
+"#,
+        "doc-test",
+        "",
+    );
+
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let root = compilation.root().expect("root");
+    let scope = root.as_scope();
+
+    let foo = scope.lookup_hierarchy("top.foo").expect("foo symbol");
+    assert_eq!(
+        foo.doc_comment().as_deref(),
+        Some("Adds foo.\nMultiline doc.")
+    );
+    assert_eq!(
+        foo.leading_comment_lines().unwrap(),
+        vec!["Adds foo.", "Multiline doc."]
+    );
+
+    let bar = scope.lookup_hierarchy("top.bar").expect("bar symbol");
+    assert_eq!(
+        bar.doc_comment().as_deref(),
+        Some("Block doc summary\n\nmore detail")
+    );
+
+    let baz = scope.lookup_hierarchy("top.baz").expect("baz symbol");
+    assert!(baz.doc_comment().is_none());
+    assert_eq!(baz.leading_comment_lines().unwrap(), vec!["regular comment"]);
+}
+
+#[test]
+fn source_range_from_text_range() {
+    let tree = SyntaxTree::from_text("module p; endmodule", "buffer", "");
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let mut source_manager = compilation.source_manager().expect("source manager");
+    let buffer = source_manager.assign_text("module p; endmodule").expect("buffer id");
+
+    let range = TextRange::new(TextSize::from(0), TextSize::from(6));
+    let source_range =
+        source_manager.source_range_from_text_range(buffer, range).expect("source range");
+
+    assert_eq!(source_range.start(), 0);
+    assert_eq!(source_range.end(), 6);
 }

@@ -26,6 +26,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper"]
         fn source_range_end(range: &SourceRange) -> usize;
+
+        #[namespace = "wrapper"]
+        fn source_range_from_locations(
+            start: &SourceLocation,
+            end: &SourceLocation,
+        ) -> UniquePtr<SourceRange>;
     }
 
     impl UniquePtr<SourceLocation> {}

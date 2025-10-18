@@ -50,6 +50,13 @@ inline static size_t source_range_end(const slang::SourceRange& range) {
     return range.end().offset();
 }
 
+inline static std::unique_ptr<SourceRange> source_range_from_locations(
+    const slang::SourceLocation& start, const slang::SourceLocation& end) {
+    if (!start.valid() || !end.valid())
+        return nullptr;
+    return std::make_unique<SourceRange>(start, end);
+}
+
 inline static uint8_t logic_t_value(const slang::logic_t& logic) {
     return logic.value;
 }
