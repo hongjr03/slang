@@ -2,13 +2,11 @@
 //!
 //! 这个模块封装了 slang FFI 的常用模式，提供更符合 Rust 习惯的 API。
 
-use std::marker::PhantomData;
-
 use text_size::{TextRange, TextSize};
 
 use crate::{
-    CxxSV,
-    ffi::{LookupLocation, SourceLocation, SourceRange, Symbol},
+    ScopeMemberIter, ScopeRef, SymbolRef,
+    ffi::{SourceLocation, SourceRange},
 };
 
 /// FFI 操作的结果类型
@@ -73,66 +71,54 @@ impl SourceLocationExt for SourceLocation {
 
 /// Symbol 迭代器
 pub struct SymbolIterator<'a> {
-    current: *const Symbol,
-    _phantom: PhantomData<&'a Symbol>,
+    inner: ScopeMemberIter<'a>,
 }
 
 impl<'a> SymbolIterator<'a> {
     /// 创建新的符号迭代器
-    pub fn new(first: *const Symbol) -> Self {
-        Self { current: first, _phantom: PhantomData }
+    pub fn new(scope: ScopeRef<'a>) -> Self {
+        Self { inner: scope.members() }
     }
 }
 
 impl<'a> Iterator for SymbolIterator<'a> {
-    type Item = &'a Symbol;
+    type Item = SymbolRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current.is_null() {
-            return None;
-        }
-
-        unsafe {
-            let symbol = &*self.current;
-            self.current = symbol.getNextSibling();
-            Some(symbol)
-        }
+        self.inner.next()
     }
 }
 
 /// Scope 成员迭代扩展
-pub trait ScopeExt {
+pub trait ScopeExt<'a> {
     /// 迭代所有成员
-    fn members(&self) -> SymbolIterator<'_>;
+    fn members(&self) -> SymbolIterator<'a>;
 
     /// 迭代指定类型的成员
-    fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol>;
+    fn members_of_kind(&self, kind: u16) -> Box<dyn Iterator<Item = SymbolRef<'a>> + 'a>;
 
     /// 查找直接子成员
-    fn find_member(&self, name: &str) -> Option<&Symbol>;
+    fn find_member(&self, name: &str) -> Option<SymbolRef<'a>>;
 
     /// 按名称执行完整查找
-    fn lookup_name(&self, name: &str) -> Option<&Symbol>;
+    fn lookup_name(&self, name: &str) -> Option<SymbolRef<'a>>;
 }
 
-impl ScopeExt for crate::ffi::Scope {
-    fn members(&self) -> SymbolIterator<'_> {
-        SymbolIterator::new(self.getFirstMember())
+impl<'a> ScopeExt<'a> for ScopeRef<'a> {
+    fn members(&self) -> SymbolIterator<'a> {
+        SymbolIterator::new(*self)
     }
 
-    fn members_of_kind(&self, kind: u16) -> impl Iterator<Item = &Symbol> {
-        self.members().filter(move |sym| sym.kind() == kind)
+    fn members_of_kind(&self, kind: u16) -> Box<dyn Iterator<Item = SymbolRef<'a>> + 'a> {
+        Box::new(ScopeRef::members(*self).filter(move |sym| sym.kind() == kind))
     }
 
-    fn find_member(&self, name: &str) -> Option<&Symbol> {
-        let ptr = self.find(CxxSV::new(name));
-        unsafe { ptr.as_ref() }
+    fn find_member(&self, name: &str) -> Option<SymbolRef<'a>> {
+        ScopeRef::find_member(*self, name)
     }
 
-    fn lookup_name(&self, name: &str) -> Option<&Symbol> {
-        let loc = LookupLocation::max();
-        let ptr = self.lookupName(CxxSV::new(name), loc.as_ref().unwrap());
-        unsafe { ptr.as_ref() }
+    fn lookup_name(&self, name: &str) -> Option<SymbolRef<'a>> {
+        ScopeRef::lookup_name(*self, name, None)
     }
 }
 

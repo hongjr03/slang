@@ -5,8 +5,6 @@ use expect_test::expect;
 use text_size::TextSize;
 
 use super::*;
-use crate::ffi_ext::ScopeExt;
-
 fn get_test_tree() -> SyntaxTree {
     SyntaxTree::from_text("module A(input a); wire x; endmodule;", "source", "")
 }
@@ -476,5 +474,52 @@ fn compilation_get_package_and_scope_lookup() {
     let scope = package.scope();
 
     assert!(scope.find_member("bar").is_some());
-    assert!(scope.lookup_name("baz").is_some());
+    assert!(scope.lookup_name("baz", None).is_some());
+}
+
+#[test]
+fn compilation_root_scope_iteration() {
+    let tree = SyntaxTree::from_text("module foo; endmodule", "source", "");
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(tree);
+
+    let root = compilation.root().expect("root symbol");
+    let scope = root.as_scope();
+
+    let mut members = scope.members();
+    assert!(members.next().is_some(), "expected root scope to contain members");
+}
+
+#[test]
+fn compilation_upsert_rebuilds_on_version_change() {
+    let mut compilation = Compilation::new();
+
+    let tree_v1 = SyntaxTree::from_text("module foo; endmodule", "foo", "");
+    assert!(compilation.upsert_syntax_tree("foo.sv", 1, tree_v1));
+
+    // Calling root finalizes current compilation; subsequent upserts should
+    // rebuild.
+    assert!(compilation.root().is_some());
+
+    let tree_same = SyntaxTree::from_text("module foo; endmodule", "foo", "");
+    assert!(!compilation.upsert_syntax_tree("foo.sv", 1, tree_same));
+
+    let tree_v2 = SyntaxTree::from_text("module foo; wire x; endmodule", "foo", "");
+    assert!(compilation.upsert_syntax_tree("foo.sv", 2, tree_v2));
+
+    assert!(compilation.remove_syntax_tree("foo.sv"));
+    assert!(!compilation.remove_syntax_tree("missing.sv"));
+}
+
+#[test]
+fn source_manager_instance_assign_text() {
+    let mut compilation = Compilation::new();
+    let mut sm = compilation.source_manager().expect("source manager");
+
+    let buffer = sm.assign_text("module inline; endmodule").expect("buffer id");
+    let text = sm.source_text(buffer).expect("source text");
+    assert_eq!(text, "module inline; endmodule");
+
+    let loc = sm.make_location(buffer, TextSize::from(0u32)).expect("location");
+    assert_eq!(loc.offset(), Some(0));
 }

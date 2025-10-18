@@ -8,6 +8,7 @@ mod syntax;
 mod token;
 
 use std::{
+    collections::{HashMap, hash_map::Entry},
     ffi::c_char,
     fmt, hash, iter,
     marker::PhantomData,
@@ -18,6 +19,7 @@ use std::{
 use cxx::{SharedPtr, UniquePtr};
 pub use ffi::CxxSV;
 use itertools::{Either, Itertools};
+use smol_str::SmolStr;
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
     cursor::SyntaxCursor,
@@ -191,6 +193,242 @@ impl Into<ops::Range<usize>> for SourceRange {
         let start = self.start();
         let end = self.end();
         start..end
+    }
+}
+
+pub struct LookupLocation {
+    _ptr: UniquePtr<ffi::LookupLocation>,
+}
+
+impl LookupLocation {
+    #[inline]
+    pub fn max() -> Self {
+        LookupLocation { _ptr: ffi::LookupLocation::max() }
+    }
+
+    #[inline]
+    pub fn before(symbol: SymbolRef<'_>) -> Self {
+        LookupLocation { _ptr: ffi::LookupLocation::before(symbol.ptr) }
+    }
+
+    #[inline]
+    pub fn after(symbol: SymbolRef<'_>) -> Self {
+        LookupLocation { _ptr: ffi::LookupLocation::after(symbol.ptr) }
+    }
+
+    #[inline]
+    pub fn as_ref(&self) -> Option<&ffi::LookupLocation> {
+        self._ptr.as_ref()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SymbolRef<'a> {
+    ptr: &'a ffi::Symbol,
+}
+
+impl<'a> SymbolRef<'a> {
+    #[inline]
+    pub fn kind(self) -> u16 {
+        self.ptr.kind()
+    }
+
+    #[inline]
+    pub fn next_sibling(self) -> Option<SymbolRef<'a>> {
+        unsafe { self.ptr.getNextSibling().as_ref() }.map(SymbolRef::new)
+    }
+
+    #[inline]
+    pub fn parent_scope(self) -> Option<ScopeRef<'a>> {
+        unsafe { self.ptr.getParentScope().as_ref() }.map(ScopeRef::new)
+    }
+
+    #[inline]
+    pub fn raw(self) -> &'a ffi::Symbol {
+        self.ptr
+    }
+
+    #[inline]
+    fn new(ptr: &'a ffi::Symbol) -> Self {
+        SymbolRef { ptr }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ScopeRef<'a> {
+    ptr: &'a ffi::Scope,
+}
+
+impl<'a> ScopeRef<'a> {
+    #[inline]
+    pub fn as_symbol(self) -> SymbolRef<'a> {
+        let ptr = unsafe { ffi::Scope_asSymbol(self.ptr).as_ref().expect("scope symbol") };
+        SymbolRef::new(ptr)
+    }
+
+    #[inline]
+    pub fn members(self) -> ScopeMemberIter<'a> {
+        ScopeMemberIter { current: self.ptr.getFirstMember(), _marker: PhantomData }
+    }
+
+    #[inline]
+    pub fn find_member(self, name: &str) -> Option<SymbolRef<'a>> {
+        unsafe { self.ptr.find(CxxSV::new(name)).as_ref() }.map(SymbolRef::new)
+    }
+
+    #[inline]
+    pub fn lookup_name(
+        self,
+        name: &str,
+        location: Option<&LookupLocation>,
+    ) -> Option<SymbolRef<'a>> {
+        let mut temp_holder: Option<LookupLocation> = None;
+        let loc_ref = match location {
+            Some(loc) => loc.as_ref(),
+            None => {
+                temp_holder = Some(LookupLocation::max());
+                temp_holder.as_ref().and_then(|loc| loc.as_ref())
+            }
+        }?;
+        unsafe { self.ptr.lookupName(CxxSV::new(name), loc_ref).as_ref() }.map(SymbolRef::new)
+    }
+
+    #[inline]
+    pub fn raw(self) -> &'a ffi::Scope {
+        self.ptr
+    }
+
+    #[inline]
+    fn new(ptr: &'a ffi::Scope) -> Self {
+        ScopeRef { ptr }
+    }
+}
+
+pub struct ScopeMemberIter<'a> {
+    current: *const ffi::Symbol,
+    _marker: PhantomData<&'a ffi::Scope>,
+}
+
+impl<'a> Iterator for ScopeMemberIter<'a> {
+    type Item = SymbolRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current;
+        if current.is_null() {
+            return None;
+        }
+        unsafe {
+            let sym = &*current;
+            self.current = sym.getNextSibling();
+            Some(SymbolRef::new(sym))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RootSymbol<'a> {
+    ptr: &'a ffi::RootSymbol,
+}
+
+impl<'a> RootSymbol<'a> {
+    #[inline]
+    pub fn as_scope(self) -> ScopeRef<'a> {
+        let scope = unsafe { ffi::RootSymbol_asScope(self.ptr).as_ref().expect("root scope") };
+        ScopeRef::new(scope)
+    }
+
+    #[inline]
+    pub fn as_symbol(self) -> SymbolRef<'a> {
+        let sym = unsafe { ffi::RootSymbol_asSymbol(self.ptr).as_ref().expect("root symbol") };
+        SymbolRef::new(sym)
+    }
+
+    #[inline]
+    fn new(ptr: &'a ffi::RootSymbol) -> Self {
+        RootSymbol { ptr }
+    }
+}
+
+pub struct SourceManagerRef<'a> {
+    ptr: *mut ffi::SourceManager,
+    _marker: PhantomData<&'a mut ffi::SourceManager>,
+}
+
+impl<'a> SourceManagerRef<'a> {
+    #[inline]
+    fn new(ptr: *mut ffi::SourceManager) -> Option<Self> {
+        (!ptr.is_null()).then_some(SourceManagerRef { ptr, _marker: PhantomData })
+    }
+
+    #[inline]
+    fn as_pin(&mut self) -> Pin<&mut ffi::SourceManager> {
+        unsafe { Pin::new_unchecked(&mut *self.ptr) }
+    }
+
+    #[inline]
+    fn as_ref(&self) -> &ffi::SourceManager {
+        unsafe { &*self.ptr }
+    }
+
+    #[inline]
+    pub fn assign_text(&mut self, text: &str) -> Option<source_manager::BufferId> {
+        let id = ffi::SourceManager_assignText(self.as_pin(), CxxSV::new(text));
+        (id != 0).then_some(source_manager::BufferId(id))
+    }
+
+    #[inline]
+    pub fn assign_text_with_path(
+        &mut self,
+        path: &str,
+        text: &str,
+    ) -> Option<source_manager::BufferId> {
+        let id = ffi::SourceManager_assignTextWithPath(
+            self.as_pin(),
+            CxxSV::new(path),
+            CxxSV::new(text),
+        );
+        (id != 0).then_some(source_manager::BufferId(id))
+    }
+
+    #[inline]
+    pub fn source_text(&self, buffer: source_manager::BufferId) -> Option<String> {
+        if !buffer.is_valid() {
+            return None;
+        }
+        let mut text = ffi::SourceManager_getSourceText(self.as_ref(), buffer.raw());
+        if text.ends_with('\0') {
+            text.pop();
+        }
+        Some(text)
+    }
+
+    #[inline]
+    pub fn make_location(
+        &self,
+        buffer: source_manager::BufferId,
+        offset: text_size::TextSize,
+    ) -> Option<SourceLocation> {
+        if !buffer.is_valid() {
+            return None;
+        }
+        let offset_u32: u32 = offset.into();
+        let ptr = ffi::SourceManager_makeLocation(buffer.raw(), offset_u32 as usize);
+        SourceLocation::from_unique_ptr(ptr)
+    }
+
+    #[inline]
+    pub fn file_name(&self, loc: &SourceLocation) -> String {
+        self.as_ref().getFileName(loc._ptr.as_ref().expect("source location"))
+    }
+
+    #[inline]
+    pub fn line_number(&self, loc: &SourceLocation) -> u32 {
+        self.as_ref().getLineNumber(loc._ptr.as_ref().expect("source location"))
+    }
+
+    #[inline]
+    pub fn column_number(&self, loc: &SourceLocation) -> u32 {
+        self.as_ref().getColumnNumber(loc._ptr.as_ref().expect("source location"))
     }
 }
 
@@ -696,7 +934,7 @@ pub mod source_manager {
             return None;
         }
         let offset_u32: u32 = offset.into();
-        let ptr = ffi::SourceManager_makeLocationDefault(buffer.raw(), offset_u32 as usize);
+        let ptr = ffi::SourceManager_makeLocation(buffer.raw(), offset_u32 as usize);
         crate::SourceLocation::from_unique_ptr(ptr)
     }
 }
@@ -852,6 +1090,13 @@ impl From<TokenKind> for SyntaxElementKind {
 
 pub struct Compilation {
     _ptr: UniquePtr<ffi::Compilation>,
+    tracked: HashMap<SmolStr, TrackedTree>,
+    anonymous: Vec<SyntaxTree>,
+}
+
+struct TrackedTree {
+    version: u64,
+    tree: SyntaxTree,
 }
 
 pub struct PackageSymbol<'a> {
@@ -864,25 +1109,95 @@ impl<'a> PackageSymbol<'a> {
         (!ptr.is_null()).then_some(Self { ptr, _marker: PhantomData })
     }
 
-    pub fn scope(&self) -> &'a ffi::Scope {
+    pub fn scope(&self) -> ScopeRef<'a> {
         let pkg = unsafe { &*self.ptr };
-        let scope_ptr = pkg.asScope();
-        unsafe { scope_ptr.as_ref().expect("package scope") }
+        let scope_ptr = unsafe { ffi::PackageSymbol_asScope(pkg).as_ref().expect("package scope") };
+        ScopeRef::new(scope_ptr)
     }
 }
 
 impl Compilation {
     pub fn new() -> Self {
-        Compilation { _ptr: ffi::Compilation::new() }
+        Compilation {
+            _ptr: ffi::Compilation::new(),
+            tracked: HashMap::new(),
+            anonymous: Vec::new(),
+        }
     }
 
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
-        ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
+        self.push_tree(&tree);
+        self.anonymous.push(tree);
+    }
+
+    pub fn upsert_syntax_tree(
+        &mut self,
+        path: impl Into<SmolStr>,
+        version: u64,
+        tree: SyntaxTree,
+    ) -> bool {
+        let path = path.into();
+        match self.tracked.entry(path) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().version == version {
+                    return false;
+                }
+                entry.insert(TrackedTree { version, tree });
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(TrackedTree { version, tree });
+            }
+        }
+        self.rebuild_all();
+        true
+    }
+
+    pub fn remove_syntax_tree(&mut self, path: &str) -> bool {
+        if self.tracked.remove(path).is_some() {
+            self.rebuild_all();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn root(&mut self) -> Option<RootSymbol<'_>> {
+        unsafe { ffi::Compilation::getRoot(self._ptr.as_mut().unwrap()).as_ref() }
+            .map(|root| RootSymbol::new(root))
+    }
+
+    pub fn source_manager(&mut self) -> Option<SourceManagerRef<'_>> {
+        let ptr = ffi::Compilation::getSourceManager(self._ptr.as_mut().unwrap());
+        if let Some(sm) = SourceManagerRef::new(ptr) {
+            return Some(sm);
+        }
+        let default = ffi::SourceManager_getDefault();
+        SourceManagerRef::new(default)
     }
 
     pub fn get_package(&self, name: &str) -> Option<PackageSymbol<'_>> {
         let ptr = ffi::Compilation::getPackage(self._ptr.as_ref().unwrap(), CxxSV::new(name));
         PackageSymbol::from_ptr(ptr)
+    }
+
+    fn push_tree(&mut self, tree: &SyntaxTree) {
+        ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr.clone());
+    }
+
+    fn rebuild_all(&mut self) {
+        let mut new_ptr = ffi::Compilation::new();
+
+        for tree in &self.anonymous {
+            ffi::Compilation::add_syntax_tree(new_ptr.as_mut().unwrap(), tree._ptr.clone());
+        }
+
+        let mut tracked: Vec<_> = self.tracked.iter().collect();
+        tracked.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (_, entry) in tracked {
+            ffi::Compilation::add_syntax_tree(new_ptr.as_mut().unwrap(), entry.tree._ptr.clone());
+        }
+
+        self._ptr = new_ptr;
     }
 }
 

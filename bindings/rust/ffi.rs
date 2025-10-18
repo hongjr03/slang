@@ -193,6 +193,25 @@ mod slang_ffi {
 
         #[namespace = "wrapper"]
         fn SourceManager_getSourceTextDefault(buffer_id: u32) -> String;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_assignText(sm: Pin<&mut SourceManager>, text: CxxSV) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_assignTextWithPath(
+            sm: Pin<&mut SourceManager>,
+            path: CxxSV,
+            text: CxxSV,
+        ) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getSourceText(sm: &SourceManager, buffer_id: u32) -> String;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_makeLocation(buffer_id: u32, offset: usize) -> UniquePtr<SourceLocation>;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getDefault() -> *mut SourceManager;
     }
 
     #[namespace = "slang::ast"]
@@ -202,6 +221,7 @@ mod slang_ffi {
 
         type Compilation;
         type PackageSymbol;
+        type RootSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Compilation_new() -> UniquePtr<Compilation>;
@@ -213,10 +233,10 @@ mod slang_ffi {
         );
 
         #[namespace = "wrapper::ast"]
-        fn Compilation_getSourceManager(comp: Pin<&mut Compilation>) -> *const SourceManager;
+        fn Compilation_getSourceManager(comp: Pin<&mut Compilation>) -> *mut SourceManager;
 
         #[namespace = "wrapper::ast"]
-        fn Compilation_getRoot(comp: Pin<&mut Compilation>) -> *const Symbol;
+        fn Compilation_getRoot(comp: Pin<&mut Compilation>) -> *const RootSymbol;
 
         #[namespace = "wrapper::ast"]
         fn Compilation_getPackage(comp: &Compilation, name: CxxSV) -> *const PackageSymbol;
@@ -228,6 +248,12 @@ mod slang_ffi {
     unsafe extern "C++" {
         #[namespace = "wrapper::ast"]
         fn PackageSymbol_asScope(pkg: &PackageSymbol) -> *const Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn RootSymbol_asScope(root: &RootSymbol) -> *const Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn RootSymbol_asSymbol(root: &RootSymbol) -> *const Symbol;
     }
 
     #[namespace = "slang::ast"]
@@ -460,8 +486,8 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
-        fn getSourceManager(self_: Pin<&mut Compilation>) -> *const SourceManager |> Compilation_getSourceManager;
-        fn getRoot(self_: Pin<&mut Compilation>) -> *const Symbol |> Compilation_getRoot;
+        fn getSourceManager(self_: Pin<&mut Compilation>) -> *mut SourceManager |> Compilation_getSourceManager;
+        fn getRoot(self_: Pin<&mut Compilation>) -> *const RootSymbol |> Compilation_getRoot;
         fn getPackage(&self, name: CxxSV) -> *const PackageSymbol |> Compilation_getPackage;
     }
 }
