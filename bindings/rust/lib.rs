@@ -125,6 +125,14 @@ impl SourceLocation {
         let offset = self._ptr.offset();
         (offset == Self::NO_LOCATION).not().then_some(offset)
     }
+
+    #[inline]
+    pub fn buffer_id(&self) -> Option<source_manager::BufferId> {
+        self._ptr
+            .as_ref()
+            .map(|loc| source_manager::BufferId(ffi::SourceLocation_buffer(loc)))
+            .filter(|id| id.is_valid())
+    }
 }
 
 impl fmt::Debug for SourceLocation {
@@ -631,6 +639,8 @@ impl Eq for SyntaxTree {}
 
 /// 与默认 `SourceManager` 交互的辅助 API。
 pub mod source_manager {
+    use text_size::TextSize;
+
     use super::{CxxSV, ffi};
 
     /// 由 `SourceManager` 分配的缓冲区 ID。
@@ -676,6 +686,17 @@ pub mod source_manager {
             text.pop();
         }
         Some(text)
+    }
+
+    /// 创建给定缓冲区与偏移处的 `SourceLocation`。
+    #[inline]
+    pub fn make_location(buffer: BufferId, offset: TextSize) -> Option<crate::SourceLocation> {
+        if !buffer.is_valid() {
+            return None;
+        }
+        let offset_u32: u32 = offset.into();
+        let ptr = ffi::SourceManager_makeLocationDefault(buffer.raw(), offset_u32 as usize);
+        crate::SourceLocation::from_unique_ptr(ptr)
     }
 }
 

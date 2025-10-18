@@ -152,6 +152,18 @@ namespace wrapper {
     return sm.getColumnNumber(loc);
   }
 
+  inline static std::unique_ptr<slang::SourceLocation> SourceManager_makeLocationDefault(uint32_t buffer_id, size_t offset) {
+    if (buffer_id == 0)
+      return nullptr;
+    std::string_view empty_view{};
+    auto loc = ::slang::SourceLocation(::slang::BufferID(buffer_id, empty_view), offset);
+    return std::make_unique<slang::SourceLocation>(loc);
+  }
+
+  inline static uint32_t SourceLocation_buffer(const ::slang::SourceLocation& loc) {
+    return loc.buffer().getId();
+  }
+
   inline static uint32_t SourceManager_assignTextDefault(std::string_view text) {
     auto& sm = ::slang::syntax::SyntaxTree::getDefaultSourceManager();
     auto buffer = sm.assignText(text);

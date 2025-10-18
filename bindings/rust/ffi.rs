@@ -177,6 +177,15 @@ mod slang_ffi {
         fn SourceManager_getColumnNumber(sm: &SourceManager, loc: &SourceLocation) -> u32;
 
         #[namespace = "wrapper"]
+        fn SourceManager_makeLocationDefault(
+            buffer_id: u32,
+            offset: usize,
+        ) -> UniquePtr<SourceLocation>;
+
+        #[namespace = "wrapper"]
+        fn SourceLocation_buffer(loc: &SourceLocation) -> u32;
+
+        #[namespace = "wrapper"]
         fn SourceManager_assignTextDefault(text: CxxSV) -> u32;
 
         #[namespace = "wrapper"]

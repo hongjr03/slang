@@ -2,6 +2,7 @@ use ast::{
     AstNode, CompilationUnit, Expression, LiteralExpression, Member, Name, PrimaryExpression,
 };
 use expect_test::expect;
+use text_size::TextSize;
 
 use super::*;
 
@@ -451,4 +452,14 @@ fn source_manager_assign_text_with_path() {
     assert_ne!(buffer.raw(), 0);
     let roundtrip = source_manager::source_text(buffer).expect("text");
     assert_eq!(roundtrip, text);
+}
+
+#[test]
+fn source_manager_location_roundtrip() {
+    let text = "module bar; endmodule";
+    let buffer = source_manager::assign_text(text).expect("buffer id");
+    let offset = TextSize::from(7u32);
+    let loc = source_manager::make_location(buffer, offset).expect("location");
+    assert_eq!(loc.offset(), Some(7));
+    assert_eq!(loc.buffer_id(), Some(buffer));
 }
