@@ -175,6 +175,15 @@ mod slang_ffi {
 
         #[namespace = "wrapper"]
         fn SourceManager_getColumnNumber(sm: &SourceManager, loc: &SourceLocation) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_assignTextDefault(text: CxxSV) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_assignTextWithPathDefault(path: CxxSV, text: CxxSV) -> u32;
+
+        #[namespace = "wrapper"]
+        fn SourceManager_getSourceTextDefault(buffer_id: u32) -> String;
     }
 
     #[namespace = "slang::ast"]

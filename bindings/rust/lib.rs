@@ -629,6 +629,56 @@ impl PartialEq for SyntaxTree {
 
 impl Eq for SyntaxTree {}
 
+/// 与默认 `SourceManager` 交互的辅助 API。
+pub mod source_manager {
+    use super::{CxxSV, ffi};
+
+    /// 由 `SourceManager` 分配的缓冲区 ID。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct BufferId(pub u32);
+
+    impl BufferId {
+        /// 返回底层的 `u32` 标识。
+        #[inline]
+        pub fn raw(self) -> u32 {
+            self.0
+        }
+
+        /// 判断 ID 是否有效。
+        #[inline]
+        pub fn is_valid(self) -> bool {
+            self.0 != 0
+        }
+    }
+
+    /// 将内存中的文本注册到默认 `SourceManager`，返回缓冲区 ID。
+    #[inline]
+    pub fn assign_text(text: &str) -> Option<BufferId> {
+        let id = ffi::SourceManager_assignTextDefault(CxxSV::new(text));
+        (id != 0).then_some(BufferId(id))
+    }
+
+    /// 将文本以指定路径注册到默认 `SourceManager`。
+    #[inline]
+    pub fn assign_text_with_path(path: &str, text: &str) -> Option<BufferId> {
+        let id = ffi::SourceManager_assignTextWithPathDefault(CxxSV::new(path), CxxSV::new(text));
+        (id != 0).then_some(BufferId(id))
+    }
+
+    /// 从默认 `SourceManager` 中读取指定缓冲区的源文本。
+    #[inline]
+    pub fn source_text(buffer: BufferId) -> Option<String> {
+        if !buffer.is_valid() {
+            return None;
+        }
+        let mut text = ffi::SourceManager_getSourceTextDefault(buffer.raw());
+        if text.ends_with('\0') {
+            text.pop();
+        }
+        Some(text)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SyntaxTokenWithParent<'a> {
     pub parent: SyntaxNode<'a>,

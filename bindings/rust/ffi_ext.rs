@@ -118,8 +118,6 @@ impl ScopeExt for crate::ffi::Scope {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_source_range_conversion() {
         // 这个测试需要实际的 SourceRange 实例

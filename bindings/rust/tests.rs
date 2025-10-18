@@ -2,7 +2,6 @@ use ast::{
     AstNode, CompilationUnit, Expression, LiteralExpression, Member, Name, PrimaryExpression,
 };
 use expect_test::expect;
-use itertools::Itertools;
 
 use super::*;
 
@@ -435,4 +434,21 @@ fn test_compilation() {
     let mut compilation = Compilation::new();
     let tree = get_test_tree();
     compilation.add_syntax_tree(tree);
+}
+
+#[test]
+fn source_manager_assign_text_roundtrip() {
+    let text = "module top; endmodule";
+    let buffer = source_manager::assign_text(text).expect("buffer id");
+    let roundtrip = source_manager::source_text(buffer).expect("text");
+    assert_eq!(roundtrip, text);
+}
+
+#[test]
+fn source_manager_assign_text_with_path() {
+    let text = "module foo; endmodule";
+    let buffer = source_manager::assign_text_with_path("virtual/foo.sv", text).expect("buffer id");
+    assert_ne!(buffer.raw(), 0);
+    let roundtrip = source_manager::source_text(buffer).expect("text");
+    assert_eq!(roundtrip, text);
 }

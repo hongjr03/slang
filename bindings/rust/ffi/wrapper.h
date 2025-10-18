@@ -152,6 +152,28 @@ namespace wrapper {
     return sm.getColumnNumber(loc);
   }
 
+  inline static uint32_t SourceManager_assignTextDefault(std::string_view text) {
+    auto& sm = ::slang::syntax::SyntaxTree::getDefaultSourceManager();
+    auto buffer = sm.assignText(text);
+    return buffer.id.getId();
+  }
+
+  inline static uint32_t SourceManager_assignTextWithPathDefault(std::string_view path, std::string_view text) {
+    auto& sm = ::slang::syntax::SyntaxTree::getDefaultSourceManager();
+    auto buffer = sm.assignText(path, text);
+    return buffer.id.getId();
+  }
+
+  inline static rust::String SourceManager_getSourceTextDefault(uint32_t buffer_id) {
+    if (buffer_id == 0) {
+      return rust::String(std::string());
+    }
+    auto& sm = ::slang::syntax::SyntaxTree::getDefaultSourceManager();
+    std::string_view empty_view{};
+    auto view = sm.getSourceText(::slang::BufferID(buffer_id, empty_view));
+    return rust::String(std::string(view));
+  }
+
   namespace ast {
     inline static std::unique_ptr<Compilation> Compilation_new() {
         return std::unique_ptr<Compilation>(new Compilation());
