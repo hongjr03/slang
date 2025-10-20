@@ -6,15 +6,16 @@ mod ffi;
 mod syntax;
 mod token;
 
-use cxx::{SharedPtr, UniquePtr};
-pub use ffi::CxxSV;
-use itertools::{Either, Itertools};
 use std::{
     ffi::c_char,
     fmt, hash, iter,
     ops::{self, Not},
     pin::Pin,
 };
+
+use cxx::{SharedPtr, UniquePtr};
+pub use ffi::CxxSV;
+use itertools::{Either, Itertools};
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
     cursor::SyntaxCursor,
@@ -127,9 +128,7 @@ impl SourceLocation {
 
 impl fmt::Debug for SourceLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceLocation")
-            .field("offset", &self.offset())
-            .finish()
+        f.debug_struct("SourceLocation").field("offset", &self.offset()).finish()
     }
 }
 
@@ -235,8 +234,7 @@ impl SVInt {
 
     #[inline]
     pub fn get_single_word(&self) -> Option<u64> {
-        self.is_single_word()
-            .then(|| unsafe { *self._ptr.getRawPtr() })
+        self.is_single_word().then(|| unsafe { *self._ptr.getRawPtr() })
     }
 
     #[inline]
@@ -257,17 +255,13 @@ unsafe impl Sync for SVInt {}
 
 impl fmt::Debug for SVInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SVInt")
-            .field("to_string", &self.to_string())
-            .finish()
+        f.debug_struct("SVInt").field("to_string", &self.to_string()).finish()
     }
 }
 
 impl Clone for SVInt {
     fn clone(&self) -> Self {
-        SVInt {
-            _ptr: self._ptr.clone(),
-        }
+        SVInt { _ptr: self._ptr.clone() }
     }
 }
 
@@ -307,9 +301,7 @@ impl SyntaxTrivia<'_> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
         assert!(_ptr.is_null().not());
-        Some(SyntaxTrivia {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        Some(SyntaxTrivia { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -326,9 +318,7 @@ impl SyntaxTrivia<'_> {
 impl<'a> SyntaxToken<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxToken) -> Option<Self> {
-        _ptr.is_null().not().then(|| SyntaxToken {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        _ptr.is_null().not().then(|| SyntaxToken { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -358,25 +348,20 @@ impl<'a> SyntaxToken<'a> {
 
     #[inline]
     pub fn int(&self) -> Option<SVInt> {
-        matches!(self.kind(), TokenKind::INTEGER_LITERAL).then(|| SVInt {
-            _ptr: self._ptr.intValue(),
-        })
+        matches!(self.kind(), TokenKind::INTEGER_LITERAL)
+            .then(|| SVInt { _ptr: self._ptr.intValue() })
     }
 
     #[inline]
     pub fn bits(&self) -> Option<SVLogic> {
-        matches!(self.kind(), TokenKind::UNBASED_UNSIZED_LITERAL).then(|| SVLogic {
-            _ptr: self._ptr.bitValue(),
-        })
+        matches!(self.kind(), TokenKind::UNBASED_UNSIZED_LITERAL)
+            .then(|| SVLogic { _ptr: self._ptr.bitValue() })
     }
 
     #[inline]
     pub fn real(&self) -> Option<f64> {
-        matches!(
-            self.kind(),
-            TokenKind::REAL_LITERAL | TokenKind::TIME_LITERAL
-        )
-        .then(|| self._ptr.realValue())
+        matches!(self.kind(), TokenKind::REAL_LITERAL | TokenKind::TIME_LITERAL)
+            .then(|| self._ptr.realValue())
     }
 
     #[inline]
@@ -403,11 +388,7 @@ impl<'a> SyntaxToken<'a> {
 
     #[inline]
     pub fn trivias(&self) -> impl ChildrenIter<SyntaxTrivia<'a>> + use<'a> {
-        SyntaxTriviaIter {
-            tok: *self,
-            idx: 0,
-            total: self.trivia_count(),
-        }
+        SyntaxTriviaIter { tok: *self, idx: 0, total: self.trivia_count() }
     }
 
     #[inline]
@@ -491,9 +472,7 @@ impl<'a> ExactSizeIterator for SyntaxTriviaIter<'a> {
 impl<'a> SyntaxNode<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxNode) -> Option<Self> {
-        _ptr.is_null().not().then(|| SyntaxNode {
-            _ptr: unsafe { Pin::new_unchecked(&*_ptr) },
-        })
+        _ptr.is_null().not().then(|| SyntaxNode { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
     }
 
     #[inline]
@@ -600,10 +579,7 @@ impl PartialEq for SyntaxNode<'_> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // Just compare pointer
-        std::ptr::eq(
-            Pin::as_ref(&self._ptr).get_ref(),
-            Pin::as_ref(&other._ptr).get_ref(),
-        )
+        std::ptr::eq(Pin::as_ref(&self._ptr).get_ref(), Pin::as_ref(&other._ptr).get_ref())
     }
 }
 
@@ -807,13 +783,439 @@ pub struct Compilation {
 
 impl Compilation {
     pub fn new() -> Self {
-        Compilation {
-            _ptr: ffi::Compilation::new(),
-        }
+        Compilation { _ptr: ffi::Compilation::new() }
     }
 
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
         ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
+    }
+
+    pub fn get_root(&mut self) -> Option<RootSymbol> {
+        let ptr = ffi::Compilation::get_root(self._ptr.as_mut().unwrap());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(RootSymbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn get_module_ports(&mut self, module_name: &str) -> Vec<String> {
+        ffi::Compilation_get_module_ports(self._ptr.as_mut().unwrap(), module_name)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Symbol<'a> {
+    _ptr: Pin<&'a ffi::Symbol>,
+}
+
+/// Symbol kinds from slang::ast::SymbolKind
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum SymbolKind {
+    Unknown = 0,
+    Root = 1,
+    Definition = 2,
+    CompilationUnit = 3,
+    DeferredMember = 4,
+    TransparentMember = 5,
+    EmptyMember = 6,
+    PredefinedIntegerType = 7,
+    ScalarType = 8,
+    FloatingType = 9,
+    EnumType = 10,
+    EnumValue = 11,
+    PackedArrayType = 12,
+    FixedSizeUnpackedArrayType = 13,
+    DynamicArrayType = 14,
+    DPIOpenArrayType = 15,
+    AssociativeArrayType = 16,
+    QueueType = 17,
+    PackedStructType = 18,
+    UnpackedStructType = 19,
+    PackedUnionType = 20,
+    UnpackedUnionType = 21,
+    ClassType = 22,
+    CovergroupType = 23,
+    VoidType = 24,
+    NullType = 25,
+    CHandleType = 26,
+    StringType = 27,
+    EventType = 28,
+    UnboundedType = 29,
+    TypeRefType = 30,
+    UntypedType = 31,
+    SequenceType = 32,
+    PropertyType = 33,
+    VirtualInterfaceType = 34,
+    TypeAlias = 35,
+    ErrorType = 36,
+    ForwardingTypedef = 37,
+    NetType = 38,
+    Parameter = 39,
+    TypeParameter = 40,
+    Port = 41,
+    MultiPort = 42,
+    InterfacePort = 43,
+    Modport = 44,
+    ModportPort = 45,
+    ModportClocking = 46,
+    Instance = 47,
+    InstanceBody = 48,
+    InstanceArray = 49,
+    Package = 50,
+    ExplicitImport = 51,
+    WildcardImport = 52,
+    Attribute = 53,
+    Genvar = 54,
+    GenerateBlock = 55,
+    GenerateBlockArray = 56,
+    ProceduralBlock = 57,
+    StatementBlock = 58,
+    Net = 59,
+    Variable = 60,
+    FormalArgument = 61,
+    Field = 62,
+    ClassProperty = 63,
+    Subroutine = 64,
+    ContinuousAssign = 65,
+    ElabSystemTask = 66,
+    GenericClassDef = 67,
+    MethodPrototype = 68,
+    UninstantiatedDef = 69,
+    Iterator = 70,
+    PatternVar = 71,
+    ConstraintBlock = 72,
+    DefParam = 73,
+    Specparam = 74,
+    Primitive = 75,
+    PrimitivePort = 76,
+    PrimitiveInstance = 77,
+    SpecifyBlock = 78,
+    Sequence = 79,
+    Property = 80,
+    AssertionPort = 81,
+    ClockingBlock = 82,
+    ClockVar = 83,
+    LocalAssertionVar = 84,
+    LetDecl = 85,
+    Checker = 86,
+    CheckerInstance = 87,
+    CheckerInstanceBody = 88,
+    RandSeqProduction = 89,
+    CovergroupBody = 90,
+    Coverpoint = 91,
+    CoverCross = 92,
+    CoverCrossBody = 93,
+    CoverageBin = 94,
+    TimingPath = 95,
+    PulseStyle = 96,
+    SystemTimingCheck = 97,
+    AnonymousProgram = 98,
+    NetAlias = 99,
+    ConfigBlock = 100,
+}
+
+impl SymbolKind {
+    pub fn from_u16(value: u16) -> Self {
+        if value <= 100 { unsafe { std::mem::transmute(value) } } else { SymbolKind::Unknown }
+    }
+}
+
+impl<'a> Symbol<'a> {
+    pub fn name(&self) -> String {
+        ffi::Symbol::get_name(self._ptr.get_ref())
+    }
+
+    pub fn kind(&self) -> u16 {
+        ffi::Symbol::get_kind(self._ptr.get_ref())
+    }
+
+    pub fn symbol_kind(&self) -> SymbolKind {
+        SymbolKind::from_u16(self.kind())
+    }
+
+    pub fn as_scope(&self) -> Option<Scope<'a>> {
+        let ptr = ffi::Symbol::as_scope(self._ptr.get_ref());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Scope { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn as_type(&self) -> Option<Type<'a>> {
+        let ptr = ffi::Symbol::as_type(self._ptr.get_ref());
+        if ptr.is_null() { None } else { unsafe { Some(Type { _ptr: Pin::new_unchecked(&*ptr) }) } }
+    }
+
+    pub fn get_type(&self) -> Option<Type<'a>> {
+        let ptr = ffi::Symbol::get_type(self._ptr.get_ref());
+        if ptr.is_null() { None } else { unsafe { Some(Type { _ptr: Pin::new_unchecked(&*ptr) }) } }
+    }
+
+    pub fn parent_scope(&self) -> Option<Symbol<'a>> {
+        let ptr = ffi::Symbol::get_parent_scope(self._ptr.get_ref());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Symbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn location(&self) -> Option<SourceRange> {
+        if !ffi::Symbol::has_location(self._ptr.get_ref()) {
+            return None;
+        }
+        let range_ptr = ffi::Symbol::get_location(self._ptr.get_ref());
+        if range_ptr.is_null() { None } else { Some(SourceRange { _ptr: range_ptr }) }
+    }
+
+    /// Check if this symbol is a DefinitionSymbol (module/interface definition)
+    pub fn is_definition(&self) -> bool {
+        ffi::Symbol_is_definition(self._ptr.get_ref())
+    }
+
+    /// Convert to DefinitionSymbol if this symbol is a definition
+    pub fn as_definition(&self) -> Option<DefinitionSymbol<'a>> {
+        let ptr = ffi::Symbol_as_definition(self._ptr.get_ref());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(DefinitionSymbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Scope<'a> {
+    _ptr: Pin<&'a ffi::Scope>,
+}
+
+impl<'a> Scope<'a> {
+    pub fn as_symbol(&self) -> Symbol<'a> {
+        let sym_ref = ffi::Scope::as_symbol(self._ptr.get_ref());
+        unsafe { Symbol { _ptr: Pin::new_unchecked(sym_ref) } }
+    }
+
+    pub fn find(&self, name: &str) -> Option<Symbol<'a>> {
+        let ptr = ffi::Scope::find(self._ptr.get_ref(), name);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Symbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn lookup_name(&self, name: &str) -> Option<Symbol<'a>> {
+        let ptr = ffi::Scope::lookup_name(self._ptr.get_ref(), name);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Symbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn member_count(&self) -> usize {
+        ffi::Scope::member_count(self._ptr.get_ref())
+    }
+
+    pub fn member_at(&self, index: usize) -> Option<Symbol<'a>> {
+        let ptr = ffi::Scope::member_at(self._ptr.get_ref(), index);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Symbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn members(&self) -> ScopeMembers<'a> {
+        ScopeMembers { scope: *self, index: 0, count: self.member_count() }
+    }
+}
+
+pub struct ScopeMembers<'a> {
+    scope: Scope<'a>,
+    index: usize,
+    count: usize,
+}
+
+impl<'a> Iterator for ScopeMembers<'a> {
+    type Item = Symbol<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.count {
+            let result = self.scope.member_at(self.index);
+            self.index += 1;
+            result
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.count - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a> ExactSizeIterator for ScopeMembers<'a> {
+    fn len(&self) -> usize {
+        self.count - self.index
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DefinitionSymbol<'a> {
+    _ptr: Pin<&'a ffi::DefinitionSymbol>,
+}
+
+impl<'a> DefinitionSymbol<'a> {
+    /// Get this definition as a Symbol
+    pub fn as_symbol(&self) -> Symbol<'a> {
+        // DefinitionSymbol is a Symbol, so we can safely cast
+        unsafe {
+            Symbol {
+                _ptr: Pin::new_unchecked(&*(self._ptr.get_ref() as *const _ as *const ffi::Symbol)),
+            }
+        }
+    }
+
+    /// Create a default instance of this definition
+    /// This is necessary to access the definition's members
+    pub fn create_default_instance(
+        &self,
+        compilation: &mut Compilation,
+    ) -> Option<InstanceSymbol<'a>> {
+        let ptr = ffi::DefinitionSymbol_create_default_instance(
+            compilation._ptr.as_mut().unwrap(),
+            self._ptr.get_ref(),
+        );
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(InstanceSymbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct InstanceBodySymbol<'a> {
+    _ptr: Pin<&'a ffi::InstanceBodySymbol>,
+}
+
+impl<'a> InstanceBodySymbol<'a> {
+    /// Convert to Scope to access members
+    /// InstanceBodySymbol inherits from Scope, so this is always valid
+    pub fn as_scope(&self) -> Scope<'a> {
+        let ptr = ffi::InstanceBodySymbol_as_scope(self._ptr.get_ref());
+        unsafe { Scope { _ptr: Pin::new_unchecked(&*ptr) } }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RootSymbol<'a> {
+    _ptr: Pin<&'a ffi::RootSymbol>,
+}
+
+impl<'a> RootSymbol<'a> {
+    pub fn as_symbol(&self) -> Symbol<'a> {
+        // RootSymbol inherits from Symbol in C++
+        unsafe {
+            let ptr = self._ptr.get_ref() as *const ffi::RootSymbol as *const ffi::Symbol;
+            Symbol { _ptr: Pin::new_unchecked(&*ptr) }
+        }
+    }
+
+    pub fn top_instances_count(&self) -> usize {
+        ffi::RootSymbol_top_instances_count(self._ptr.get_ref())
+    }
+
+    pub fn top_instance_at(&self, index: usize) -> Option<InstanceSymbol<'a>> {
+        let ptr = ffi::RootSymbol_top_instance_at(self._ptr.get_ref(), index);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(InstanceSymbol { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct InstanceSymbol<'a> {
+    _ptr: Pin<&'a ffi::InstanceSymbol>,
+}
+
+impl<'a> InstanceSymbol<'a> {
+    pub fn as_symbol(&self) -> Symbol<'a> {
+        // InstanceSymbol inherits from Symbol in C++
+        unsafe {
+            let ptr = self._ptr.get_ref() as *const ffi::InstanceSymbol as *const ffi::Symbol;
+            Symbol { _ptr: Pin::new_unchecked(&*ptr) }
+        }
+    }
+
+    pub fn body(&self) -> Option<Scope<'a>> {
+        let ptr = ffi::InstanceSymbol_get_body(self._ptr.get_ref());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Scope { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Type<'a> {
+    _ptr: Pin<&'a ffi::Type>,
+}
+
+impl<'a> Type<'a> {
+    pub fn canonical(&self) -> Type<'a> {
+        let type_ref = ffi::Type::get_canonical(self._ptr.get_ref());
+        unsafe { Type { _ptr: Pin::new_unchecked(type_ref) } }
+    }
+
+    pub fn kind(&self) -> u16 {
+        ffi::Type::get_kind(self._ptr.get_ref())
+    }
+
+    pub fn as_symbol(&self) -> Symbol<'a> {
+        let sym_ref = ffi::Type::as_symbol(self._ptr.get_ref());
+        unsafe { Symbol { _ptr: Pin::new_unchecked(sym_ref) } }
+    }
+
+    pub fn as_scope(&self) -> Option<Scope<'a>> {
+        let ptr = ffi::Type::as_scope(self._ptr.get_ref());
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Scope { _ptr: Pin::new_unchecked(&*ptr) }) }
+        }
+    }
+
+    pub fn is_integral(&self) -> bool {
+        ffi::Type::is_integral(self._ptr.get_ref())
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        ffi::Type::is_aggregate(self._ptr.get_ref())
+    }
+
+    pub fn is_struct(&self) -> bool {
+        ffi::Type::is_struct(self._ptr.get_ref())
+    }
+
+    pub fn is_class(&self) -> bool {
+        ffi::Type::is_class(self._ptr.get_ref())
+    }
+
+    pub fn type_string(&self) -> String {
+        ffi::Type::type_string(self._ptr.get_ref())
+    }
+
+    pub fn members(&self) -> Option<ScopeMembers<'a>> {
+        self.as_scope().map(|scope| scope.members())
     }
 }
 

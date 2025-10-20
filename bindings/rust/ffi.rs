@@ -3,11 +3,11 @@
 
 mod cxx_sv;
 
-use cxx::{SharedPtr, UniquePtr};
+pub use std::pin::Pin;
 
+use cxx::{SharedPtr, UniquePtr};
 pub use cxx_sv::CxxSV;
 pub use slang_ffi::*;
-pub use std::pin::Pin;
 
 #[cxx::bridge]
 mod slang_ffi {
@@ -164,6 +164,11 @@ mod slang_ffi {
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
         include!("slang/include/slang/ast/Compilation.h");
+        include!("slang/include/slang/ast/Symbol.h");
+        include!("slang/include/slang/ast/Scope.h");
+        include!("slang/include/slang/ast/symbols/CompilationUnitSymbols.h");
+        include!("slang/include/slang/ast/types/Type.h");
+        include!("slang/include/slang/ast/types/AllTypes.h");
 
         type Compilation;
 
@@ -174,9 +179,117 @@ mod slang_ffi {
             compilation: Pin<&mut Compilation>,
             tree: SharedPtr<SyntaxTree>,
         );
+        #[namespace = "wrapper::ast"]
+        fn Compilation_get_root(compilation: Pin<&mut Compilation>) -> *const RootSymbol;
+        #[namespace = "wrapper::ast"]
+        fn Compilation_get_module_ports(
+            compilation: Pin<&mut Compilation>,
+            module_name: &str,
+        ) -> Vec<String>;
+
+        type Symbol;
+
+        #[namespace = "wrapper::ast"]
+        fn Symbol_get_name(symbol: &Symbol) -> String;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_get_kind(symbol: &Symbol) -> u16;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_as_scope(symbol: &Symbol) -> *const Scope;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_get_parent_scope(symbol: &Symbol) -> *const Symbol;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_as_type(symbol: &Symbol) -> *const Type;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_get_type(symbol: &Symbol) -> *const Type;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_get_location(symbol: &Symbol) -> UniquePtr<SourceRange>;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_has_location(symbol: &Symbol) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_is_definition(symbol: &Symbol) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Symbol_as_definition(symbol: &Symbol) -> *const DefinitionSymbol;
+
+        type Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn Scope_as_symbol(scope: &Scope) -> &Symbol;
+        #[namespace = "wrapper::ast"]
+        fn Scope_find(scope: &Scope, name: &str) -> *const Symbol;
+        #[namespace = "wrapper::ast"]
+        fn Scope_lookup_name(scope: &Scope, name: &str) -> *const Symbol;
+        #[namespace = "wrapper::ast"]
+        fn Scope_member_count(scope: &Scope) -> usize;
+        #[namespace = "wrapper::ast"]
+        fn Scope_member_at(scope: &Scope, index: usize) -> *const Symbol;
+
+        type Type;
+
+        #[namespace = "wrapper::ast"]
+        fn Type_get_canonical(type_: &Type) -> &Type;
+        #[namespace = "wrapper::ast"]
+        fn Type_get_kind(type_: &Type) -> u16;
+        #[namespace = "wrapper::ast"]
+        fn Type_as_symbol(type_: &Type) -> &Symbol;
+        #[namespace = "wrapper::ast"]
+        fn Type_as_scope(type_: &Type) -> *const Scope;
+        #[namespace = "wrapper::ast"]
+        fn Type_is_integral(type_: &Type) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Type_is_aggregate(type_: &Type) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Type_is_struct(type_: &Type) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Type_is_class(type_: &Type) -> bool;
+        #[namespace = "wrapper::ast"]
+        fn Type_to_string(type_: &Type) -> String;
+
+        #[cxx_name = "RootSymbol"]
+        type RootSymbol;
+
+        #[cxx_name = "DefinitionSymbol"]
+        type DefinitionSymbol;
+
+        #[cxx_name = "InstanceSymbol"]
+        type InstanceSymbol;
+
+        #[cxx_name = "InstanceBodySymbol"]
+        type InstanceBodySymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn RootSymbol_top_instances_count(root: &RootSymbol) -> usize;
+
+        #[namespace = "wrapper::ast"]
+        fn RootSymbol_top_instance_at(root: &RootSymbol, index: usize) -> *const InstanceSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn DefinitionSymbol_create_default_instance(
+            compilation: Pin<&mut Compilation>,
+            definition: &DefinitionSymbol,
+        ) -> *const InstanceSymbol;
+
+        #[namespace = "wrapper::ast"]
+        fn InstanceSymbol_get_body(instance: &InstanceSymbol) -> *const Scope;
+
+        #[namespace = "wrapper::ast"]
+        fn InstanceBodySymbol_as_scope(body: &InstanceBodySymbol) -> *const Scope;
     }
 
     impl UniquePtr<Compilation> {}
+
+    impl UniquePtr<Symbol> {}
+
+    impl UniquePtr<Scope> {}
+
+    impl UniquePtr<Type> {}
+
+    impl UniquePtr<RootSymbol> {}
+
+    impl UniquePtr<DefinitionSymbol> {}
+
+    impl UniquePtr<InstanceSymbol> {}
+
+    impl UniquePtr<InstanceBodySymbol> {}
 
     #[namespace = "slang"]
     unsafe extern "C++" {
@@ -284,5 +397,43 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
+        fn get_root(self_: Pin<&mut Compilation>) -> *const RootSymbol |> Compilation_get_root;
+    }
+}
+
+impl_functions! {
+    impl Symbol {
+        fn get_name(&self) -> String |> Symbol_get_name;
+        fn get_kind(&self) -> u16 |> Symbol_get_kind;
+        fn as_scope(&self) -> *const Scope |> Symbol_as_scope;
+        fn get_parent_scope(&self) -> *const Symbol |> Symbol_get_parent_scope;
+        fn as_type(&self) -> *const Type |> Symbol_as_type;
+        fn get_type(&self) -> *const Type |> Symbol_get_type;
+        fn get_location(&self) -> UniquePtr<SourceRange> |> Symbol_get_location;
+        fn has_location(&self) -> bool |> Symbol_has_location;
+    }
+}
+
+impl_functions! {
+    impl Scope {
+        fn as_symbol(&self) -> &Symbol |> Scope_as_symbol;
+        fn find(&self, name: &str) -> *const Symbol |> Scope_find;
+        fn lookup_name(&self, name: &str) -> *const Symbol |> Scope_lookup_name;
+        fn member_count(&self) -> usize |> Scope_member_count;
+        fn member_at(&self, index: usize) -> *const Symbol |> Scope_member_at;
+    }
+}
+
+impl_functions! {
+    impl Type {
+        fn get_canonical(&self) -> &Type |> Type_get_canonical;
+        fn get_kind(&self) -> u16 |> Type_get_kind;
+        fn as_symbol(&self) -> &Symbol |> Type_as_symbol;
+        fn as_scope(&self) -> *const Scope |> Type_as_scope;
+        fn is_integral(&self) -> bool |> Type_is_integral;
+        fn is_aggregate(&self) -> bool |> Type_is_aggregate;
+        fn is_struct(&self) -> bool |> Type_is_struct;
+        fn is_class(&self) -> bool |> Type_is_class;
+        fn type_string(&self) -> String |> Type_to_string;
     }
 }

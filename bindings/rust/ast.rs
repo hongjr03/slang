@@ -59,10 +59,7 @@ impl<'a, T: AstNode<'a>> AstNode<'a> for SyntaxList<'a, T> {
     }
 
     fn cast(syntax: SyntaxNode<'a>) -> Option<Self> {
-        Self::can_cast(syntax.kind()).then_some(Self {
-            syntax,
-            _marker: std::marker::PhantomData,
-        })
+        Self::can_cast(syntax.kind()).then_some(Self { syntax, _marker: std::marker::PhantomData })
     }
 
     fn syntax(&self) -> SyntaxNode<'a> {
@@ -90,10 +87,7 @@ impl<'a, T: AstNode<'a>> AstNode<'a> for SeparatedList<'a, T> {
     }
 
     fn cast(syntax: SyntaxNode<'a>) -> Option<Self> {
-        Self::can_cast(syntax.kind()).then_some(Self {
-            syntax,
-            _marker: std::marker::PhantomData,
-        })
+        Self::can_cast(syntax.kind()).then_some(Self { syntax, _marker: std::marker::PhantomData })
     }
 
     fn syntax(&self) -> SyntaxNode<'a> {
@@ -146,10 +140,7 @@ mod tests {
             _ => unreachable!("expected module declaration"),
         };
         let header = module.header();
-        assert_eq!(
-            header.module_keyword().unwrap().kind(),
-            TokenKind::MODULE_KEYWORD
-        );
+        assert_eq!(header.module_keyword().unwrap().kind(), TokenKind::MODULE_KEYWORD);
         assert_eq!(header.name().unwrap().kind(), TokenKind::IDENTIFIER);
         let identifier = header.name().unwrap();
         assert_eq!(identifier.value_text().as_bytes(), b"AB");
@@ -161,10 +152,7 @@ mod tests {
         let root = tree.root().unwrap();
 
         let unit = CompilationUnit::cast(root).unwrap();
-        let mut modules = unit
-            .members()
-            .children()
-            .filter_map(Member::as_module_declaration);
+        let mut modules = unit.members().children().filter_map(Member::as_module_declaration);
         let module_a = modules.next().unwrap();
         let module_b = modules.next().unwrap();
         assert!(modules.next().is_none());
