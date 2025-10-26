@@ -24,8 +24,16 @@ fn build_cpp_lib() {
         .define("SLANG_BOOST_SINGLE_HEADER", "")
         .define("CMAKE_VERBOSE_MAKEFILE", "ON");
 
+    // On Windows, use release CRT even in debug builds to match Rust runtime
+    if cfg!(target_os = "windows") && debug {
+        config
+            .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL")
+            .cflag("/MD");
+    }
+
     if !debug {
-        config.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");
+        // Disable IPO for now - it causes linker issues with FFI symbols
+        // config.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");
     }
 
     let dst = config.build().join("build");
@@ -41,12 +49,21 @@ fn build_cpp_lib() {
 
     let mut builder = cxx_build::bridges(["bindings/rust/ffi.rs", "bindings/rust/ffi/cxx_sv.rs"]);
     builder
+        .file("bindings/rust/ffi/wrapper.cpp")  // Add wrapper implementation
         .includes(includes.iter().map(Path::new))
         .std("c++20")
         .flag_if_supported("-stdlib=libstdc++")
-        .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER");
+        .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER")
+        .flag_if_supported("/permissive-");
 
-    if debug {
+    // Configure MSVC runtime library to match slang's CMake build
+    // On Windows in debug mode, use release CRT to avoid CRT mismatch with Rust runtime
+    if cfg!(target_os = "windows") {
+        builder.flag_if_supported("/MD");    // Always use release CRT DLL
+        if debug {
+            builder.flag_if_supported("-DDEBUG");
+        }
+    } else if debug {
         builder.flag_if_supported("-DDEBUG");
     }
 
@@ -64,17 +81,24 @@ fn setup_linking() {
     println!("cargo:rustc-link-search=native={dst}/lib");
     println!("cargo:rustc-link-lib=static=svlang");
 
-    let libs = [
-        ("fmt", if debug { "fmtd" } else { "fmt" }),
-        (
-            "mimalloc",
-            if debug { "mimalloc-debug" } else { "mimalloc" },
-        ),
-    ];
+    // Link fmt
+    if debug {
+        println!("cargo:rustc-link-lib=static=fmtd");
+    } else {
+        println!("cargo:rustc-link-lib=static=fmt");
+    }
 
-    for (lib_name, lib_debug_name) in &libs {
+    // Link mimalloc - Windows uses different naming
+    if cfg!(target_os = "windows") {
+        if debug {
+            println!("cargo:rustc-link-lib=static=mimalloc-static-debug");
+        } else {
+            println!("cargo:rustc-link-lib=static=mimalloc-static");
+        }
+    } else {
+        // Try pkg-config first on Unix
         let pkg_config_success = std::process::Command::new("pkg-config")
-            .args(["--libs", lib_name])
+            .args(["--libs", "mimalloc"])
             .output()
             .ok()
             .filter(|output| output.status.success());
@@ -88,7 +112,11 @@ fn setup_linking() {
                 }
             }
         } else {
-            println!("cargo:rustc-link-lib={lib_debug_name}");
+            if debug {
+                println!("cargo:rustc-link-lib=mimalloc-debug");
+            } else {
+                println!("cargo:rustc-link-lib=mimalloc");
+            }
         }
     }
 }

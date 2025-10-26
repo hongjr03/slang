@@ -13,7 +13,7 @@ pub use std::pin::Pin;
 mod slang_ffi {
     #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/text/SourceLocation.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type SourceLocation;
 
@@ -34,7 +34,7 @@ mod slang_ffi {
 
     #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/numeric/SVInt.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         #[cxx_name = "logic_t"]
         type SVLogic;
@@ -72,7 +72,7 @@ mod slang_ffi {
 
     #[namespace = "slang::parsing"]
     unsafe extern "C++" {
-        include!("slang/parsing/Token.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         #[cxx_name = "Trivia"]
         type SyntaxTrivia;
@@ -124,7 +124,7 @@ mod slang_ffi {
 
     #[namespace = "slang::syntax"]
     unsafe extern "C++" {
-        include!("slang/syntax/SyntaxNode.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type SyntaxNode;
 
@@ -148,7 +148,6 @@ mod slang_ffi {
     #[namespace = "slang::syntax"]
     unsafe extern "C++" {
         include!("slang/bindings/rust/ffi/wrapper.h");
-        include!("slang/syntax/SyntaxTree.h");
 
         type SyntaxTree;
 
@@ -163,7 +162,7 @@ mod slang_ffi {
 
     #[namespace = "slang::ast"]
     unsafe extern "C++" {
-        include!("slang/ast/Compilation.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type Compilation;
 
@@ -180,7 +179,7 @@ mod slang_ffi {
 
     #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/diagnostics/Diagnostics.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type Diagnostic;
     }

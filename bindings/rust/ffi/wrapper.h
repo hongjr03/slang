@@ -141,8 +141,12 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-    inline static rust::Vec<std::unique_ptr<Diagnostic>> Compilation_get_all_diagnostics(const Compilation& compilation) {
-
+    inline static rust::Vec<std::unique_ptr<Diagnostic>> Compilation_get_all_diagnostics(Compilation& compilation) {
+        rust::Vec<std::unique_ptr<Diagnostic>> result;
+        for (auto& diag : compilation.getAllDiagnostics()) {
+            result.push_back(std::make_unique<Diagnostic>(diag));
+        }
+        return result;
     }
   }
 
