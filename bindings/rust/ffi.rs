@@ -185,6 +185,17 @@ mod slang_ffi {
             compilation: Pin<&mut Compilation>,
             tree: SharedPtr<SyntaxTree>,
         );
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_count(compilation: &Compilation) -> usize;
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_at(
+            compilation: &Compilation,
+            idx: usize,
+        ) -> UniquePtr<Diagnostic>;
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_severity(compilation: &Compilation, diag: &Diagnostic) -> u8;
+        #[namespace = "wrapper::ast"]
+        fn Compilation_format_diagnostic(compilation: &Compilation, diag: &Diagnostic) -> String;
     }
 
     impl UniquePtr<Compilation> {}
@@ -314,6 +325,10 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
+        fn diagnostic_count(&self) -> usize |> Compilation_diagnostic_count;
+        fn diagnostic_at(&self, idx: usize) -> UniquePtr<Diagnostic> |> Compilation_diagnostic_at;
+        fn diagnostic_severity(&self, diag: &Diagnostic) -> u8 |> Compilation_diagnostic_severity;
+        fn diagnostic_message(&self, diag: &Diagnostic) -> String |> Compilation_format_diagnostic;
     }
 }
 

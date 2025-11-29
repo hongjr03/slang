@@ -847,6 +847,31 @@ impl Compilation {
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
         ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
     }
+
+    pub fn semantic_diagnostics(&self) -> Vec<SyntaxDiagnostic> {
+        (0..self._ptr.diagnostic_count())
+            .filter_map(|idx| {
+                let diag = self._ptr.diagnostic_at(idx);
+                let diag = diag.as_ref()?;
+                let primary_range = if diag.range_count() > 0 {
+                    SourceRange::from_unique_ptr(diag.range(0)).map(|range| range.into())
+                } else {
+                    None
+                };
+                let location =
+                    SourceLocation::from_unique_ptr(diag.location()).and_then(|loc| loc.offset());
+
+                Some(SyntaxDiagnostic {
+                    code: diag.code(),
+                    subsystem: diag.subsystem(),
+                    severity: DiagnosticSeverity::from_raw(self._ptr.diagnostic_severity(diag)),
+                    message: self._ptr.diagnostic_message(diag),
+                    primary_range,
+                    location,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

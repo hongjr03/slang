@@ -173,6 +173,36 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
+    inline static size_t Compilation_diagnostic_count(const Compilation& compilation) {
+        auto& diags = const_cast<Compilation&>(compilation).getSemanticDiagnostics();
+        return diags.size();
+    }
+
+    inline static std::unique_ptr<Diagnostic> Compilation_diagnostic_at(const Compilation& compilation,
+                                                                        size_t idx) {
+        auto& diags = const_cast<Compilation&>(compilation).getSemanticDiagnostics();
+        if (idx >= diags.size()) {
+            return nullptr;
+        }
+        return std::make_unique<Diagnostic>(diags[idx]);
+    }
+
+    inline static uint8_t Compilation_diagnostic_severity(const Compilation& compilation,
+                                                          const Diagnostic& diag) {
+        auto source_manager = compilation.getSourceManager();
+        SLANG_ASSERT(source_manager);
+        DiagnosticEngine engine(*source_manager);
+        return static_cast<uint8_t>(engine.getSeverity(diag.code, diag.location));
+    }
+
+    inline static rust::String Compilation_format_diagnostic(const Compilation& compilation,
+                                                             const Diagnostic& diag) {
+        auto source_manager = compilation.getSourceManager();
+        SLANG_ASSERT(source_manager);
+        DiagnosticEngine engine(*source_manager);
+        return rust::String(engine.formatMessage(diag));
+    }
+
     inline static rust::Vec<std::unique_ptr<Diagnostic>> Compilation_get_all_diagnostics(Compilation& compilation) {
         rust::Vec<std::unique_ptr<Diagnostic>> result;
         for (auto& diag : compilation.getAllDiagnostics()) {
