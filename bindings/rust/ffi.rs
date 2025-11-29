@@ -3,11 +3,11 @@
 
 mod cxx_sv;
 
-use cxx::{SharedPtr, UniquePtr};
+pub use std::pin::Pin;
 
+use cxx::{SharedPtr, UniquePtr};
 pub use cxx_sv::CxxSV;
 pub use slang_ffi::*;
-pub use std::pin::Pin;
 
 #[cxx::bridge]
 mod slang_ffi {
@@ -156,6 +156,18 @@ mod slang_ffi {
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_root(tree: &SyntaxTree) -> *const SyntaxNode;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_count(tree: &SyntaxTree) -> usize;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_at(tree: &SyntaxTree, idx: usize) -> UniquePtr<Diagnostic>;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_severity(tree: &SyntaxTree, diag: &Diagnostic) -> u8;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_format_diagnostic(tree: &SyntaxTree, diag: &Diagnostic) -> String;
     }
 
     impl SharedPtr<SyntaxTree> {}
@@ -182,6 +194,21 @@ mod slang_ffi {
         include!("slang/bindings/rust/ffi/wrapper.h");
 
         type Diagnostic;
+    }
+
+    #[namespace = "wrapper::diagnostics"]
+    unsafe extern "C++" {
+        include!("slang/bindings/rust/ffi/wrapper.h");
+
+        fn diagnostics_code(diag: &Diagnostic) -> u16;
+
+        fn diagnostics_subsystem(diag: &Diagnostic) -> u16;
+
+        fn diagnostics_range_count(diag: &Diagnostic) -> usize;
+
+        fn diagnostics_range(diag: &Diagnostic, idx: usize) -> UniquePtr<SourceRange>;
+
+        fn diagnostics_location(diag: &Diagnostic) -> UniquePtr<SourceLocation>;
     }
 
     // StringView
@@ -229,6 +256,10 @@ impl_functions! {
     impl SyntaxTree {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
+        fn diagnostic_count(&self) -> usize |> SyntaxTree_diagnostic_count;
+        fn diagnostic_at(&self, idx: usize) -> UniquePtr<Diagnostic> |> SyntaxTree_diagnostic_at;
+        fn diagnostic_severity(&self, diag: &Diagnostic) -> u8 |> SyntaxTree_diagnostic_severity;
+        fn diagnostic_message(&self, diag: &Diagnostic) -> String |> SyntaxTree_format_diagnostic;
     }
 }
 
@@ -283,5 +314,15 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
+    }
+}
+
+impl_functions! {
+    impl Diagnostic {
+        fn code(&self) -> u16 |> diagnostics_code;
+        fn subsystem(&self) -> u16 |> diagnostics_subsystem;
+        fn range_count(&self) -> usize |> diagnostics_range_count;
+        fn range(&self, idx: usize) -> UniquePtr<SourceRange> |> diagnostics_range;
+        fn location(&self) -> UniquePtr<SourceLocation> |> diagnostics_location;
     }
 }
