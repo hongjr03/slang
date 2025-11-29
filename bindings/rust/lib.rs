@@ -83,7 +83,7 @@ impl DiagnosticSeverity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxDiagnostic {
     pub code: u16,
     pub subsystem: u16,
