@@ -8,11 +8,7 @@ pub struct SyntaxIdxChildren<'a> {
 
 impl<'a> SyntaxIdxChildren<'a> {
     pub fn new(parent: SyntaxNode<'a>) -> Self {
-        SyntaxIdxChildren {
-            parent,
-            start_idx: 0,
-            end_idx: parent.child_count(),
-        }
+        SyntaxIdxChildren { parent, start_idx: 0, end_idx: parent.child_count() }
     }
 }
 
@@ -115,10 +111,7 @@ pub struct SyntaxNodePreorder<'a> {
 impl<'a> SyntaxNodePreorder<'a> {
     pub fn new(root: SyntaxNode<'a>) -> Self {
         let cursor = SyntaxCursor::new(root);
-        SyntaxNodePreorder {
-            cursor,
-            leaving: false,
-        }
+        SyntaxNodePreorder { cursor, leaving: false }
     }
 
     // Skip the subtree including current node.
@@ -179,10 +172,7 @@ pub struct SyntaxElemPreorder<'a> {
 impl<'a> SyntaxElemPreorder<'a> {
     pub fn new(root: SyntaxNode<'a>) -> Self {
         let cursor = SyntaxCursor::new(root);
-        SyntaxElemPreorder {
-            cursor,
-            leaving: false,
-        }
+        SyntaxElemPreorder { cursor, leaving: false }
     }
 
     // Skip the subtree rooted at the current node.
@@ -226,9 +216,8 @@ mod tests {
     use expect_test::expect;
     use itertools::Itertools;
 
-    use crate::{SyntaxAncestors, SyntaxElemPreorder, SyntaxElementKind, SyntaxKind, SyntaxTree};
-
     use super::{SyntaxIdxChildren, SyntaxNodePreorder, WalkEvent};
+    use crate::{SyntaxAncestors, SyntaxElemPreorder, SyntaxElementKind, SyntaxKind, SyntaxTree};
 
     fn get_test_tree() -> SyntaxTree {
         SyntaxTree::from_text("module A(input a); wire x; endmodule;", "source", "")
@@ -524,9 +513,8 @@ mod tests {
         let node = node.child_node(0).unwrap();
         let node = node.child_node(1).unwrap();
 
-        let ans = SyntaxAncestors::start_from(node)
-            .map(|elem| format!("{:?}", elem.kind()))
-            .join("\n");
+        let ans =
+            SyntaxAncestors::start_from(node).map(|elem| format!("{:?}", elem.kind())).join("\n");
         let expected = expect![[r#"
             ModuleHeader
             ModuleDeclaration

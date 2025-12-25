@@ -55,21 +55,14 @@ fn build_cpp_lib() {
 
 fn setup_linking() {
     let debug = cfg!(debug_assertions);
-    let dst = cmake::Config::new(".")
-        .build()
-        .join("build")
-        .display()
-        .to_string();
+    let dst = cmake::Config::new(".").build().join("build").display().to_string();
 
     println!("cargo:rustc-link-search=native={dst}/lib");
     println!("cargo:rustc-link-lib=static=svlang");
 
     let libs = [
         ("fmt", if debug { "fmtd" } else { "fmt" }),
-        (
-            "mimalloc",
-            if debug { "mimalloc-debug" } else { "mimalloc" },
-        ),
+        ("mimalloc", if debug { "mimalloc-debug" } else { "mimalloc" }),
     ];
 
     for (lib_name, lib_debug_name) in &libs {
@@ -103,18 +96,11 @@ fn setup_rerun_triggers() {
         println!("cargo:rerun-if-changed={}", file);
     }
 
-    for file in &[
-        "bindings/rust/ffi/string_view.h",
-        "bindings/rust/ffi/wrapper.h",
-    ] {
+    for file in &["bindings/rust/ffi/string_view.h", "bindings/rust/ffi/wrapper.h"] {
         println!("cargo:rerun-if-changed={}", file);
     }
 
-    for file in &[
-        "scripts/syntax.txt",
-        "scripts/tokenkinds.txt",
-        "scripts/triviakinds.txt",
-    ] {
+    for file in &["scripts/syntax.txt", "scripts/tokenkinds.txt", "scripts/triviakinds.txt"] {
         println!("cargo:rerun-if-changed={}", file);
     }
 }

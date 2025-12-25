@@ -1,11 +1,12 @@
 use core::str;
-use cxx::{ExternType, type_id};
 use std::{
     ffi::{c_char, c_uchar, c_void},
     fmt::{self, Display},
     marker::PhantomData,
     mem::MaybeUninit,
 };
+
+use cxx::{ExternType, type_id};
 
 #[derive(Copy, Clone)]
 #[repr(C)]

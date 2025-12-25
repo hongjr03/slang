@@ -51,18 +51,11 @@ fn dfs(node: SyntaxNode, depth: usize, ans: &mut String) {
     let kind = node.kind();
     let child_count = node.child_count();
     if let Some(range) = range {
-        *ans += &format!(
-            "{:indent$}{kind:?} {range:?} (cnt: {child_count})\n",
-            "",
-            indent = depth * 2
-        );
+        *ans +=
+            &format!("{:indent$}{kind:?} {range:?} (cnt: {child_count})\n", "", indent = depth * 2);
     } else {
         assert!(kind == SyntaxKind::UNKNOWN || kind.is_list());
-        *ans += &format!(
-            "{:indent$}{kind:?} (cnt: {child_count})\n",
-            "",
-            indent = depth * 2
-        );
+        *ans += &format!("{:indent$}{kind:?} (cnt: {child_count})\n", "", indent = depth * 2);
     }
 
     for i in 0..child_count {
@@ -343,15 +336,9 @@ endmodule;"#,
     else {
         unreachable!("expected integer vector literal");
     };
-    assert_eq!(
-        vec_lit.size().unwrap().int().unwrap().get_single_word(),
-        Some(7)
-    );
+    assert_eq!(vec_lit.size().unwrap().int().unwrap().get_single_word(), Some(7));
     assert_eq!(vec_lit.base().unwrap().base(), Some(LiteralBase::Bin));
-    assert_eq!(
-        vec_lit.value().unwrap().int().unwrap().serialize(2),
-        "10xx10"
-    );
+    assert_eq!(vec_lit.value().unwrap().int().unwrap().serialize(2), "10xx10");
 
     let Expression::PrimaryExpression(PrimaryExpression::LiteralExpression(
         LiteralExpression::IntegerLiteralExpression(int_lit),
@@ -379,13 +366,7 @@ endmodule;"#,
     let Expression::Name(Name::IdentifierName(name)) = literals.next().unwrap() else {
         unreachable!("expected identifier");
     };
-    assert!(
-        name.identifier()
-            .unwrap()
-            .value_text()
-            .to_string()
-            .is_empty()
-    );
+    assert!(name.identifier().unwrap().value_text().to_string().is_empty());
 }
 
 #[test]

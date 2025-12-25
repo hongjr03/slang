@@ -8,10 +8,7 @@ pub struct SyntaxCursor<'a> {
 impl<'a> SyntaxCursor<'a> {
     // Create a new cursor starting at the given node.
     pub fn new(root: SyntaxNode<'a>) -> SyntaxCursor<'a> {
-        SyntaxCursor {
-            elem: SyntaxElement::Node(root),
-            path: Vec::with_capacity(16),
-        }
+        SyntaxCursor { elem: SyntaxElement::Node(root), path: Vec::with_capacity(16) }
     }
 
     pub fn to_elem(&self) -> SyntaxElement<'a> {
@@ -276,20 +273,14 @@ mod tests {
         let mut cursor = SyntaxCursor::new(tree.root().unwrap());
 
         assert_eq!(cursor.idx(), None);
-        assert_eq!(
-            cursor.to_node().unwrap().kind(),
-            SyntaxKind::COMPILATION_UNIT
-        );
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::COMPILATION_UNIT);
 
         assert!(cursor.goto_first_child());
         assert_eq!(cursor.idx(), Some(0));
         assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::SYNTAX_LIST);
 
         assert!(cursor.goto_first_child());
-        assert_eq!(
-            cursor.to_node().unwrap().kind(),
-            SyntaxKind::MODULE_DECLARATION
-        );
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::MODULE_DECLARATION);
 
         assert!(cursor.goto_first_child());
         assert!(cursor.goto_next_sibling());
@@ -300,10 +291,7 @@ mod tests {
         assert!(cursor.goto_next_sibling());
         assert!(cursor.goto_next_sibling());
         assert_eq!(cursor.idx(), Some(3));
-        assert_eq!(
-            cursor.to_token().unwrap().kind(),
-            TokenKind::END_MODULE_KEYWORD
-        );
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::END_MODULE_KEYWORD);
 
         assert!(cursor.goto_parent());
         assert!(cursor.goto_parent());
@@ -316,19 +304,13 @@ mod tests {
 
         cursor.reset_to_root();
         assert_eq!(cursor.idx(), None);
-        assert_eq!(
-            cursor.to_node().unwrap().kind(),
-            SyntaxKind::COMPILATION_UNIT
-        );
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::COMPILATION_UNIT);
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
-        assert_eq!(
-            cursor.to_token().unwrap().kind(),
-            TokenKind::OPEN_PARENTHESIS
-        );
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::OPEN_PARENTHESIS);
 
         cursor.reset_to_root();
         assert!(cursor.goto_last_child_before_pos(8));

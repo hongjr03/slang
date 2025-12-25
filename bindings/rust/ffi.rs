@@ -3,11 +3,11 @@
 
 mod cxx_sv;
 
-use cxx::{SharedPtr, UniquePtr};
+pub use std::pin::Pin;
 
+use cxx::{SharedPtr, UniquePtr};
 pub use cxx_sv::CxxSV;
 pub use slang_ffi::*;
-pub use std::pin::Pin;
 
 #[cxx::bridge]
 mod slang_ffi {

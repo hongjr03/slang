@@ -69,22 +69,16 @@ pub mod loader {
             const KINDMAP_PREFIX: &str = "kindmap";
             if start_line.starts_with(KINDMAP_PREFIX) {
                 let kind_name = trim_name(KINDMAP_PREFIX.len(), start_line);
-                lines
-                    .by_ref()
-                    .take_while(|line| !is_end_line(line))
-                    .for_each(|line| {
-                        line.split_whitespace().for_each(|kind| {
-                            kind_map.insert(kind.to_owned(), kind_name.to_owned());
-                        })
-                    });
+                lines.by_ref().take_while(|line| !is_end_line(line)).for_each(|line| {
+                    line.split_whitespace().for_each(|kind| {
+                        kind_map.insert(kind.to_owned(), kind_name.to_owned());
+                    })
+                });
             } else {
                 let mut parts = start_line.split_whitespace();
                 let ty = parts.next().unwrap();
 
-                let mut tag = Tag {
-                    is_final: true,
-                    ..Default::default()
-                };
+                let mut tag = Tag { is_final: true, ..Default::default() };
 
                 for (name, value) in parts.map(|p| p.split('=').collect_tuple().unwrap()) {
                     match name {
@@ -244,10 +238,8 @@ pub mod generator {
             return Ok(OsString::from(rustfmt));
         }
 
-        which::which("rustfmt").map_or_else(
-            |e| Err(io::Error::other(format!("{}", e))),
-            |p| Ok(p.into_os_string()),
-        )
+        which::which("rustfmt")
+            .map_or_else(|e| Err(io::Error::other(format!("{}", e))), |p| Ok(p.into_os_string()))
     }
 
     fn mkdir_and_write(file: &Path, contents: String) -> Result<(), std::io::Error> {
@@ -274,9 +266,8 @@ pub mod generator {
         io::copy(&mut child_stdout, &mut output).expect("Failed to read rustfmt output");
 
         let status = child.wait().unwrap();
-        let contents = stdin_handle
-            .join()
-            .expect("The thread writing to rustfmt's stdin doesn't do any");
+        let contents =
+            stdin_handle.join().expect("The thread writing to rustfmt's stdin doesn't do any");
 
         match (String::from_utf8(output), status.code()) {
             (Ok(output), Some(0)) => fs::write(file, output),
@@ -417,22 +408,13 @@ pub mod generator {
     fn reverse_map(
         all_types: &HashMap<String, TypeInfo>,
         kind_map: &BTreeMap<String, String>,
-    ) -> (
-        HashMap<String, HashSet<String>>,
-        HashMap<String, HashSet<String>>,
-    ) {
+    ) -> (HashMap<String, HashSet<String>>, HashMap<String, HashSet<String>>) {
         let mut reversed_map = HashMap::new();
         let mut base_map = HashMap::new();
 
         for (k, v) in kind_map {
-            reversed_map
-                .entry(v.to_owned())
-                .or_insert_with(HashSet::new)
-                .insert(k.to_owned());
-            base_map
-                .entry(v.to_owned())
-                .or_insert_with(HashSet::new)
-                .insert(k.to_owned());
+            reversed_map.entry(v.to_owned()).or_insert_with(HashSet::new).insert(k.to_owned());
+            base_map.entry(v.to_owned()).or_insert_with(HashSet::new).insert(k.to_owned());
         }
 
         for (mut k, mut v) in all_types.iter().filter(|(_, v)| v.is_final) {
@@ -442,10 +424,7 @@ pub mod generator {
                     .entry(v.base.clone())
                     .or_insert_with(HashSet::new)
                     .extend(kinds.into_iter());
-                base_map
-                    .entry(v.base.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(k.clone());
+                base_map.entry(v.base.clone()).or_insert_with(HashSet::new).insert(k.clone());
                 k = &v.base;
                 v = all_types.get(k).unwrap();
             }
@@ -456,82 +435,74 @@ pub mod generator {
 
     fn escape_kw(name: String) -> String {
         let reserved = ["type", "use", "let"];
-        if reserved.contains(&name.as_str()) {
-            format!("{}_", name)
-        } else {
-            name
-        }
+        if reserved.contains(&name.as_str()) { format!("{}_", name) } else { name }
     }
 
     fn generate_members(ty_info: &TypeInfo) -> impl Iterator<Item = TokenStream> + '_ {
-        ty_info
-            .combined
-            .iter()
-            .enumerate()
-            .map(|(idx, (member_ty, member_name))| {
-                let member_name = format_ident!("{}", escape_kw(member_name.to_snake_case()));
-                let transform_ty = |mut ty: &str| {
-                    if ty == "SyntaxNode" {
-                        ty = "HybridNode";
-                    }
-                    format_ident!("{}", ty)
-                };
+        ty_info.combined.iter().enumerate().map(|(idx, (member_ty, member_name))| {
+            let member_name = format_ident!("{}", escape_kw(member_name.to_snake_case()));
+            let transform_ty = |mut ty: &str| {
+                if ty == "SyntaxNode" {
+                    ty = "HybridNode";
+                }
+                format_ident!("{}", ty)
+            };
 
-                match member_ty {
-                    Ty::Token => {
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> Option<SyntaxToken<'a>> {
-                                self.syntax().child_token(#idx)
-                            }
-                        }
-                    }
-                    Ty::TokenList => {
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> TokenList<'a> {
-                                self.syntax().child_node(#idx).and_then(TokenList::cast).unwrap()
-                            }
-                        }
-                    }
-                    Ty::SyntaxList(member_ty) => {
-                        let member_ty = transform_ty(member_ty);
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> SyntaxList<'a, #member_ty<'a>> {
-                                self.syntax().child_node(#idx).and_then(SyntaxList::cast).unwrap()
-                            }
-                        }
-                    }
-                    Ty::SeparatedList(member_ty) => {
-                        let member_ty = transform_ty(member_ty);
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> SeparatedList<'a, #member_ty<'a>> {
-                                self.syntax().child_node(#idx).and_then(SeparatedList::cast).unwrap()
-                            }
-                        }
-                    }
-                    Ty::NotNull(member_ty) => {
-                        let member_ty = transform_ty(member_ty);
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> #member_ty<'a> {
-                                self.syntax().child_node(#idx).and_then(#member_ty::cast).unwrap()
-                            }
-                        }
-                    }
-                    Ty::SyntaxNode(member_ty) => {
-                        let member_ty = transform_ty(member_ty);
-                        quote! {
-                            #[inline]
-                            pub fn #member_name(&self) -> Option<#member_ty<'a>> {
-                                self.syntax().child_node(#idx).and_then(#member_ty::cast)
-                            }
+            match member_ty {
+                Ty::Token => {
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> Option<SyntaxToken<'a>> {
+                            self.syntax().child_token(#idx)
                         }
                     }
                 }
-            })
+                Ty::TokenList => {
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> TokenList<'a> {
+                            self.syntax().child_node(#idx).and_then(TokenList::cast).unwrap()
+                        }
+                    }
+                }
+                Ty::SyntaxList(member_ty) => {
+                    let member_ty = transform_ty(member_ty);
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> SyntaxList<'a, #member_ty<'a>> {
+                            self.syntax().child_node(#idx).and_then(SyntaxList::cast).unwrap()
+                        }
+                    }
+                }
+                Ty::SeparatedList(member_ty) => {
+                    let member_ty = transform_ty(member_ty);
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> SeparatedList<'a, #member_ty<'a>> {
+                            self.syntax().child_node(#idx).and_then(SeparatedList::cast).unwrap()
+                        }
+                    }
+                }
+                Ty::NotNull(member_ty) => {
+                    let member_ty = transform_ty(member_ty);
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> #member_ty<'a> {
+                            self.syntax().child_node(#idx).and_then(#member_ty::cast).unwrap()
+                        }
+                    }
+                }
+                Ty::SyntaxNode(member_ty) => {
+                    let member_ty = transform_ty(member_ty);
+                    quote! {
+                        #[inline]
+                        pub fn #member_name(&self) -> Option<#member_ty<'a>> {
+                            self.syntax().child_node(#idx).and_then(#member_ty::cast)
+                        }
+                    }
+                }
+            }
+        })
     }
 
     pub fn generate_ast_file(
