@@ -77,7 +77,7 @@ mod slang_ffi {
         #[cxx_name = "Trivia"]
         type SyntaxTrivia;
 
-        fn getRawText(self: &SyntaxTrivia) -> CxxSV;
+        fn getRawText(self: &SyntaxTrivia) -> CxxSV<'_>;
 
         #[namespace = "wrapper::parsing"]
         fn SyntaxTrivia_kind(trivia: &SyntaxTrivia) -> u8;
@@ -90,9 +90,9 @@ mod slang_ffi {
         #[namespace = "wrapper::parsing"]
         fn SyntaxToken_range(tok: &SyntaxToken) -> UniquePtr<SourceRange>;
 
-        fn valueText(self: &SyntaxToken) -> CxxSV; // excapedText
+        fn valueText(self: &SyntaxToken) -> CxxSV<'_>; // excapedText
 
-        fn rawText(self: &SyntaxToken) -> CxxSV; // rawText
+        fn rawText(self: &SyntaxToken) -> CxxSV<'_>; // rawText
 
         #[namespace = "wrapper::parsing"]
         fn SyntaxToken_kind(tok: &SyntaxToken) -> u16;

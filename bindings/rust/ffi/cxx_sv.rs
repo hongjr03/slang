@@ -1,9 +1,8 @@
 use core::str;
 use cxx::{ExternType, type_id};
-use smol_str::{SmolStr, ToSmolStr};
 use std::{
     ffi::{c_char, c_uchar, c_void},
-    fmt,
+    fmt::{self, Display},
     marker::PhantomData,
     mem::MaybeUninit,
 };
@@ -29,8 +28,8 @@ mod ffi {
         #[cxx_name = "string_view"]
         type CxxSV<'a> = super::CxxSV<'a>;
 
-        fn string_view_from_str(s: &str) -> CxxSV;
-        fn string_view_as_bytes(s: CxxSV) -> &[c_char];
+        fn string_view_from_str(s: &str) -> CxxSV<'_>;
+        fn string_view_as_bytes(s: CxxSV<'_>) -> &[c_char];
     }
 }
 
@@ -46,15 +45,10 @@ impl<'a> CxxSV<'a> {
     }
 }
 
-impl ToString for CxxSV<'_> {
-    fn to_string(&self) -> String {
-        unsafe { String::from_utf8_unchecked(self.as_bytes().to_vec()) }
-    }
-}
-
-impl ToSmolStr for CxxSV<'_> {
-    fn to_smolstr(&self) -> SmolStr {
-        SmolStr::new(unsafe { str::from_utf8_unchecked(self.as_bytes()) })
+impl Display for CxxSV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = unsafe { str::from_utf8_unchecked(self.as_bytes()) };
+        write!(f, "{}", s)
     }
 }
 

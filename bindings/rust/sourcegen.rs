@@ -245,7 +245,7 @@ pub mod generator {
         }
 
         which::which("rustfmt").map_or_else(
-            |e| Err(io::Error::new(io::ErrorKind::Other, format!("{}", e))),
+            |e| Err(io::Error::other(format!("{}", e))),
             |p| Ok(p.into_os_string()),
         )
     }
@@ -588,12 +588,10 @@ pub mod generator {
                                 .find(|&base| reverse_kind_map.get(base).is_some_and(|children| children.contains(kind_name))) {
                                     if all_types.get(kind_name).is_none() && kind_map.get(kind_name).unwrap() == ty_name {
                                         kind_name
+                                    } else if processed_bases.insert(base) {
+                                        base
                                     } else {
-                                        if processed_bases.insert(base) {
-                                            base
-                                        } else {
-                                            return None;
-                                        }
+                                        return None;
                                     }
                                 } else {
                                     kind_name

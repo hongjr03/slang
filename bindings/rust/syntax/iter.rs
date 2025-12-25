@@ -153,20 +153,18 @@ impl<'a> Iterator for SyntaxNodePreorder<'a> {
                     break;
                 }
             }
-        } else {
-            if self.cursor.goto_first_child() {
-                loop {
-                    if self.cursor.to_node().is_some() {
-                        break;
-                    } else if !self.cursor.goto_next_sibling() {
-                        self.leaving = true;
-                        self.cursor.goto_parent();
-                        break;
-                    }
+        } else if self.cursor.goto_first_child() {
+            loop {
+                if self.cursor.to_node().is_some() {
+                    break;
+                } else if !self.cursor.goto_next_sibling() {
+                    self.leaving = true;
+                    self.cursor.goto_parent();
+                    break;
                 }
-            } else {
-                self.leaving = true;
             }
+        } else {
+            self.leaving = true;
         }
 
         Some(event)

@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 #![feature(trait_alias)]
 
 pub mod ast;
@@ -11,7 +10,7 @@ pub use ffi::CxxSV;
 use itertools::{Either, Itertools};
 use std::{
     ffi::c_char,
-    fmt, hash, iter,
+    fmt::{self, Display}, hash, iter,
     ops::{self, Not},
     pin::Pin,
 };
@@ -177,10 +176,10 @@ impl PartialEq for SourceRange {
 
 impl Eq for SourceRange {}
 
-impl Into<ops::Range<usize>> for SourceRange {
-    fn into(self) -> ops::Range<usize> {
-        let start = self.start();
-        let end = self.end();
+impl From<SourceRange> for ops::Range<usize> {
+    fn from(val: SourceRange) -> Self {
+        let start = val.start();
+        let end = val.end();
         start..end
     }
 }
@@ -286,9 +285,9 @@ impl hash::Hash for SVInt {
     }
 }
 
-impl ToString for SVInt {
-    fn to_string(&self) -> String {
-        self._ptr.toString(10)
+impl Display for SVInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self._ptr.toString(10))
     }
 }
 
@@ -313,7 +312,7 @@ impl SyntaxTrivia<'_> {
     }
 
     #[inline]
-    pub fn get_raw_text(&self) -> CxxSV {
+    pub fn get_raw_text(&self) -> CxxSV<'_> {
         self._ptr.getRawText()
     }
 
@@ -342,12 +341,12 @@ impl<'a> SyntaxToken<'a> {
     }
 
     #[inline]
-    pub fn value_text(&self) -> CxxSV {
+    pub fn value_text(&self) -> CxxSV<'_> {
         self._ptr.valueText()
     }
 
     #[inline]
-    pub fn raw_text(&self) -> CxxSV {
+    pub fn raw_text(&self) -> CxxSV<'_> {
         self._ptr.rawText()
     }
 
@@ -626,7 +625,7 @@ impl SyntaxTree {
     }
 
     #[inline]
-    pub fn root(&self) -> Option<SyntaxNode> {
+    pub fn root(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.root())
     }
 }
@@ -803,6 +802,12 @@ impl From<TokenKind> for SyntaxElementKind {
 
 pub struct Compilation {
     _ptr: UniquePtr<ffi::Compilation>,
+}
+
+impl Default for Compilation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Compilation {
