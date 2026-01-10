@@ -69,6 +69,10 @@ namespace wrapper {
       return static_cast<uint8_t>(trivia.kind);
     }
 
+    inline static const SyntaxNode* SyntaxTrivia_syntax(const SyntaxTrivia& trivia) {
+      return trivia.syntax();
+    }
+
     // Token
     inline static size_t SyntaxToken_trivia_count(const SyntaxToken& token) {
       return token.trivia().size();
