@@ -15,7 +15,7 @@ use std::{
 
 use cxx::{SharedPtr, UniquePtr};
 pub use ffi::CxxSV;
-use itertools::{Either, Itertools};
+use itertools::Either;
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
     cursor::SyntaxCursor,
@@ -313,6 +313,11 @@ impl SyntaxTrivia<'_> {
     pub fn kind(&self) -> TriviaKind {
         TriviaKind::from_id(self._ptr.kind())
     }
+
+    #[inline]
+    pub fn syntax(&self) -> Option<SyntaxNode<'_>> {
+        SyntaxNode::from_raw_ptr(self._ptr.syntax())
+    }
 }
 
 impl<'a> SyntaxToken<'a> {
@@ -398,16 +403,25 @@ impl<'a> SyntaxToken<'a> {
         let Some(range) = self.range() else {
             return Either::Left(iter::empty());
         };
-        let start = range.start();
-        let locs = self
-            .trivias()
-            .rev()
-            .scan(start, |state: &mut usize, trivia| {
-                let end = *state;
-                *state -= trivia.get_raw_text().to_string().len();
-                Some(((*state, end), trivia))
-            })
-            .collect_vec();
+
+        let mut state = range.start();
+        let mut locs = Vec::with_capacity(self.trivia_count());
+        for trivia in self.trivias().rev() {
+            if let Some(node) = trivia.syntax()
+                && let Some(trivia_range) = node.range()
+            {
+                let start = trivia_range.start();
+                let end = trivia_range.end();
+                state = state.min(start);
+                locs.push(((start, end), trivia));
+                continue;
+            }
+
+            let end = state;
+            let len = trivia.get_raw_text().to_string().len();
+            state -= len;
+            locs.push(((state, end), trivia));
+        }
         Either::Right(locs.into_iter().rev())
     }
 }

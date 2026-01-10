@@ -82,6 +82,9 @@ mod slang_ffi {
         #[namespace = "wrapper::parsing"]
         fn SyntaxTrivia_kind(trivia: &SyntaxTrivia) -> u8;
 
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxTrivia_syntax(trivia: &SyntaxTrivia) -> *const SyntaxNode;
+
         #[cxx_name = "Token"]
         type SyntaxToken;
 
@@ -251,6 +254,7 @@ impl_functions! {
 impl_functions! {
     impl SyntaxTrivia {
         fn kind(&self) -> u8 |> SyntaxTrivia_kind;
+        fn syntax(&self) -> *const SyntaxNode |> SyntaxTrivia_syntax;
     }
 }
 
