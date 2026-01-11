@@ -73,6 +73,25 @@ namespace wrapper {
       return trivia.syntax();
     }
 
+    inline static std::string_view SyntaxTrivia_directive_token_raw_text(const SyntaxTrivia& trivia) {
+      if (trivia.kind != slang::parsing::TriviaKind::Directive)
+        return {};
+      auto* node = trivia.syntax();
+      if (!node)
+        return {};
+      return node->getFirstToken().rawText();
+    }
+
+    inline static std::unique_ptr<SourceRange> SyntaxTrivia_directive_token_range(const SyntaxTrivia& trivia) {
+      if (trivia.kind != slang::parsing::TriviaKind::Directive)
+        return nullptr;
+      auto* node = trivia.syntax();
+      if (!node)
+        return nullptr;
+      auto range = node->getFirstToken().range();
+      return range == SourceRange::NoLocation ? nullptr : std::make_unique<SourceRange>(range);
+    }
+
     // Token
     inline static size_t SyntaxToken_trivia_count(const SyntaxToken& token) {
       return token.trivia().size();

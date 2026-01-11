@@ -85,6 +85,12 @@ mod slang_ffi {
         #[namespace = "wrapper::parsing"]
         fn SyntaxTrivia_syntax(trivia: &SyntaxTrivia) -> *const SyntaxNode;
 
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxTrivia_directive_token_raw_text(trivia: &SyntaxTrivia) -> CxxSV<'_>;
+
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxTrivia_directive_token_range(trivia: &SyntaxTrivia) -> UniquePtr<SourceRange>;
+
         #[cxx_name = "Token"]
         type SyntaxToken;
 
@@ -280,6 +286,8 @@ impl_functions! {
     impl SyntaxTrivia {
         fn kind(&self) -> u8 |> SyntaxTrivia_kind;
         fn syntax(&self) -> *const SyntaxNode |> SyntaxTrivia_syntax;
+        fn directive_token_raw_text(&self) -> CxxSV<'_> |> SyntaxTrivia_directive_token_raw_text;
+        fn directive_token_range(&self) -> UniquePtr<SourceRange> |> SyntaxTrivia_directive_token_range;
     }
 }
 
