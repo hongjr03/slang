@@ -318,6 +318,16 @@ impl SyntaxTrivia<'_> {
     pub fn syntax(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.syntax())
     }
+
+    #[inline]
+    pub fn directive_token_range(&self) -> Option<SourceRange> {
+        SourceRange::from_unique_ptr(self._ptr.directive_token_range())
+    }
+
+    #[inline]
+    pub fn directive_token_raw_text(&self) -> CxxSV<'_> {
+        self._ptr.directive_token_raw_text()
+    }
 }
 
 impl<'a> SyntaxToken<'a> {

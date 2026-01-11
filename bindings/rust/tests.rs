@@ -2,7 +2,6 @@ use ast::{
     AstNode, CompilationUnit, Expression, LiteralExpression, Member, Name, PrimaryExpression,
 };
 use expect_test::expect;
-use itertools::Itertools;
 
 use super::*;
 
@@ -27,6 +26,17 @@ C #(.l(1)) c();
 endmodule
 
 "#,
+        "source",
+        "",
+    )
+}
+
+fn get_tree_with_directive() -> SyntaxTree {
+    SyntaxTree::from_text(
+        "`define FOO 1\n\
+         module m;\n\
+         initial `FOO;\n\
+         endmodule\n",
         "source",
         "",
     )
@@ -85,6 +95,22 @@ fn dfs(node: SyntaxNode, depth: usize, ans: &mut String) {
     }
 }
 
+fn find_first_directive_trivia(node: SyntaxNode<'_>) -> Option<SyntaxTrivia<'_>> {
+    let child_count = node.child_count();
+    for i in 0..child_count {
+        if let Some(child) = node.child_node(i) {
+            if let Some(trivia) = find_first_directive_trivia(child) {
+                return Some(trivia);
+            }
+        } else if let Some(tok) = node.child_token(i) {
+            if let Some(trivia) = tok.trivias().find(|t| matches!(t.kind(), Trivia!["`"])) {
+                return Some(trivia);
+            }
+        }
+    }
+    None
+}
+
 #[test]
 fn parse() {
     let tree = get_test_tree();
@@ -141,6 +167,24 @@ fn parse() {
           EndOfFile 37..37
     "#]];
     expected.assert_eq(&ans);
+}
+
+#[test]
+fn directive_trivia_exposes_token_text_and_range() {
+    let tree = get_tree_with_directive();
+    let root = tree.root().unwrap();
+    let trivia = find_first_directive_trivia(root).expect("missing directive trivia");
+
+    // `Trivia::getRawText()` is intentionally empty for directives.
+    assert_eq!(trivia.get_raw_text().as_bytes(), b"");
+
+    let range = trivia.directive_token_range().expect("missing directive token range");
+    assert!(!range.is_empty(), "{range:?}");
+    assert_eq!(range.start(), 0);
+
+    let raw = trivia.directive_token_raw_text();
+    assert_eq!(raw.as_bytes(), b"`define");
+    assert_eq!(range.end() - range.start(), raw.as_bytes().len());
 }
 
 #[test]
