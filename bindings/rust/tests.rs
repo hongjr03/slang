@@ -498,5 +498,5 @@ fn lexer_facts_directive_text_and_kind() {
         directive_kind("define", false),
         SyntaxKind::DEFINE_DIRECTIVE
     );
-    assert_eq!(directive_text(SyntaxKind::DEFINE_DIRECTIVE), "define");
+    assert_eq!(directive_text(SyntaxKind::DEFINE_DIRECTIVE), "`define");
 }
