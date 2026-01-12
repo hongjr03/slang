@@ -134,6 +134,13 @@ mod slang_ffi {
 
     impl UniquePtr<SyntaxToken> {}
 
+    #[namespace = "wrapper::parsing"]
+    unsafe extern "C++" {
+        include!("slang/bindings/rust/ffi/wrapper.h");
+
+        fn verilog_2005_keywords() -> Vec<String>;
+    }
+
     #[namespace = "slang::syntax"]
     unsafe extern "C++" {
         include!("slang/include/slang/syntax/SyntaxNode.h");
