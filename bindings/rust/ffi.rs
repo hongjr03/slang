@@ -139,6 +139,10 @@ mod slang_ffi {
         include!("slang/bindings/rust/ffi/wrapper.h");
 
         fn verilog_2005_keywords() -> Vec<String>;
+        fn keyword_table_for_version(version: &str) -> Vec<String>;
+        fn token_kind_text(kind_id: u16) -> String;
+        fn directive_kind(directive: &str, enable_legacy_protect: bool) -> u16;
+        fn directive_text(kind_id: u16) -> String;
     }
 
     #[namespace = "slang::syntax"]

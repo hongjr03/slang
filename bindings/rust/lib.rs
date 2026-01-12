@@ -29,6 +29,22 @@ pub fn verilog_2005_keywords() -> Vec<String> {
     ffi::verilog_2005_keywords()
 }
 
+pub fn keyword_table_for_version(version: &str) -> Vec<String> {
+    ffi::keyword_table_for_version(version)
+}
+
+pub fn token_kind_text(kind: TokenKind) -> String {
+    ffi::token_kind_text(kind.id())
+}
+
+pub fn directive_kind(directive: &str, enable_legacy_protect: bool) -> SyntaxKind {
+    SyntaxKind::from_id(ffi::directive_kind(directive, enable_legacy_protect))
+}
+
+pub fn directive_text(kind: SyntaxKind) -> String {
+    ffi::directive_text(kind.id())
+}
+
 pub struct SVInt {
     _ptr: UniquePtr<ffi::SVInt>,
 }

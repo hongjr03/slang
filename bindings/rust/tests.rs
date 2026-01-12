@@ -480,3 +480,23 @@ fn test_compilation() {
     let tree = get_test_tree();
     compilation.add_syntax_tree(tree);
 }
+
+#[test]
+fn lexer_facts_keyword_table_for_version() {
+    let keywords = keyword_table_for_version("1364-2005");
+    assert!(keywords.iter().any(|kw| kw == "module"));
+}
+
+#[test]
+fn lexer_facts_token_kind_text() {
+    assert_eq!(token_kind_text(TokenKind::MODULE_KEYWORD), "module");
+}
+
+#[test]
+fn lexer_facts_directive_text_and_kind() {
+    assert_eq!(
+        directive_kind("define", false),
+        SyntaxKind::DEFINE_DIRECTIVE
+    );
+    assert_eq!(directive_text(SyntaxKind::DEFINE_DIRECTIVE), "define");
+}

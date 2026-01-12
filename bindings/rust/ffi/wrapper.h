@@ -8,8 +8,10 @@
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxNode.h"
+#include "slang/syntax/SyntaxKind.h"
 #include "slang/numeric/SVInt.h"
 #include "slang/parsing/LexerFacts.h"
+#include "slang/parsing/TokenKind.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
@@ -75,6 +77,39 @@ namespace wrapper {
         out.push_back(rust::String(std::string(it.first)));
       }
       return out;
+    }
+
+    inline static rust::Vec<rust::String> keyword_table_for_version(rust::Str version) {
+      rust::Vec<rust::String> out;
+      std::string_view v(version.data(), version.size());
+      auto opt = slang::parsing::LexerFacts::getKeywordVersion(v);
+      if (!opt)
+        return out;
+      auto* table = slang::parsing::LexerFacts::getKeywordTable(*opt);
+      if (!table)
+        return out;
+      for (const auto& it : *table) {
+        out.push_back(rust::String(std::string(it.first)));
+      }
+      return out;
+    }
+
+    inline static rust::String token_kind_text(uint16_t kind_id) {
+      auto kind = static_cast<slang::parsing::TokenKind>(kind_id);
+      return rust::String(
+          std::string(slang::parsing::LexerFacts::getTokenKindText(kind)));
+    }
+
+    inline static uint16_t directive_kind(rust::Str directive, bool enableLegacyProtect) {
+      std::string_view v(directive.data(), directive.size());
+      auto kind = slang::parsing::LexerFacts::getDirectiveKind(v, enableLegacyProtect);
+      return static_cast<uint16_t>(kind);
+    }
+
+    inline static rust::String directive_text(uint16_t kind_id) {
+      auto kind = static_cast<slang::syntax::SyntaxKind>(kind_id);
+      return rust::String(
+          std::string(slang::parsing::LexerFacts::getDirectiveText(kind)));
     }
 
     // Trivia
