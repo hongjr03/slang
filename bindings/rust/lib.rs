@@ -25,6 +25,10 @@ pub use syntax::{
     },
 };
 
+pub fn verilog_2005_keywords() -> Vec<String> {
+    ffi::verilog_2005_keywords()
+}
+
 pub struct SVInt {
     _ptr: UniquePtr<ffi::SVInt>,
 }

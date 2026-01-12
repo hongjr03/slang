@@ -8,6 +8,7 @@
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/numeric/SVInt.h"
+#include "slang/parsing/LexerFacts.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
@@ -62,6 +63,18 @@ namespace wrapper {
   }
 
   namespace parsing {
+    inline static rust::Vec<rust::String> verilog_2005_keywords() {
+      rust::Vec<rust::String> out;
+      auto* table = slang::parsing::LexerFacts::getKeywordTable(
+          slang::parsing::KeywordVersion::v1364_2005);
+      if (!table)
+        return out;
+      for (const auto& it : *table) {
+        out.push_back(rust::String(std::string(it.first)));
+      }
+      return out;
+    }
+
     // Trivia
     inline static uint8_t SyntaxTrivia_kind(const SyntaxTrivia& trivia) {
       return static_cast<uint8_t>(trivia.kind);
