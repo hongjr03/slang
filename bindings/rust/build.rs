@@ -44,7 +44,8 @@ fn build_cpp_lib() {
         .includes(includes.iter().map(Path::new))
         .std("c++20")
         .flag_if_supported("-stdlib=libstdc++")
-        .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER");
+        .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER")
+        .flag_if_supported("-w");
 
     if debug {
         builder.flag_if_supported("-DDEBUG");
