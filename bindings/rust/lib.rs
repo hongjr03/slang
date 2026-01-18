@@ -14,7 +14,7 @@ use std::{
 };
 
 use cxx::{SharedPtr, UniquePtr};
-pub use ffi::CxxSV;
+pub use ffi::{CxxSV, DefineDirectiveLocation};
 use itertools::Either;
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
@@ -499,6 +499,12 @@ impl<'a> DefineDirective<'a> {
     #[inline]
     pub fn syntax_range(&self) -> Option<SourceRange> {
         SourceRange::from_unique_ptr(self._ptr.range())
+    }
+
+    #[inline]
+    pub fn location(&self, tree: &SyntaxTree) -> Option<DefineDirectiveLocation> {
+        let tree = tree._ptr.as_ref()?;
+        Some(ffi::DefineDirectiveSyntax_location(tree, self._ptr.get_ref()))
     }
 }
 

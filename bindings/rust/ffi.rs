@@ -11,6 +11,14 @@ pub use slang_ffi::*;
 
 #[cxx::bridge]
 mod slang_ffi {
+    #[derive(Debug)]
+    #[namespace = "wrapper::syntax"]
+    struct DefineDirectiveLocation {
+        file: String,
+        start: usize,
+        end: usize,
+    }
+
     #[namespace = "slang"]
     unsafe extern "C++" {
         include!("slang/include/slang/text/SourceLocation.h");
@@ -196,6 +204,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_defined_macro(tree: &SyntaxTree, index: usize) -> *const DefineDirectiveSyntax;
+
+        #[namespace = "wrapper::syntax"]
+        fn DefineDirectiveSyntax_location(
+            tree: &SyntaxTree,
+            syntax: &DefineDirectiveSyntax,
+        ) -> DefineDirectiveLocation;
 
         #[namespace = "wrapper::syntax"]
         fn DefineDirectiveSyntax_name(syntax: &DefineDirectiveSyntax) -> *const SyntaxToken;

@@ -15,6 +15,7 @@
 #include "slang/parsing/TokenKind.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
+#include "slang/text/SourceManager.h"
 #include "slang/ast/Compilation.h"
 #include "slang/diagnostics/Diagnostics.h"
 #include "slang/util/Bag.h"
@@ -198,6 +199,7 @@ namespace wrapper {
 
       slang::Bag options;
       slang::parsing::PreprocessorOptions ppOptions;
+      // Keep in sync with base_db::preprocessor::PREDEFINE_SOURCE_NAME.
       ppOptions.predefineSource = "<vizsla_config>";
 
       ppOptions.predefines.reserve(predefines.size());
@@ -229,6 +231,31 @@ namespace wrapper {
         return nullptr;
       }
       return macros[index];
+    }
+
+    struct DefineDirectiveLocation {
+      rust::String file;
+      size_t start;
+      size_t end;
+    };
+
+    inline static DefineDirectiveLocation DefineDirectiveSyntax_location(
+        const SyntaxTree& tree, const DefineDirectiveSyntax& syntax) {
+      auto range = syntax.sourceRange();
+      if (range == SourceRange::NoLocation) {
+        return {rust::String(), 0, 0};
+      }
+
+      auto start = range.start();
+      auto end = range.end();
+      auto& sourceManager = tree.sourceManager();
+      auto& fullPath = sourceManager.getFullPath(start.buffer());
+      if (!fullPath.empty()) {
+        return {rust::String(fullPath.string()), start.offset(), end.offset()};
+      }
+
+      auto fileName = sourceManager.getFileName(start);
+      return {rust::String(std::string(fileName)), start.offset(), end.offset()};
     }
 
     inline static const SyntaxToken* DefineDirectiveSyntax_name(
