@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/numeric/SVInt.h"
 #include "slang/syntax/SyntaxPrinter.h"
@@ -22,6 +23,7 @@ namespace wrapper {
   using SourceRange = ::slang::SourceRange;
   using SyntaxTree = ::slang::syntax::SyntaxTree;
   using SyntaxNode = ::slang::syntax::SyntaxNode;
+  using DefineDirectiveSyntax = ::slang::syntax::DefineDirectiveSyntax;
   using Compilation = ::slang::ast::Compilation;
   using Diagnostic = ::slang::Diagnostic;
 
@@ -80,6 +82,10 @@ namespace wrapper {
       return static_cast<uint16_t>(token.kind);
     }
 
+    inline static uint16_t SyntaxToken_directive_kind(const SyntaxToken& token) {
+      return static_cast<uint16_t>(token.directiveKind());
+    }
+
     inline static std::unique_ptr<SourceRange> SyntaxToken_range(const SyntaxToken& token) {
       auto range = token.range();
       return range == SourceRange::NoLocation ? nullptr : std::make_unique<SourceRange>(range);
@@ -111,6 +117,30 @@ namespace wrapper {
 
     inline static const SyntaxNode* SyntaxTree_root(const SyntaxTree& tree) {
       return &tree.root();
+    }
+
+    inline static size_t SyntaxTree_defined_macro_count(const SyntaxTree& tree) {
+      return tree.getDefinedMacros().size();
+    }
+
+    inline static const DefineDirectiveSyntax* SyntaxTree_defined_macro(const SyntaxTree& tree,
+                                                                        size_t index) {
+      auto macros = tree.getDefinedMacros();
+      if (index >= macros.size()) {
+        return nullptr;
+      }
+      return macros[index];
+    }
+
+    inline static const SyntaxToken* DefineDirectiveSyntax_name(
+        const DefineDirectiveSyntax& syntax) {
+      return &syntax.name;
+    }
+
+    inline static std::unique_ptr<SourceRange> DefineDirectiveSyntax_range(
+        const DefineDirectiveSyntax& syntax) {
+      auto range = syntax.sourceRange();
+      return range == SourceRange::NoLocation ? nullptr : std::make_unique<SourceRange>(range);
     }
 
     inline static std::unique_ptr<SourceRange> SyntaxNode_range(const SyntaxNode& node) {

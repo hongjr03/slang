@@ -57,6 +57,11 @@ pub struct SyntaxTree {
 }
 
 #[derive(Clone, Copy)]
+pub struct DefineDirective<'a> {
+    _ptr: Pin<&'a ffi::DefineDirectiveSyntax>,
+}
+
+#[derive(Clone, Copy)]
 pub struct SyntaxTrivia<'a> {
     _ptr: Pin<&'a ffi::SyntaxTrivia>,
 }
@@ -347,6 +352,12 @@ impl<'a> SyntaxToken<'a> {
     }
 
     #[inline]
+    pub fn directive_kind(&self) -> Option<SyntaxKind> {
+        matches!(self.kind(), TokenKind::DIRECTIVE | TokenKind::MACRO_USAGE)
+            .then(|| SyntaxKind::from_id(self._ptr.directive_kind()))
+    }
+
+    #[inline]
     pub fn int(&self) -> Option<SVInt> {
         matches!(self.kind(), TokenKind::INTEGER_LITERAL)
             .then(|| SVInt { _ptr: self._ptr.intValue() })
@@ -429,6 +440,23 @@ impl PartialEq for SyntaxToken<'_> {
 }
 
 impl Eq for SyntaxToken<'_> {}
+
+impl<'a> DefineDirective<'a> {
+    #[inline]
+    fn from_raw_ptr(_ptr: *const ffi::DefineDirectiveSyntax) -> Option<Self> {
+        _ptr.is_null().not().then(|| DefineDirective { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
+    }
+
+    #[inline]
+    pub fn name_token(&self) -> Option<SyntaxToken<'a>> {
+        SyntaxToken::from_raw_ptr(self._ptr.name())
+    }
+
+    #[inline]
+    pub fn syntax_range(&self) -> Option<SourceRange> {
+        SourceRange::from_unique_ptr(self._ptr.range())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SyntaxTriviaIter<'a> {
@@ -605,6 +633,15 @@ impl SyntaxTree {
     pub fn root(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.root())
     }
+
+    #[inline]
+    pub fn macros(&self) -> DefineDirectiveIter<'_> {
+        DefineDirectiveIter {
+            tree: self,
+            idx: 0,
+            total: self._ptr.defined_macro_count(),
+        }
+    }
 }
 
 unsafe impl Send for SyntaxTree {}
@@ -627,6 +664,32 @@ impl PartialEq for SyntaxTree {
 }
 
 impl Eq for SyntaxTree {}
+
+#[derive(Debug, Clone)]
+pub struct DefineDirectiveIter<'a> {
+    tree: &'a SyntaxTree,
+    idx: usize,
+    total: usize,
+}
+
+impl<'a> Iterator for DefineDirectiveIter<'a> {
+    type Item = DefineDirective<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.total {
+            return None;
+        }
+        let idx = self.idx;
+        self.idx += 1;
+        DefineDirective::from_raw_ptr(self.tree._ptr.defined_macro(idx))
+    }
+}
+
+impl<'a> ExactSizeIterator for DefineDirectiveIter<'a> {
+    fn len(&self) -> usize {
+        self.total - self.idx
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyntaxTokenWithParent<'a> {

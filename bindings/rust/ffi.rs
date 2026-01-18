@@ -98,6 +98,9 @@ mod slang_ffi {
         fn SyntaxToken_kind(tok: &SyntaxToken) -> u16;
 
         #[namespace = "wrapper::parsing"]
+        fn SyntaxToken_directive_kind(tok: &SyntaxToken) -> u16;
+
+        #[namespace = "wrapper::parsing"]
         fn SyntaxToken_intValue(tok: &SyntaxToken) -> UniquePtr<SVInt>;
 
         #[namespace = "wrapper::parsing"]
@@ -151,12 +154,25 @@ mod slang_ffi {
         include!("slang/include/slang/syntax/SyntaxTree.h");
 
         type SyntaxTree;
+        type DefineDirectiveSyntax;
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree>;
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_root(tree: &SyntaxTree) -> *const SyntaxNode;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_defined_macro_count(tree: &SyntaxTree) -> usize;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_defined_macro(tree: &SyntaxTree, index: usize) -> *const DefineDirectiveSyntax;
+
+        #[namespace = "wrapper::syntax"]
+        fn DefineDirectiveSyntax_name(syntax: &DefineDirectiveSyntax) -> *const SyntaxToken;
+
+        #[namespace = "wrapper::syntax"]
+        fn DefineDirectiveSyntax_range(syntax: &DefineDirectiveSyntax) -> UniquePtr<SourceRange>;
     }
 
     impl SharedPtr<SyntaxTree> {}
@@ -230,6 +246,15 @@ impl_functions! {
     impl SyntaxTree {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
+        fn defined_macro_count(&self) -> usize |> SyntaxTree_defined_macro_count;
+        fn defined_macro(&self, index: usize) -> *const DefineDirectiveSyntax |> SyntaxTree_defined_macro;
+    }
+}
+
+impl_functions! {
+    impl DefineDirectiveSyntax {
+        fn name(&self) -> *const SyntaxToken |> DefineDirectiveSyntax_name;
+        fn range(&self) -> UniquePtr<SourceRange> |> DefineDirectiveSyntax_range;
     }
 }
 
@@ -257,6 +282,7 @@ impl_functions! {
 impl_functions! {
     impl SyntaxToken {
         fn kind(&self) -> u16 |> SyntaxToken_kind;
+        fn directive_kind(&self) -> u16 |> SyntaxToken_directive_kind;
         fn intValue(&self) -> UniquePtr<SVInt> |> SyntaxToken_intValue;
         fn bitValue(&self) -> UniquePtr<SVLogic> |> SyntaxToken_bitValue;
         fn base(&self) -> u8 |> SyntaxToken_base;
