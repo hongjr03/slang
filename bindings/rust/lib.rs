@@ -14,7 +14,7 @@ use std::{
 };
 
 use cxx::{SharedPtr, UniquePtr};
-pub use ffi::{CxxSV, DefineDirectiveLocation};
+pub use ffi::CxxSV;
 use itertools::Either;
 pub use syntax::{
     SyntaxKind, TokenKind, TriviaKind,
@@ -59,6 +59,13 @@ pub struct SourceLocation {
 
 pub struct SourceRange {
     _ptr: UniquePtr<ffi::SourceRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefineDirectiveLocation {
+    pub file: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -504,7 +511,17 @@ impl<'a> DefineDirective<'a> {
     #[inline]
     pub fn location(&self, tree: &SyntaxTree) -> Option<DefineDirectiveLocation> {
         let tree = tree._ptr.as_ref()?;
-        Some(ffi::DefineDirectiveSyntax_location(tree, self._ptr.get_ref()))
+        let mut file = String::new();
+        let mut start = 0usize;
+        let mut end = 0usize;
+        let ok = ffi::DefineDirectiveSyntax_location(
+            tree,
+            self._ptr.get_ref(),
+            &mut file,
+            &mut start,
+            &mut end,
+        );
+        ok.then(|| DefineDirectiveLocation { file, start, end })
     }
 }
 

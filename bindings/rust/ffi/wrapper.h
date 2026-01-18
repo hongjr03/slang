@@ -233,29 +233,33 @@ namespace wrapper {
       return macros[index];
     }
 
-    struct DefineDirectiveLocation {
-      rust::String file;
-      size_t start;
-      size_t end;
-    };
-
-    inline static DefineDirectiveLocation DefineDirectiveSyntax_location(
-        const SyntaxTree& tree, const DefineDirectiveSyntax& syntax) {
+    inline static bool DefineDirectiveSyntax_location(
+        const SyntaxTree& tree, const DefineDirectiveSyntax& syntax, rust::String& file,
+        size_t& start, size_t& end) {
       auto range = syntax.sourceRange();
       if (range == SourceRange::NoLocation) {
-        return {rust::String(), 0, 0};
+        file = rust::String();
+        start = 0;
+        end = 0;
+        return false;
       }
 
-      auto start = range.start();
-      auto end = range.end();
+      auto startLoc = range.start();
+      auto endLoc = range.end();
       auto& sourceManager = tree.sourceManager();
-      auto& fullPath = sourceManager.getFullPath(start.buffer());
+      auto& fullPath = sourceManager.getFullPath(startLoc.buffer());
       if (!fullPath.empty()) {
-        return {rust::String(fullPath.string()), start.offset(), end.offset()};
+        file = rust::String(fullPath.string());
+        start = startLoc.offset();
+        end = endLoc.offset();
+        return true;
       }
 
-      auto fileName = sourceManager.getFileName(start);
-      return {rust::String(std::string(fileName)), start.offset(), end.offset()};
+      auto fileName = sourceManager.getFileName(startLoc);
+      file = rust::String(std::string(fileName));
+      start = startLoc.offset();
+      end = endLoc.offset();
+      return true;
     }
 
     inline static const SyntaxToken* DefineDirectiveSyntax_name(
