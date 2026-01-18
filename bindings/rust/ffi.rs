@@ -180,6 +180,15 @@ mod slang_ffi {
         fn SyntaxTree_fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree>;
 
         #[namespace = "wrapper::syntax"]
+        fn syntax_tree_from_text_with_options(
+            text: CxxSV,
+            name: CxxSV,
+            path: CxxSV,
+            predefines: &Vec<String>,
+            include_paths: &Vec<String>,
+        ) -> SharedPtr<SyntaxTree>;
+
+        #[namespace = "wrapper::syntax"]
         fn SyntaxTree_root(tree: &SyntaxTree) -> *const SyntaxNode;
 
         #[namespace = "wrapper::syntax"]

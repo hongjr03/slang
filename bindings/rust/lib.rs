@@ -674,6 +674,29 @@ impl SyntaxTree {
     }
 
     #[inline]
+    pub fn from_text_with_preprocessor_options(
+        text: &str,
+        name: &str,
+        path: &str,
+        predefines: &Vec<String>,
+        include_paths: &Vec<String>,
+    ) -> SyntaxTree {
+        if predefines.is_empty() && include_paths.is_empty() {
+            return Self::from_text(text, name, path);
+        }
+
+        SyntaxTree {
+            _ptr: ffi::syntax_tree_from_text_with_options(
+                CxxSV::new(text),
+                CxxSV::new(name),
+                CxxSV::new(path),
+                predefines,
+                include_paths,
+            ),
+        }
+    }
+
+    #[inline]
     pub fn root(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.root())
     }

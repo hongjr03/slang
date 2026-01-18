@@ -11,11 +11,13 @@
 #include "slang/syntax/SyntaxKind.h"
 #include "slang/numeric/SVInt.h"
 #include "slang/parsing/LexerFacts.h"
+#include "slang/parsing/Preprocessor.h"
 #include "slang/parsing/TokenKind.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
 #include "slang/diagnostics/Diagnostics.h"
+#include "slang/util/Bag.h"
 #include "rust/cxx.h"
 
 namespace wrapper {
@@ -184,6 +186,32 @@ namespace wrapper {
                                                                   std::string_view name,
                                                                   std::string_view path) {
       return SyntaxTree::fromText(text, name, path);
+    }
+
+    inline static std::shared_ptr<SyntaxTree> syntax_tree_from_text_with_options(
+        std::string_view text, std::string_view name, std::string_view path,
+        const rust::Vec<rust::String>& predefines,
+        const rust::Vec<rust::String>& include_paths) {
+      if (predefines.empty() && include_paths.empty()) {
+        return SyntaxTree::fromText(text, name, path);
+      }
+
+      slang::Bag options;
+      slang::parsing::PreprocessorOptions ppOptions;
+      ppOptions.predefineSource = "<vizsla_config>";
+
+      ppOptions.predefines.reserve(predefines.size());
+      for (const auto& entry : predefines) {
+        ppOptions.predefines.emplace_back(std::string(entry.data(), entry.size()));
+      }
+
+      ppOptions.additionalIncludePaths.reserve(include_paths.size());
+      for (const auto& entry : include_paths) {
+        ppOptions.additionalIncludePaths.emplace_back(std::string(entry.data(), entry.size()));
+      }
+
+      options.set(ppOptions);
+      return SyntaxTree::fromText(text, options, name, path);
     }
 
     inline static const SyntaxNode* SyntaxTree_root(const SyntaxTree& tree) {
