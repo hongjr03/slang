@@ -174,6 +174,18 @@ mod slang_ffi {
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_root(tree: &SyntaxTree) -> *const SyntaxNode;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_count(tree: &SyntaxTree) -> usize;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_at(tree: &SyntaxTree, idx: usize) -> UniquePtr<Diagnostic>;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostic_severity(tree: &SyntaxTree, diag: &Diagnostic) -> u8;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_format_diagnostic(tree: &SyntaxTree, diag: &Diagnostic) -> String;
     }
 
     impl SharedPtr<SyntaxTree> {}
@@ -197,15 +209,45 @@ mod slang_ffi {
             compilation: Pin<&mut Compilation>,
             name: CxxSV,
         ) -> Vec<usize>;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_count(compilation: &Compilation) -> usize;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_at(
+            compilation: &Compilation,
+            idx: usize,
+        ) -> UniquePtr<Diagnostic>;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_diagnostic_severity(compilation: &Compilation, diag: &Diagnostic) -> u8;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_format_diagnostic(compilation: &Compilation, diag: &Diagnostic) -> String;
     }
 
     impl UniquePtr<Compilation> {}
 
     #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/diagnostics/Diagnostics.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type Diagnostic;
+    }
+
+    #[namespace = "wrapper::diagnostics"]
+    unsafe extern "C++" {
+        include!("slang/bindings/rust/ffi/wrapper.h");
+
+        fn code(diag: &Diagnostic) -> u16;
+
+        fn subsystem(diag: &Diagnostic) -> u16;
+
+        fn range_count(diag: &Diagnostic) -> usize;
+
+        fn range(diag: &Diagnostic, idx: usize) -> UniquePtr<SourceRange>;
+
+        fn location(diag: &Diagnostic) -> UniquePtr<SourceLocation>;
     }
 
     // StringView
@@ -253,6 +295,10 @@ impl_functions! {
     impl SyntaxTree {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
+        fn diagnostic_count(&self) -> usize |> SyntaxTree_diagnostic_count;
+        fn diagnostic_at(&self, idx: usize) -> UniquePtr<Diagnostic> |> SyntaxTree_diagnostic_at;
+        fn diagnostic_severity(&self, diag: &Diagnostic) -> u8 |> SyntaxTree_diagnostic_severity;
+        fn diagnostic_message(&self, diag: &Diagnostic) -> String |> SyntaxTree_format_diagnostic;
     }
 }
 
@@ -317,5 +363,19 @@ impl_functions! {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
         fn parse_diag_offsets_by_name(self_: Pin<&mut Compilation>, name: CxxSV) -> Vec<usize> |> Compilation_parse_diag_offsets_by_name;
+        fn diagnostic_count(&self) -> usize |> Compilation_diagnostic_count;
+        fn diagnostic_at(&self, idx: usize) -> UniquePtr<Diagnostic> |> Compilation_diagnostic_at;
+        fn diagnostic_severity(&self, diag: &Diagnostic) -> u8 |> Compilation_diagnostic_severity;
+        fn diagnostic_message(&self, diag: &Diagnostic) -> String |> Compilation_format_diagnostic;
+    }
+}
+
+impl_functions! {
+    impl Diagnostic {
+        fn code(&self) -> u16 |> code;
+        fn subsystem(&self) -> u16 |> subsystem;
+        fn range_count(&self) -> usize |> range_count;
+        fn range(&self, idx: usize) -> UniquePtr<SourceRange> |> range;
+        fn location(&self) -> UniquePtr<SourceLocation> |> location;
     }
 }

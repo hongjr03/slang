@@ -61,6 +61,38 @@ pub struct SyntaxTrivia<'a> {
     _ptr: Pin<&'a ffi::SyntaxTrivia>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Ignored,
+    Note,
+    Warning,
+    Error,
+    Fatal,
+}
+
+impl DiagnosticSeverity {
+    fn from_raw(value: u8) -> Self {
+        match value {
+            0 => DiagnosticSeverity::Ignored,
+            1 => DiagnosticSeverity::Note,
+            2 => DiagnosticSeverity::Warning,
+            3 => DiagnosticSeverity::Error,
+            4 => DiagnosticSeverity::Fatal,
+            _ => DiagnosticSeverity::Fatal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxDiagnostic {
+    pub code: u16,
+    pub subsystem: u16,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    pub primary_range: Option<ops::Range<usize>>,
+    pub location: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeUnit {
     Seconds,
@@ -622,6 +654,31 @@ impl SyntaxTree {
     pub fn root(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.root())
     }
+
+    pub fn diagnostics(&self) -> Vec<SyntaxDiagnostic> {
+        (0..self._ptr.diagnostic_count())
+            .filter_map(|idx| {
+                let diag = self._ptr.diagnostic_at(idx);
+                let diag = diag.as_ref()?;
+
+                let primary_range = (diag.range_count() > 0)
+                    .then_some(())
+                    .and_then(|()| SourceRange::from_unique_ptr(diag.range(0)))
+                    .map(Into::into);
+                let location =
+                    SourceLocation::from_unique_ptr(diag.location()).and_then(|loc| loc.offset());
+
+                Some(SyntaxDiagnostic {
+                    code: diag.code(),
+                    subsystem: diag.subsystem(),
+                    severity: DiagnosticSeverity::from_raw(self._ptr.diagnostic_severity(diag)),
+                    message: self._ptr.diagnostic_message(diag),
+                    primary_range,
+                    location,
+                })
+            })
+            .collect()
+    }
 }
 
 unsafe impl Send for SyntaxTree {}
@@ -815,6 +872,31 @@ impl Compilation {
 
     pub fn parse_diag_offsets_by_name(&mut self, name: &str) -> Vec<usize> {
         ffi::Compilation::parse_diag_offsets_by_name(self._ptr.as_mut().unwrap(), CxxSV::new(name))
+    }
+
+    pub fn semantic_diagnostics(&self) -> Vec<SyntaxDiagnostic> {
+        (0..self._ptr.diagnostic_count())
+            .filter_map(|idx| {
+                let diag = self._ptr.diagnostic_at(idx);
+                let diag = diag.as_ref()?;
+
+                let primary_range = (diag.range_count() > 0)
+                    .then_some(())
+                    .and_then(|()| SourceRange::from_unique_ptr(diag.range(0)))
+                    .map(Into::into);
+                let location =
+                    SourceLocation::from_unique_ptr(diag.location()).and_then(|loc| loc.offset());
+
+                Some(SyntaxDiagnostic {
+                    code: diag.code(),
+                    subsystem: diag.subsystem(),
+                    severity: DiagnosticSeverity::from_raw(self._ptr.diagnostic_severity(diag)),
+                    message: self._ptr.diagnostic_message(diag),
+                    primary_range,
+                    location,
+                })
+            })
+            .collect()
     }
 }
 

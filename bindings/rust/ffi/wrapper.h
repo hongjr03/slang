@@ -12,6 +12,7 @@
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
+#include "slang/diagnostics/DiagnosticEngine.h"
 #include "slang/diagnostics/Diagnostics.h"
 #include "rust/cxx.h"
 
@@ -20,6 +21,7 @@ namespace wrapper {
   using SyntaxToken = ::slang::parsing::Token;
   using SVInt = ::slang::SVInt;
   using logic_t = ::slang::logic_t;
+  using SourceLocation = ::slang::SourceLocation;
   using SourceRange = ::slang::SourceRange;
   using SyntaxTree = ::slang::syntax::SyntaxTree;
   using SyntaxNode = ::slang::syntax::SyntaxNode;
@@ -168,6 +170,32 @@ namespace wrapper {
     inline static uint16_t SyntaxNode_kind(const SyntaxNode& node) {
       return static_cast<uint16_t>(node.kind);
     }
+
+    inline static size_t SyntaxTree_diagnostic_count(const SyntaxTree& tree) {
+      auto& mut_tree = const_cast<SyntaxTree&>(tree);
+      return mut_tree.diagnostics().size();
+    }
+
+    inline static std::unique_ptr<Diagnostic> SyntaxTree_diagnostic_at(const SyntaxTree& tree,
+                                                                       size_t idx) {
+      auto& mut_tree = const_cast<SyntaxTree&>(tree);
+      auto& diags = mut_tree.diagnostics();
+      if (idx >= diags.size())
+        return nullptr;
+      return std::make_unique<Diagnostic>(diags[idx]);
+    }
+
+    inline static uint8_t SyntaxTree_diagnostic_severity(const SyntaxTree& tree,
+                                                         const Diagnostic& diag) {
+      slang::DiagnosticEngine engine(tree.sourceManager());
+      return static_cast<uint8_t>(engine.getSeverity(diag.code, diag.location));
+    }
+
+    inline static rust::String SyntaxTree_format_diagnostic(const SyntaxTree& tree,
+                                                            const Diagnostic& diag) {
+      slang::DiagnosticEngine engine(tree.sourceManager());
+      return rust::String(engine.formatMessage(diag));
+    }
   }
 
   namespace ast {
@@ -188,11 +216,60 @@ namespace wrapper {
         }
         return offsets;
     }
+
+    inline static size_t Compilation_diagnostic_count(const Compilation& compilation) {
+        auto& diags = const_cast<Compilation&>(compilation).getSemanticDiagnostics();
+        return diags.size();
+    }
+
+    inline static std::unique_ptr<Diagnostic> Compilation_diagnostic_at(const Compilation& compilation,
+                                                                        size_t idx) {
+        auto& diags = const_cast<Compilation&>(compilation).getSemanticDiagnostics();
+        if (idx >= diags.size())
+            return nullptr;
+        return std::make_unique<Diagnostic>(diags[idx]);
+    }
+
+    inline static uint8_t Compilation_diagnostic_severity(const Compilation& compilation,
+                                                          const Diagnostic& diag) {
+        auto source_manager = compilation.getSourceManager();
+        SLANG_ASSERT(source_manager);
+        slang::DiagnosticEngine engine(*source_manager);
+        return static_cast<uint8_t>(engine.getSeverity(diag.code, diag.location));
+    }
+
+    inline static rust::String Compilation_format_diagnostic(const Compilation& compilation,
+                                                             const Diagnostic& diag) {
+        auto source_manager = compilation.getSourceManager();
+        SLANG_ASSERT(source_manager);
+        slang::DiagnosticEngine engine(*source_manager);
+        return rust::String(engine.formatMessage(diag));
+    }
   }
 
   namespace diagnostics {
     inline static uint16_t code(const Diagnostic& diag) {
         return diag.code.getCode();
+    }
+
+    inline static uint16_t subsystem(const Diagnostic& diag) {
+        return static_cast<uint16_t>(diag.code.getSubsystem());
+    }
+
+    inline static size_t range_count(const Diagnostic& diag) {
+        return diag.ranges.size();
+    }
+
+    inline static std::unique_ptr<SourceRange> range(const Diagnostic& diag, size_t idx) {
+        if (idx >= diag.ranges.size())
+            return nullptr;
+        return std::make_unique<SourceRange>(diag.ranges[idx]);
+    }
+
+    inline static std::unique_ptr<SourceLocation> location(const Diagnostic& diag) {
+        if (!diag.location.valid())
+            return nullptr;
+        return std::make_unique<SourceLocation>(diag.location);
     }
   }
 }
