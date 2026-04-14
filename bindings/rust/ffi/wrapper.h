@@ -8,6 +8,7 @@
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/numeric/SVInt.h"
+#include "slang/parsing/LexerFacts.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/ast/Compilation.h"
@@ -67,6 +68,10 @@ namespace wrapper {
       return static_cast<uint8_t>(trivia.kind);
     }
 
+    inline static const SyntaxNode* SyntaxTrivia_syntax(const SyntaxTrivia& trivia) {
+      return trivia.syntax();
+    }
+
     // Token
     inline static size_t SyntaxToken_trivia_count(const SyntaxToken& token) {
       return token.trivia().size();
@@ -99,6 +104,39 @@ namespace wrapper {
 
     inline static uint8_t SyntaxToken_unit(const SyntaxToken& token) {
       return static_cast<uint8_t>(token.numericFlags().unit());
+    }
+
+    inline static rust::Vec<rust::String> LexerFacts_keyword_table_for_version(std::string_view version) {
+      rust::Vec<rust::String> keywords;
+      auto keywordVersion = slang::parsing::LexerFacts::getKeywordVersion(version);
+      if (!keywordVersion)
+        return keywords;
+
+      auto* table = slang::parsing::LexerFacts::getKeywordTable(*keywordVersion);
+      if (!table)
+        return keywords;
+
+      for (const auto& [text, _] : *table)
+        keywords.push_back(rust::String(std::string(text)));
+
+      return keywords;
+    }
+
+    inline static rust::Vec<rust::String> LexerFacts_verilog_2005_keywords() {
+      rust::Vec<rust::String> keywords;
+      auto* table = slang::parsing::LexerFacts::getKeywordTable(slang::parsing::KeywordVersion::v1364_2005);
+      if (!table)
+        return keywords;
+
+      for (const auto& [text, _] : *table)
+        keywords.push_back(rust::String(std::string(text)));
+
+      return keywords;
+    }
+
+    inline static rust::String LexerFacts_directive_text(uint16_t kind) {
+      return rust::String(std::string(
+          slang::parsing::LexerFacts::getDirectiveText(static_cast<slang::syntax::SyntaxKind>(kind))));
     }
   }
 
@@ -141,8 +179,14 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-    inline static rust::Vec<std::unique_ptr<Diagnostic>> Compilation_get_all_diagnostics(const Compilation& compilation) {
-
+    inline static rust::Vec<size_t> Compilation_parse_diag_offsets_by_name(Compilation& compilation, std::string_view name) {
+        rust::Vec<size_t> offsets;
+        for (const auto& diag : compilation.getParseDiagnostics()) {
+            if (slang::toString(diag.code) == name && diag.location != slang::SourceLocation::NoLocation) {
+                offsets.push_back(diag.location.offset());
+            }
+        }
+        return offsets;
     }
   }
 
