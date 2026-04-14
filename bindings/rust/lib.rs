@@ -297,19 +297,7 @@ impl fmt::Debug for SyntaxTrivia<'_> {
 
 pub trait ChildrenIter<It> = DoubleEndedIterator<Item = It> + ExactSizeIterator + Clone;
 
-pub fn keyword_table_for_version(version: &str) -> Vec<String> {
-    ffi::SyntaxToken::keyword_table_for_version(CxxSV::new(version))
-}
-
-pub fn verilog_2005_keywords() -> Vec<String> {
-    ffi::SyntaxToken::verilog_2005_keywords()
-}
-
-pub fn directive_text(kind: SyntaxKind) -> String {
-    ffi::SyntaxToken::directive_text(kind.as_u16())
-}
-
-impl<'a> SyntaxTrivia<'a> {
+impl SyntaxTrivia<'_> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
         assert!(_ptr.is_null().not());
@@ -324,11 +312,6 @@ impl<'a> SyntaxTrivia<'a> {
     #[inline]
     pub fn kind(&self) -> TriviaKind {
         TriviaKind::from_id(self._ptr.kind())
-    }
-
-    #[inline]
-    pub fn syntax(&self) -> Option<SyntaxNode<'a>> {
-        SyntaxNode::from_raw_ptr(self._ptr.syntax())
     }
 }
 
@@ -811,10 +794,6 @@ impl Compilation {
 
     pub fn add_syntax_tree(&mut self, tree: SyntaxTree) {
         ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
-    }
-
-    pub fn parse_diag_offsets_by_name(&mut self, name: &str) -> Vec<usize> {
-        ffi::Compilation::parse_diag_offsets_by_name(self._ptr.as_mut().unwrap(), CxxSV::new(name))
     }
 }
 

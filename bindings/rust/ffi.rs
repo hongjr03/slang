@@ -82,9 +82,6 @@ mod slang_ffi {
         #[namespace = "wrapper::parsing"]
         fn SyntaxTrivia_kind(trivia: &SyntaxTrivia) -> u8;
 
-        #[namespace = "wrapper::parsing"]
-        fn SyntaxTrivia_syntax(trivia: &SyntaxTrivia) -> *const SyntaxNode;
-
         #[cxx_name = "Token"]
         type SyntaxToken;
 
@@ -119,20 +116,6 @@ mod slang_ffi {
 
         #[namespace = "wrapper::parsing"]
         fn SyntaxToken_trivia(tok: &SyntaxToken, idx: usize) -> *const SyntaxTrivia;
-    }
-
-    #[namespace = "slang::parsing"]
-    unsafe extern "C++" {
-        include!("slang/include/slang/parsing/LexerFacts.h");
-
-        #[namespace = "wrapper::parsing"]
-        fn LexerFacts_keyword_table_for_version(version: CxxSV) -> Vec<String>;
-
-        #[namespace = "wrapper::parsing"]
-        fn LexerFacts_verilog_2005_keywords() -> Vec<String>;
-
-        #[namespace = "wrapper::parsing"]
-        fn LexerFacts_directive_text(kind: u16) -> String;
     }
 
     impl UniquePtr<SyntaxTrivia> {}
@@ -191,12 +174,6 @@ mod slang_ffi {
             compilation: Pin<&mut Compilation>,
             tree: SharedPtr<SyntaxTree>,
         );
-
-        #[namespace = "wrapper::ast"]
-        fn Compilation_parse_diag_offsets_by_name(
-            compilation: Pin<&mut Compilation>,
-            name: CxxSV,
-        ) -> Vec<usize>;
     }
 
     impl UniquePtr<Compilation> {}
@@ -274,7 +251,6 @@ impl_functions! {
 impl_functions! {
     impl SyntaxTrivia {
         fn kind(&self) -> u8 |> SyntaxTrivia_kind;
-        fn syntax(&self) -> *const SyntaxNode |> SyntaxTrivia_syntax;
     }
 }
 
@@ -287,14 +263,6 @@ impl_functions! {
         fn unit(&self) -> u8 |> SyntaxToken_unit;
         fn trivia_count(&self) -> usize |> SyntaxToken_trivia_count;
         fn trivia(&self, idx: usize) -> *const SyntaxTrivia |> SyntaxToken_trivia;
-    }
-}
-
-impl_functions! {
-    impl SyntaxToken {
-        fn keyword_table_for_version(version: CxxSV) -> Vec<String> |> LexerFacts_keyword_table_for_version;
-        fn verilog_2005_keywords() -> Vec<String> |> LexerFacts_verilog_2005_keywords;
-        fn directive_text(kind: u16) -> String |> LexerFacts_directive_text;
     }
 }
 
@@ -316,6 +284,5 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
-        fn parse_diag_offsets_by_name(self_: Pin<&mut Compilation>, name: CxxSV) -> Vec<usize> |> Compilation_parse_diag_offsets_by_name;
     }
 }
