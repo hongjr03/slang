@@ -41,6 +41,7 @@ fn build_cpp_lib() {
 
     let mut builder = cxx_build::bridges(["bindings/rust/ffi.rs", "bindings/rust/ffi/cxx_sv.rs"]);
     builder
+        .file("bindings/rust/ffi/wrapper.cc")
         .includes(includes.iter().map(Path::new))
         .std("c++20")
         .flag_if_supported("-stdlib=libstdc++")
@@ -97,7 +98,11 @@ fn setup_rerun_triggers() {
         println!("cargo:rerun-if-changed={}", file);
     }
 
-    for file in &["bindings/rust/ffi/string_view.h", "bindings/rust/ffi/wrapper.h"] {
+    for file in &[
+        "bindings/rust/ffi/string_view.h",
+        "bindings/rust/ffi/wrapper.h",
+        "bindings/rust/ffi/wrapper.cc",
+    ] {
         println!("cargo:rerun-if-changed={}", file);
     }
 

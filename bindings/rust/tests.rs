@@ -484,3 +484,39 @@ fn test_compilation() {
     let tree = get_test_tree();
     compilation.add_syntax_tree(tree);
 }
+
+#[test]
+fn syntax_tree_diagnostics_are_built_in_cpp() {
+    let tree = SyntaxTree::from_text("module A( input a; endmodule", "source", "");
+    let diagnostics = tree.diagnostics();
+
+    assert!(!diagnostics.is_empty(), "expected parse diagnostics");
+
+    let diag = &diagnostics[0];
+    assert_eq!(diag.severity, DiagnosticSeverity::Error);
+    assert!(!diag.message.is_empty(), "expected formatted diagnostic message");
+    assert!(diag.location.is_some(), "expected location in diagnostic");
+}
+
+#[test]
+fn compilation_semantic_diagnostics_are_built_in_cpp() {
+    let mut compilation = Compilation::new();
+    compilation.add_syntax_tree(SyntaxTree::from_text(
+        r#"
+module A;
+  wire x;
+  logic x;
+endmodule
+"#,
+        "source",
+        "",
+    ));
+
+    let diagnostics = compilation.semantic_diagnostics();
+    assert!(!diagnostics.is_empty(), "expected semantic diagnostics");
+
+    let diag = &diagnostics[0];
+    assert!(matches!(diag.severity, DiagnosticSeverity::Error | DiagnosticSeverity::Fatal));
+    assert!(!diag.message.is_empty(), "expected formatted diagnostic message");
+    assert!(diag.location.is_some(), "expected location in diagnostic");
+}

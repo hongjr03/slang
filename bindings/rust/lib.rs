@@ -9,7 +9,7 @@ use std::{
     ffi::c_char,
     fmt::{self, Display},
     hash, iter,
-    ops::{self, Not},
+    ops::{self, Not, Range},
     pin::Pin,
 };
 
@@ -89,13 +89,29 @@ impl DiagnosticSeverity {
     }
 }
 
+impl SyntaxDiagnostic {
+    #[inline]
+    fn from_raw(raw: ffi::RawSyntaxDiagnostic) -> Self {
+        Self {
+            code: raw.code,
+            subsystem: raw.subsystem,
+            severity: DiagnosticSeverity::from_raw(raw.severity),
+            message: raw.message,
+            primary_range: raw
+                .has_primary_range
+                .then_some(raw.primary_range_start..raw.primary_range_end),
+            location: raw.has_location.then_some(raw.location),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxDiagnostic {
     pub code: u16,
     pub subsystem: u16,
     pub severity: DiagnosticSeverity,
     pub message: String,
-    pub primary_range: Option<ops::Range<usize>>,
+    pub primary_range: Option<Range<usize>>,
     pub location: Option<usize>,
 }
 
@@ -665,28 +681,7 @@ impl SyntaxTree {
     }
 
     pub fn diagnostics(&self) -> Vec<SyntaxDiagnostic> {
-        (0..self._ptr.diagnostic_count())
-            .filter_map(|idx| {
-                let diag = self._ptr.diagnostic_at(idx);
-                let diag = diag.as_ref()?;
-
-                let primary_range = (diag.range_count() > 0)
-                    .then_some(())
-                    .and_then(|()| SourceRange::from_unique_ptr(diag.range(0)))
-                    .map(Into::into);
-                let location =
-                    SourceLocation::from_unique_ptr(diag.location()).and_then(|loc| loc.offset());
-
-                Some(SyntaxDiagnostic {
-                    code: diag.code(),
-                    subsystem: diag.subsystem(),
-                    severity: DiagnosticSeverity::from_raw(self._ptr.diagnostic_severity(diag)),
-                    message: self._ptr.diagnostic_message(diag),
-                    primary_range,
-                    location,
-                })
-            })
-            .collect()
+        self._ptr.diagnostics().into_iter().map(SyntaxDiagnostic::from_raw).collect()
     }
 }
 
@@ -884,28 +879,7 @@ impl Compilation {
     }
 
     pub fn semantic_diagnostics(&self) -> Vec<SyntaxDiagnostic> {
-        (0..self._ptr.diagnostic_count())
-            .filter_map(|idx| {
-                let diag = self._ptr.diagnostic_at(idx);
-                let diag = diag.as_ref()?;
-
-                let primary_range = (diag.range_count() > 0)
-                    .then_some(())
-                    .and_then(|()| SourceRange::from_unique_ptr(diag.range(0)))
-                    .map(Into::into);
-                let location =
-                    SourceLocation::from_unique_ptr(diag.location()).and_then(|loc| loc.offset());
-
-                Some(SyntaxDiagnostic {
-                    code: diag.code(),
-                    subsystem: diag.subsystem(),
-                    severity: DiagnosticSeverity::from_raw(self._ptr.diagnostic_severity(diag)),
-                    message: self._ptr.diagnostic_message(diag),
-                    primary_range,
-                    location,
-                })
-            })
-            .collect()
+        self._ptr.semantic_diagnostics().into_iter().map(SyntaxDiagnostic::from_raw).collect()
     }
 }
 
