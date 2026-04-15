@@ -85,7 +85,7 @@ impl DiagnosticSeverity {
         Self::VALUES
             .get(value as usize)
             .copied()
-            .unwrap()
+            .unwrap_or(Self::Fatal)
     }
 }
 

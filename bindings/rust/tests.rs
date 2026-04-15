@@ -217,6 +217,44 @@ fn diagnostic_severity_from_raw() {
 }
 
 #[test]
+fn keyword_tables_are_available_from_rust() {
+    let sv_keywords = SyntaxToken::keyword_table_for_version("1800-2023");
+    let verilog_keywords = SyntaxToken::verilog_2005_keywords();
+
+    let sv_keywords_sorted = sv_keywords.iter().sorted().collect_vec();
+    let verilog_keywords_sorted = verilog_keywords.iter().sorted().collect_vec();
+
+    assert!(!sv_keywords.is_empty(), "expected SystemVerilog keyword table to be non-empty");
+    assert!(!verilog_keywords.is_empty(), "expected Verilog-2005 keyword table to be non-empty");
+
+    assert!(
+        sv_keywords.iter().any(|keyword| keyword == "module"),
+        "expected `module` in SystemVerilog keyword table: {sv_keywords_sorted:?}"
+    );
+    assert!(
+        sv_keywords.iter().any(|keyword| keyword == "endmodule"),
+        "expected `endmodule` in SystemVerilog keyword table: {sv_keywords_sorted:?}"
+    );
+    assert!(
+        sv_keywords.iter().any(|keyword| keyword == "interface"),
+        "expected `interface` in SystemVerilog keyword table: {sv_keywords_sorted:?}"
+    );
+
+    assert!(
+        verilog_keywords.iter().any(|keyword| keyword == "module"),
+        "expected `module` in Verilog-2005 keyword table: {verilog_keywords_sorted:?}"
+    );
+    assert!(
+        verilog_keywords.iter().any(|keyword| keyword == "endmodule"),
+        "expected `endmodule` in Verilog-2005 keyword table: {verilog_keywords_sorted:?}"
+    );
+    assert!(
+        verilog_keywords.iter().all(|keyword| keyword != "interface"),
+        "did not expect `interface` in Verilog-2005 keyword table: {verilog_keywords_sorted:?}"
+    );
+}
+
+#[test]
 fn test_partial_eq_syntax_node() {
     let tree = get_complex_tree();
     let root = tree.root().unwrap();

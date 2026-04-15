@@ -118,8 +118,9 @@ namespace wrapper {
       if (!table)
         return keywords;
 
+      keywords.reserve(table->size());
       for (const auto& [text, _] : *table)
-        keywords.push_back(rust::String(std::string(text)));
+        keywords.emplace_back(text.data(), text.size());
 
       return keywords;
     }
@@ -130,8 +131,9 @@ namespace wrapper {
       if (!table)
         return keywords;
 
+      keywords.reserve(table->size());
       for (const auto& [text, _] : *table)
-        keywords.push_back(rust::String(std::string(text)));
+        keywords.emplace_back(text.data(), text.size());
 
       return keywords;
     }
