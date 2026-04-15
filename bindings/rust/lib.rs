@@ -61,6 +61,7 @@ pub struct SyntaxTrivia<'a> {
     _ptr: Pin<&'a ffi::SyntaxTrivia>,
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     Ignored,
@@ -71,15 +72,20 @@ pub enum DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
+    const VALUES: [Self; 5] = [
+        Self::Ignored,
+        Self::Note,
+        Self::Warning,
+        Self::Error,
+        Self::Fatal,
+    ];
+
+    #[inline]
     fn from_raw(value: u8) -> Self {
-        match value {
-            0 => DiagnosticSeverity::Ignored,
-            1 => DiagnosticSeverity::Note,
-            2 => DiagnosticSeverity::Warning,
-            3 => DiagnosticSeverity::Error,
-            4 => DiagnosticSeverity::Fatal,
-            _ => DiagnosticSeverity::Fatal,
-        }
+        Self::VALUES
+            .get(value as usize)
+            .copied()
+            .unwrap()
     }
 }
 
@@ -329,18 +335,6 @@ impl fmt::Debug for SyntaxTrivia<'_> {
 
 pub trait ChildrenIter<It> = DoubleEndedIterator<Item = It> + ExactSizeIterator + Clone;
 
-pub fn keyword_table_for_version(version: &str) -> Vec<String> {
-    ffi::SyntaxToken::keyword_table_for_version(CxxSV::new(version))
-}
-
-pub fn verilog_2005_keywords() -> Vec<String> {
-    ffi::SyntaxToken::verilog_2005_keywords()
-}
-
-pub fn directive_text(kind: SyntaxKind) -> String {
-    ffi::SyntaxToken::directive_text(kind.as_u16())
-}
-
 impl<'a> SyntaxTrivia<'a> {
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
@@ -365,6 +359,21 @@ impl<'a> SyntaxTrivia<'a> {
 }
 
 impl<'a> SyntaxToken<'a> {
+    #[inline]
+    pub fn keyword_table_for_version(version: &str) -> Vec<String> {
+        ffi::SyntaxToken::keyword_table_for_version(CxxSV::new(version))
+    }
+
+    #[inline]
+    pub fn verilog_2005_keywords() -> Vec<String> {
+        ffi::SyntaxToken::verilog_2005_keywords()
+    }
+
+    #[inline]
+    pub fn directive_text(kind: SyntaxKind) -> String {
+        ffi::SyntaxToken::directive_text(kind.as_u16())
+    }
+
     #[inline]
     fn from_raw_ptr(_ptr: *const ffi::SyntaxToken) -> Option<Self> {
         _ptr.is_null().not().then(|| SyntaxToken { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })

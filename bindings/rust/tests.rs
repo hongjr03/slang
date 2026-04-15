@@ -207,6 +207,16 @@ fn kind() {
 }
 
 #[test]
+fn diagnostic_severity_from_raw() {
+    assert_eq!(DiagnosticSeverity::from_raw(0), DiagnosticSeverity::Ignored);
+    assert_eq!(DiagnosticSeverity::from_raw(1), DiagnosticSeverity::Note);
+    assert_eq!(DiagnosticSeverity::from_raw(2), DiagnosticSeverity::Warning);
+    assert_eq!(DiagnosticSeverity::from_raw(3), DiagnosticSeverity::Error);
+    assert_eq!(DiagnosticSeverity::from_raw(4), DiagnosticSeverity::Fatal);
+    assert_eq!(DiagnosticSeverity::from_raw(255), DiagnosticSeverity::Fatal);
+}
+
+#[test]
 fn test_partial_eq_syntax_node() {
     let tree = get_complex_tree();
     let root = tree.root().unwrap();
