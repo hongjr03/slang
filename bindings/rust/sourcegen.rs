@@ -420,10 +420,7 @@ pub mod generator {
         for (mut k, mut v) in all_types.iter().filter(|(_, v)| v.is_final) {
             while v.base != "SyntaxNode" {
                 let kinds = reversed_map.get(k).unwrap().clone();
-                reversed_map
-                    .entry(v.base.clone())
-                    .or_insert_with(HashSet::new)
-                    .extend(kinds.into_iter());
+                reversed_map.entry(v.base.clone()).or_insert_with(HashSet::new).extend(kinds);
                 base_map.entry(v.base.clone()).or_insert_with(HashSet::new).insert(k.clone());
                 k = &v.base;
                 v = all_types.get(k).unwrap();

@@ -72,20 +72,11 @@ pub enum DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
-    const VALUES: [Self; 5] = [
-        Self::Ignored,
-        Self::Note,
-        Self::Warning,
-        Self::Error,
-        Self::Fatal,
-    ];
+    const VALUES: [Self; 5] = [Self::Ignored, Self::Note, Self::Warning, Self::Error, Self::Fatal];
 
     #[inline]
     fn from_raw(value: u8) -> Self {
-        Self::VALUES
-            .get(value as usize)
-            .copied()
-            .unwrap_or(Self::Fatal)
+        Self::VALUES.get(value as usize).copied().unwrap_or(Self::Fatal)
     }
 }
 

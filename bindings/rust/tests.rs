@@ -364,8 +364,7 @@ endmodule;"#,
             unreachable!("expected net declaration");
         };
         let decl = decl.declarators().children().next().unwrap();
-        let lit = decl.initializer().unwrap().expr();
-        lit
+        decl.initializer().unwrap().expr()
     });
 
     let Expression::PrimaryExpression(PrimaryExpression::LiteralExpression(
@@ -377,7 +376,7 @@ endmodule;"#,
     let time_tok = time_lit.child_token(0).unwrap();
     assert_eq!(time_tok.time_unit(), Some(TimeUnit::Seconds));
     assert_eq!(time_tok.base(), None);
-    assert!((time_tok.real().unwrap() - 3.0) < f64::EPSILON);
+    assert!((time_tok.real().unwrap() - 3.0).abs() < f64::EPSILON);
 
     let Expression::PrimaryExpression(PrimaryExpression::IntegerVectorExpression(vec_lit)) =
         literals.next().unwrap()
