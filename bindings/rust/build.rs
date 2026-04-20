@@ -17,10 +17,7 @@ fn generate_cxx_bridge() -> PathBuf {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
     let cxxbridge_dir = out_dir.join("cxxbridge");
 
-    drop(cxx_build::bridges([
-        "bindings/rust/ffi.rs",
-        "bindings/rust/ffi/cxx_sv.rs",
-    ]));
+    drop(cxx_build::bridges(["bindings/rust/ffi.rs", "bindings/rust/ffi/cxx_sv.rs"]));
 
     cxxbridge_dir
 }
@@ -47,10 +44,7 @@ fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
         .define("SLANG_INCLUDE_INSTALL", "ON")
         .define("SLANG_INCLUDE_PYLIB", "OFF")
         .define("SLANG_INCLUDE_RUSTLIB", "ON")
-        .define(
-            "SLANG_RUST_CXXBRIDGE_DIR",
-            cxxbridge_dir.to_string_lossy().as_ref(),
-        )
+        .define("SLANG_RUST_CXXBRIDGE_DIR", cxxbridge_dir.to_string_lossy().as_ref())
         .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL")
         .profile(cmake_profile)
         .define("CMAKE_VERBOSE_MAKEFILE", "ON");
@@ -65,7 +59,7 @@ fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
 fn setup_linking(install_dir: &Path) {
     let lib_dir = install_dir.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=slang_rust_bridge");
+    println!("cargo:rustc-link-lib=static:+whole-archive=slang_rust_bridge");
 }
 
 fn setup_rerun_triggers() {
