@@ -6,9 +6,10 @@ use std::{
 mod sourcegen;
 
 fn main() {
+    let debug = cfg!(debug_assertions);
     let cxxbridge_dir = generate_cxx_bridge();
-    let install_dir = build_cpp_lib(&cxxbridge_dir);
-    setup_linking(&install_dir);
+    let install_dir = build_cpp_lib(&cxxbridge_dir, debug);
+    setup_linking(&install_dir, debug);
     setup_rerun_triggers();
     generate_rs();
 }
@@ -22,16 +23,8 @@ fn generate_cxx_bridge() -> PathBuf {
     cxxbridge_dir
 }
 
-fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
-    let debug = cfg!(debug_assertions);
-    let msvc_release_abi = cfg!(target_env = "msvc");
-    let cmake_profile = if msvc_release_abi {
-        "Release"
-    } else if debug {
-        "Debug"
-    } else {
-        "Release"
-    };
+fn build_cpp_lib(cxxbridge_dir: &Path, debug: bool) -> PathBuf {
+    let cmake_profile = if debug { "Debug" } else { "Release" };
 
     // Configure CMake build
     let config = &mut cmake::Config::new(".");
@@ -52,19 +45,22 @@ fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
     config.build()
 }
 
-fn setup_linking(install_dir: &Path) {
+fn setup_linking(install_dir: &Path, debug: bool) {
     let lib_dir = install_dir.join("lib");
-    let mimalloc_lib = if cfg!(target_env = "msvc") {
-        "mimalloc-static"
+    let (mimalloc_lib, fmt_lib) = if cfg!(target_env = "msvc") {
+        (
+            if debug { "mimalloc-static-debug" } else { "mimalloc-static" },
+            if debug { "fmtd" } else { "fmt" },
+        )
     } else {
-        "mimalloc"
+        (if debug { "mimalloc-debug" } else { "mimalloc" }, if debug { "fmtd" } else { "fmt" })
     };
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static:+whole-archive,-bundle=slang_rust_bridge");
     println!("cargo:rustc-link-lib=static:-bundle=svlang");
-    println!("cargo:rustc-link-lib=static:-bundle=fmt");
-    println!("cargo:rustc-link-lib=static:-bundle={mimalloc_lib}");
+    println!("cargo:rustc-link-lib=static:-bundle={}", fmt_lib);
+    println!("cargo:rustc-link-lib=static:-bundle={}", mimalloc_lib);
 }
 
 fn setup_rerun_triggers() {
@@ -74,7 +70,6 @@ fn setup_rerun_triggers() {
         "bindings/rust/CMakeLists.txt",
         "external/CMakeLists.txt",
         "source/CMakeLists.txt",
-        "cmake/merge_static_libs.cmake",
         "bindings/rust/lib.rs",
         "bindings/rust/ffi.rs",
         "bindings/rust/ffi/cxx_sv.rs",
