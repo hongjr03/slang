@@ -61,6 +61,10 @@ fn setup_linking(install_dir: &Path, debug: bool) {
     println!("cargo:rustc-link-lib=static:-bundle=svlang");
     println!("cargo:rustc-link-lib=static:-bundle={}", fmt_lib);
     println!("cargo:rustc-link-lib=static:-bundle={}", mimalloc_lib);
+    if cfg!(target_os = "windows") {
+        // mimalloc's Windows large-page support pulls in these token APIs.
+        println!("cargo:rustc-link-lib=dylib=Advapi32");
+    }
 }
 
 fn setup_rerun_triggers() {
