@@ -49,17 +49,22 @@ fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
         .profile(cmake_profile)
         .define("CMAKE_VERBOSE_MAKEFILE", "ON");
 
-    if !debug {
-        config.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");
-    }
-
     config.build()
 }
 
 fn setup_linking(install_dir: &Path) {
     let lib_dir = install_dir.join("lib");
+    let mimalloc_lib = if cfg!(target_env = "msvc") {
+        "mimalloc-static"
+    } else {
+        "mimalloc"
+    };
+
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static:+whole-archive=slang_rust_bridge");
+    println!("cargo:rustc-link-lib=static:+whole-archive,-bundle=slang_rust_bridge");
+    println!("cargo:rustc-link-lib=static:-bundle=svlang");
+    println!("cargo:rustc-link-lib=static:-bundle=fmt");
+    println!("cargo:rustc-link-lib=static:-bundle={mimalloc_lib}");
 }
 
 fn setup_rerun_triggers() {
