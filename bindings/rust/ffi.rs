@@ -26,12 +26,14 @@ mod slang_ffi {
 
     #[namespace = "slang"]
     unsafe extern "C++" {
-        include!("slang/include/slang/text/SourceLocation.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
+        #[namespace = "wrapper"]
         type SourceLocation;
 
         fn offset(self: &SourceLocation) -> usize;
 
+        #[namespace = "wrapper"]
         type SourceRange;
 
         #[namespace = "wrapper"]
@@ -45,9 +47,9 @@ mod slang_ffi {
 
     impl UniquePtr<SourceRange> {}
 
-    #[namespace = "slang"]
+    #[namespace = "wrapper"]
     unsafe extern "C++" {
-        include!("slang/include/slang/numeric/SVInt.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         #[cxx_name = "logic_t"]
         type SVLogic;
@@ -83,9 +85,9 @@ mod slang_ffi {
 
     impl UniquePtr<SVInt> {}
 
-    #[namespace = "slang::parsing"]
+    #[namespace = "wrapper::parsing"]
     unsafe extern "C++" {
-        include!("slang/include/slang/parsing/Token.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         #[cxx_name = "Trivia"]
         type SyntaxTrivia;
@@ -134,9 +136,9 @@ mod slang_ffi {
         fn SyntaxToken_trivia(tok: &SyntaxToken, idx: usize) -> *const SyntaxTrivia;
     }
 
-    #[namespace = "slang::parsing"]
+    #[namespace = "wrapper::parsing"]
     unsafe extern "C++" {
-        include!("slang/include/slang/parsing/LexerFacts.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         #[namespace = "wrapper::parsing"]
         fn LexerFacts_keyword_table_for_version(version: CxxSV) -> Vec<String>;
@@ -152,9 +154,9 @@ mod slang_ffi {
 
     impl UniquePtr<SyntaxToken> {}
 
-    #[namespace = "slang::syntax"]
+    #[namespace = "wrapper::syntax"]
     unsafe extern "C++" {
-        include!("slang/include/slang/syntax/SyntaxNode.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type SyntaxNode;
 
@@ -175,13 +177,11 @@ mod slang_ffi {
         fn SyntaxNode_kind(node: &SyntaxNode) -> u16;
     }
 
-    #[namespace = "slang::syntax"]
+    #[namespace = "wrapper::syntax"]
     unsafe extern "C++" {
         include!("slang/bindings/rust/ffi/wrapper.h");
-        include!("slang/include/slang/syntax/SyntaxTree.h");
 
         type SyntaxTree;
-
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree>;
 
@@ -194,9 +194,9 @@ mod slang_ffi {
 
     impl SharedPtr<SyntaxTree> {}
 
-    #[namespace = "slang::ast"]
+    #[namespace = "wrapper::ast"]
     unsafe extern "C++" {
-        include!("slang/include/slang/ast/Compilation.h");
+        include!("slang/bindings/rust/ffi/wrapper.h");
 
         type Compilation;
 

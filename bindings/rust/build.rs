@@ -1,95 +1,81 @@
-use std::path::Path;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 mod sourcegen;
 
 fn main() {
-    build_cpp_lib();
-    setup_linking();
+    let cxxbridge_dir = generate_cxx_bridge();
+    let install_dir = build_cpp_lib(&cxxbridge_dir);
+    setup_linking(&install_dir);
     setup_rerun_triggers();
     generate_rs();
 }
 
-fn build_cpp_lib() {
+fn generate_cxx_bridge() -> PathBuf {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
+    let cxxbridge_dir = out_dir.join("cxxbridge");
+
+    drop(cxx_build::bridges([
+        "bindings/rust/ffi.rs",
+        "bindings/rust/ffi/cxx_sv.rs",
+    ]));
+
+    cxxbridge_dir
+}
+
+fn build_cpp_lib(cxxbridge_dir: &Path) -> PathBuf {
     let debug = cfg!(debug_assertions);
+    let msvc_release_abi = cfg!(target_env = "msvc");
+    let cmake_profile = if msvc_release_abi {
+        "Release"
+    } else if debug {
+        "Debug"
+    } else {
+        "Release"
+    };
 
     // Configure CMake build
     let config = &mut cmake::Config::new(".");
     config
         .env("CMAKE_BUILD_PARALLEL_LEVEL", "16")
+        .define("FETCHCONTENT_TRY_FIND_PACKAGE_MODE", "NEVER")
         .define("SLANG_MASTER_PROJECT", "OFF")
         .define("SLANG_INCLUDE_TESTS", "OFF")
         .define("SLANG_INCLUDE_TOOLS", "OFF")
-        .define("SLANG_INCLUDE_INSTALL", "OFF")
-        .define("CMAKE_BUILD_TYPE", if debug { "Debug" } else { "Release" })
-        .define("SLANG_BOOST_SINGLE_HEADER", "")
+        .define("SLANG_INCLUDE_INSTALL", "ON")
+        .define("SLANG_INCLUDE_PYLIB", "OFF")
+        .define("SLANG_INCLUDE_RUSTLIB", "ON")
+        .define(
+            "SLANG_RUST_CXXBRIDGE_DIR",
+            cxxbridge_dir.to_string_lossy().as_ref(),
+        )
+        .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL")
+        .profile(cmake_profile)
         .define("CMAKE_VERBOSE_MAKEFILE", "ON");
 
     if !debug {
         config.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "ON");
     }
 
-    let dst = config.build().join("build");
-
-    let includes = [
-        &format!("{}/source", dst.display()),
-        &format!("{}/deps/fmt-src/include", dst.display()),
-        "include",
-        "source",
-        "external",
-        "bindings/rust",
-    ];
-
-    let mut builder = cxx_build::bridges(["bindings/rust/ffi.rs", "bindings/rust/ffi/cxx_sv.rs"]);
-    builder
-        .file("bindings/rust/ffi/wrapper.cc")
-        .includes(includes.iter().map(Path::new))
-        .std("c++20")
-        .flag_if_supported("-stdlib=libstdc++")
-        .flag_if_supported("-DSLANG_BOOST_SINGLE_HEADER")
-        .flag_if_supported("-w");
-
-    if debug {
-        builder.flag_if_supported("-DDEBUG");
-    }
-
-    builder.compile("slang_binding");
+    config.build()
 }
 
-fn setup_linking() {
-    let debug = cfg!(debug_assertions);
-    let dst = cmake::Config::new(".").build().join("build").display().to_string();
-
-    println!("cargo:rustc-link-search=native={dst}/lib");
-    println!("cargo:rustc-link-lib=static=svlang");
-
-    let libs = [
-        ("fmt", if debug { "fmtd" } else { "fmt" }),
-        ("mimalloc", if debug { "mimalloc-debug" } else { "mimalloc" }),
-    ];
-
-    for (lib_name, lib_debug_name) in &libs {
-        let pkg_config_success = std::process::Command::new("pkg-config")
-            .args(["--libs", lib_name])
-            .output()
-            .ok()
-            .filter(|output| output.status.success());
-
-        if let Some(output) = pkg_config_success {
-            for arg in String::from_utf8(output.stdout).unwrap().split_whitespace() {
-                if let Some(path) = arg.strip_prefix("-L") {
-                    println!("cargo:rustc-link-search=native={path}");
-                } else if let Some(lib) = arg.strip_prefix("-l") {
-                    println!("cargo:rustc-link-lib={lib}");
-                }
-            }
-        } else {
-            println!("cargo:rustc-link-lib={lib_debug_name}");
-        }
-    }
+fn setup_linking(install_dir: &Path) {
+    let lib_dir = install_dir.join("lib");
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=static=slang_rust_bridge");
 }
 
 fn setup_rerun_triggers() {
     for file in &[
+        "CMakeLists.txt",
+        "bindings/CMakeLists.txt",
+        "bindings/rust/CMakeLists.txt",
+        "external/CMakeLists.txt",
+        "source/CMakeLists.txt",
+        "cmake/merge_static_libs.cmake",
         "bindings/rust/lib.rs",
         "bindings/rust/ffi.rs",
         "bindings/rust/ffi/cxx_sv.rs",

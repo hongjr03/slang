@@ -19,16 +19,31 @@
 struct RawSyntaxDiagnostic;
 
 namespace wrapper {
-  using SyntaxTrivia = ::slang::parsing::Trivia;
-  using SyntaxToken = ::slang::parsing::Token;
-  using SVInt = ::slang::SVInt;
-  using logic_t = ::slang::logic_t;
+  using Diagnostic = ::slang::Diagnostic;
   using SourceLocation = ::slang::SourceLocation;
   using SourceRange = ::slang::SourceRange;
+  using SVInt = ::slang::SVInt;
+  using logic_t = ::slang::logic_t;
+
+  using SyntaxTrivia = ::slang::parsing::Trivia;
+  using SyntaxToken = ::slang::parsing::Token;
   using SyntaxTree = ::slang::syntax::SyntaxTree;
   using SyntaxNode = ::slang::syntax::SyntaxNode;
   using Compilation = ::slang::ast::Compilation;
-  using Diagnostic = ::slang::Diagnostic;
+
+  namespace parsing {
+    using Trivia = ::slang::parsing::Trivia;
+    using Token = ::slang::parsing::Token;
+  }
+
+  namespace syntax {
+    using SyntaxNode = ::slang::syntax::SyntaxNode;
+    using SyntaxTree = ::slang::syntax::SyntaxTree;
+  }
+
+  namespace ast {
+    using Compilation = ::slang::ast::Compilation;
+  }
 
   // SourceRange
   inline static size_t source_range_start(const slang::SourceRange& range) {

@@ -128,7 +128,7 @@ target_include_directories(
 
 # Link libraries
 find_package(Threads)
-target_link_libraries(slang_slang PUBLIC fmt::fmt Boost::headers
+target_link_libraries(slang_slang PUBLIC ${slang_fmt_target} Boost::headers
                                          ${CMAKE_THREAD_LIBS_INIT})
 
 if(SLANG_USE_MIMALLOC)

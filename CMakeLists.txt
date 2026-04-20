@@ -61,6 +61,8 @@ option(SLANG_INCLUDE_TESTS "Include test targets in the build"
        ${SLANG_MASTER_PROJECT})
 option(SLANG_INCLUDE_DOCS "Include documentation targets in the build" OFF)
 option(SLANG_INCLUDE_PYLIB "Include the pyslang python module in the build" OFF)
+option(SLANG_INCLUDE_RUSTLIB "Include the Rust CXX bridge library in the build"
+       OFF)
 option(SLANG_INCLUDE_INSTALL "Include installation targets"
        ${SLANG_MASTER_PROJECT})
 option(SLANG_INCLUDE_COVERAGE "Enable code coverage" OFF)
@@ -192,7 +194,7 @@ if(SLANG_INCLUDE_DOCS)
   add_subdirectory(docs)
 endif()
 
-if(SLANG_INCLUDE_PYLIB)
+if(SLANG_INCLUDE_PYLIB OR SLANG_INCLUDE_RUSTLIB)
   add_subdirectory(bindings)
 endif()
 

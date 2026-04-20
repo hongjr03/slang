@@ -11,9 +11,13 @@ license = "MIT"
 build = "bindings/rust/build.rs"
 
 include = [
-  "bindings/rust/*",
-  "include/*",
-  "source/*",
+  "CMakeLists.txt",
+  "bindings/**/*",
+  "cmake/*",
+  "external/*",
+  "include/**/*",
+  "scripts/*",
+  "source/**/*",
 ]
 
 [lib]

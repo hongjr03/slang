@@ -38,6 +38,12 @@ if(NOT TARGET fmt::fmt)
     FATAL_ERROR "Could not find fmt package, min version: ${fmt_min_version}")
 endif()
 
+if(TARGET fmt)
+  set(slang_fmt_target fmt)
+else()
+  set(slang_fmt_target fmt::fmt)
+endif()
+
 if((SLANG_INCLUDE_PYLIB OR BUILD_SHARED_LIBS) AND NOT fmt_FOUND)
   set_target_properties(fmt PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
