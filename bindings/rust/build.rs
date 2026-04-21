@@ -47,13 +47,11 @@ fn build_cpp_lib(cxxbridge_dir: &Path, debug: bool) -> PathBuf {
 
 fn setup_linking(install_dir: &Path, debug: bool) {
     let lib_dir = install_dir.join("lib");
-    let (mimalloc_lib, fmt_lib) = if cfg!(target_env = "msvc") {
-        (
-            if debug { "mimalloc-static-debug" } else { "mimalloc-static" },
-            if debug { "fmtd" } else { "fmt" },
-        )
+    let fmt_lib = if debug { "fmtd" } else { "fmt" };
+    let mimalloc_lib = if cfg!(target_env = "msvc") {
+        if debug { "mimalloc-static-debug" } else { "mimalloc-static" }
     } else {
-        (if debug { "mimalloc-debug" } else { "mimalloc" }, if debug { "fmtd" } else { "fmt" })
+        if debug { "mimalloc-debug" } else { "mimalloc" }
     };
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
