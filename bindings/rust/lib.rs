@@ -88,6 +88,8 @@ impl SyntaxDiagnostic {
             subsystem: raw.subsystem,
             severity: DiagnosticSeverity::from_raw(raw.severity),
             message: raw.message,
+            option_name: raw.option_name.is_empty().not().then_some(raw.option_name),
+            groups: raw.groups,
             primary_range: raw
                 .has_primary_range
                 .then_some(raw.primary_range_start..raw.primary_range_end),
@@ -103,6 +105,8 @@ pub struct SyntaxDiagnostic {
     pub subsystem: u16,
     pub severity: DiagnosticSeverity,
     pub message: String,
+    pub option_name: Option<String>,
+    pub groups: Vec<String>,
     pub primary_range: Option<Range<usize>>,
     pub location: Option<usize>,
     pub buffer_id: Option<u32>,
@@ -677,6 +681,14 @@ impl SyntaxTree {
         self._ptr.diagnostics().into_iter().map(SyntaxDiagnostic::from_raw).collect()
     }
 
+    pub fn diagnostics_with_options(&self, warning_options: &[String]) -> Vec<SyntaxDiagnostic> {
+        self._ptr
+            .diagnostics_with_options(warning_options.to_vec())
+            .into_iter()
+            .map(SyntaxDiagnostic::from_raw)
+            .collect()
+    }
+
     pub fn buffer_id(&self) -> u32 {
         self._ptr.buffer_id()
     }
@@ -871,12 +883,31 @@ impl Compilation {
         ffi::Compilation::add_syntax_tree(self._ptr.as_mut().unwrap(), tree._ptr);
     }
 
-    pub fn parse_diag_offsets_by_name(&mut self, name: &str) -> Vec<usize> {
-        ffi::Compilation::parse_diag_offsets_by_name(self._ptr.as_mut().unwrap(), CxxSV::new(name))
+    pub fn parse_diag_offsets_by_name(
+        &mut self,
+        name: &str,
+        warning_options: &[String],
+    ) -> Vec<usize> {
+        ffi::Compilation::parse_diag_offsets_by_name(
+            self._ptr.as_mut().unwrap(),
+            CxxSV::new(name),
+            warning_options.to_vec(),
+        )
     }
 
     pub fn semantic_diagnostics(&self) -> Vec<SyntaxDiagnostic> {
         self._ptr.semantic_diagnostics().into_iter().map(SyntaxDiagnostic::from_raw).collect()
+    }
+
+    pub fn semantic_diagnostics_with_options(
+        &self,
+        warning_options: &[String],
+    ) -> Vec<SyntaxDiagnostic> {
+        self._ptr
+            .semantic_diagnostics_with_options(warning_options.to_vec())
+            .into_iter()
+            .map(SyntaxDiagnostic::from_raw)
+            .collect()
     }
 }
 

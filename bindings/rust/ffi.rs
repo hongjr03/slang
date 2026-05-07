@@ -17,6 +17,8 @@ mod slang_ffi {
         subsystem: u16,
         severity: u8,
         message: String,
+        option_name: String,
+        groups: Vec<String>,
         primary_range_start: usize,
         primary_range_end: usize,
         has_primary_range: bool,
@@ -194,6 +196,12 @@ mod slang_ffi {
         fn SyntaxTree_diagnostics(tree: &SyntaxTree) -> Vec<RawSyntaxDiagnostic>;
 
         #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_diagnostics_with_options(
+            tree: &SyntaxTree,
+            warning_options: Vec<String>,
+        ) -> Vec<RawSyntaxDiagnostic>;
+
+        #[namespace = "wrapper::syntax"]
         fn SyntaxTree_buffer_id(tree: &SyntaxTree) -> u32;
     }
 
@@ -217,10 +225,17 @@ mod slang_ffi {
         fn Compilation_parse_diag_offsets_by_name(
             compilation: Pin<&mut Compilation>,
             name: CxxSV,
+            warning_options: Vec<String>,
         ) -> Vec<usize>;
 
         #[namespace = "wrapper::ast"]
         fn Compilation_semantic_diagnostics(compilation: &Compilation) -> Vec<RawSyntaxDiagnostic>;
+
+        #[namespace = "wrapper::ast"]
+        fn Compilation_semantic_diagnostics_with_options(
+            compilation: &Compilation,
+            warning_options: Vec<String>,
+        ) -> Vec<RawSyntaxDiagnostic>;
     }
 
     impl UniquePtr<Compilation> {}
@@ -271,6 +286,7 @@ impl_functions! {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
         fn diagnostics(&self) -> Vec<RawSyntaxDiagnostic> |> SyntaxTree_diagnostics;
+        fn diagnostics_with_options(&self, warning_options: Vec<String>) -> Vec<RawSyntaxDiagnostic> |> SyntaxTree_diagnostics_with_options;
         fn buffer_id(&self) -> u32 |> SyntaxTree_buffer_id;
     }
 }
@@ -335,7 +351,8 @@ impl_functions! {
     impl Compilation {
         fn new() -> UniquePtr<Compilation> |> Compilation_new;
         fn add_syntax_tree(self_: Pin<&mut Compilation>, tree: SharedPtr<SyntaxTree>) -> () |> Compilation_add_syntax_tree;
-        fn parse_diag_offsets_by_name(self_: Pin<&mut Compilation>, name: CxxSV) -> Vec<usize> |> Compilation_parse_diag_offsets_by_name;
+        fn parse_diag_offsets_by_name(self_: Pin<&mut Compilation>, name: CxxSV, warning_options: Vec<String>) -> Vec<usize> |> Compilation_parse_diag_offsets_by_name;
         fn semantic_diagnostics(&self) -> Vec<RawSyntaxDiagnostic> |> Compilation_semantic_diagnostics;
+        fn semantic_diagnostics_with_options(&self, warning_options: Vec<String>) -> Vec<RawSyntaxDiagnostic> |> Compilation_semantic_diagnostics_with_options;
     }
 }

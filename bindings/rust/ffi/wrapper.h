@@ -195,6 +195,9 @@ namespace wrapper {
     }
 
     rust::Vec<::RawSyntaxDiagnostic> SyntaxTree_diagnostics(const SyntaxTree& tree);
+    rust::Vec<::RawSyntaxDiagnostic> SyntaxTree_diagnostics_with_options(
+        const SyntaxTree& tree,
+        rust::Vec<rust::String> warning_options);
   }
 
   namespace ast {
@@ -206,7 +209,10 @@ namespace wrapper {
         compilation.addSyntaxTree(tree);
     }
 
-    inline static rust::Vec<size_t> Compilation_parse_diag_offsets_by_name(Compilation& compilation, std::string_view name) {
+    inline static rust::Vec<size_t> Compilation_parse_diag_offsets_by_name(
+        Compilation& compilation,
+        std::string_view name,
+        rust::Vec<rust::String> warning_options) {
         rust::Vec<size_t> offsets;
         for (const auto& diag : compilation.getParseDiagnostics()) {
             if (slang::toString(diag.code) == name && diag.location != slang::SourceLocation::NoLocation) {
@@ -217,5 +223,8 @@ namespace wrapper {
     }
 
     rust::Vec<::RawSyntaxDiagnostic> Compilation_semantic_diagnostics(const Compilation& compilation);
+    rust::Vec<::RawSyntaxDiagnostic> Compilation_semantic_diagnostics_with_options(
+        const Compilation& compilation,
+        rust::Vec<rust::String> warning_options);
   }
 }
