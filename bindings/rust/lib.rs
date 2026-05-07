@@ -92,6 +92,7 @@ impl SyntaxDiagnostic {
                 .has_primary_range
                 .then_some(raw.primary_range_start..raw.primary_range_end),
             location: raw.has_location.then_some(raw.location),
+            buffer_id: raw.has_buffer_id.then_some(raw.buffer_id),
         }
     }
 }
@@ -104,6 +105,7 @@ pub struct SyntaxDiagnostic {
     pub message: String,
     pub primary_range: Option<Range<usize>>,
     pub location: Option<usize>,
+    pub buffer_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -673,6 +675,10 @@ impl SyntaxTree {
 
     pub fn diagnostics(&self) -> Vec<SyntaxDiagnostic> {
         self._ptr.diagnostics().into_iter().map(SyntaxDiagnostic::from_raw).collect()
+    }
+
+    pub fn buffer_id(&self) -> u32 {
+        self._ptr.buffer_id()
     }
 }
 

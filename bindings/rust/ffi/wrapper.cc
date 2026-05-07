@@ -15,6 +15,8 @@ namespace {
   rust_diag.has_primary_range = false;
   rust_diag.location = 0;
   rust_diag.has_location = false;
+  rust_diag.buffer_id = 0;
+  rust_diag.has_buffer_id = false;
 
   if (!diag.ranges.empty() && diag.ranges.front() != SourceRange::NoLocation) {
     rust_diag.primary_range_start = diag.ranges.front().start().offset();
@@ -25,6 +27,8 @@ namespace {
   if (diag.location.valid()) {
     rust_diag.location = diag.location.offset();
     rust_diag.has_location = true;
+    rust_diag.buffer_id = diag.location.buffer().getId();
+    rust_diag.has_buffer_id = true;
   }
 
   return rust_diag;

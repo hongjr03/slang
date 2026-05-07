@@ -22,6 +22,8 @@ mod slang_ffi {
         has_primary_range: bool,
         location: usize,
         has_location: bool,
+        buffer_id: u32,
+        has_buffer_id: bool,
     }
 
     #[namespace = "slang"]
@@ -190,6 +192,9 @@ mod slang_ffi {
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxTree_diagnostics(tree: &SyntaxTree) -> Vec<RawSyntaxDiagnostic>;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_buffer_id(tree: &SyntaxTree) -> u32;
     }
 
     impl SharedPtr<SyntaxTree> {}
@@ -266,6 +271,7 @@ impl_functions! {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
         fn diagnostics(&self) -> Vec<RawSyntaxDiagnostic> |> SyntaxTree_diagnostics;
+        fn buffer_id(&self) -> u32 |> SyntaxTree_buffer_id;
     }
 }
 

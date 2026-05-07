@@ -172,6 +172,10 @@ namespace wrapper {
       return &tree.root();
     }
 
+    inline static uint32_t SyntaxTree_buffer_id(const SyntaxTree& tree) {
+      return tree.root().sourceRange().start().buffer().getId();
+    }
+
     inline static std::unique_ptr<SourceRange> SyntaxNode_range(const SyntaxNode& node) {
       auto range = node.sourceRange();
       return range == SourceRange::NoLocation ? nullptr : std::make_unique<SourceRange>(range);
