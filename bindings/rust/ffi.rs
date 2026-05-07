@@ -17,6 +17,7 @@ mod slang_ffi {
         subsystem: u16,
         severity: u8,
         message: String,
+        name: String,
         option_name: String,
         groups: Vec<String>,
         primary_range_start: usize,

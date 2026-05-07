@@ -88,6 +88,7 @@ impl SyntaxDiagnostic {
             subsystem: raw.subsystem,
             severity: DiagnosticSeverity::from_raw(raw.severity),
             message: raw.message,
+            name: raw.name,
             option_name: raw.option_name.is_empty().not().then_some(raw.option_name),
             groups: raw.groups,
             primary_range: raw
@@ -105,6 +106,7 @@ pub struct SyntaxDiagnostic {
     pub subsystem: u16,
     pub severity: DiagnosticSeverity,
     pub message: String,
+    pub name: String,
     pub option_name: Option<String>,
     pub groups: Vec<String>,
     pub primary_range: Option<Range<usize>>,

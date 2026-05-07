@@ -27,6 +27,7 @@ void apply_warning_options(slang::DiagnosticEngine& engine,
   rust_diag.subsystem = static_cast<uint16_t>(diag.code.getSubsystem());
   rust_diag.severity = static_cast<uint8_t>(engine.getSeverity(diag.code, diag.location));
   rust_diag.message = rust::String(engine.formatMessage(diag));
+  rust_diag.name = rust::String(std::string(slang::toString(diag.code)));
   auto option_name = engine.getOptionName(diag.code);
   rust_diag.option_name = rust::String(std::string(option_name));
   rust_diag.groups = rust::Vec<rust::String>();
