@@ -675,6 +675,17 @@ impl SyntaxTree {
     }
 
     #[inline]
+    pub fn from_library_map_text(text: &str, name: &str, path: &str) -> SyntaxTree {
+        SyntaxTree {
+            _ptr: ffi::SyntaxTree::fromLibraryMapText(
+                CxxSV::new(text),
+                CxxSV::new(name),
+                CxxSV::new(path),
+            ),
+        }
+    }
+
+    #[inline]
     pub fn root(&self) -> Option<SyntaxNode<'_>> {
         SyntaxNode::from_raw_ptr(self._ptr.root())
     }

@@ -168,6 +168,12 @@ namespace wrapper {
       return SyntaxTree::fromText(text, name, path);
     }
 
+    inline static std::shared_ptr<SyntaxTree> SyntaxTree_fromLibraryMapText(std::string_view text,
+                                                                            std::string_view name,
+                                                                            std::string_view path) {
+      return SyntaxTree::fromLibraryMapText(text, SyntaxTree::getDefaultSourceManager(), name, path);
+    }
+
     inline static const SyntaxNode* SyntaxTree_root(const SyntaxTree& tree) {
       return &tree.root();
     }

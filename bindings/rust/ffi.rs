@@ -191,6 +191,13 @@ mod slang_ffi {
         fn SyntaxTree_fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree>;
 
         #[namespace = "wrapper::syntax"]
+        fn SyntaxTree_fromLibraryMapText(
+            text: CxxSV,
+            name: CxxSV,
+            path: CxxSV,
+        ) -> SharedPtr<SyntaxTree>;
+
+        #[namespace = "wrapper::syntax"]
         fn SyntaxTree_root(tree: &SyntaxTree) -> *const SyntaxNode;
 
         #[namespace = "wrapper::syntax"]
@@ -285,6 +292,7 @@ impl_functions! {
 impl_functions! {
     impl SyntaxTree {
         fn fromText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromText;
+        fn fromLibraryMapText(text: CxxSV, name: CxxSV, path: CxxSV) -> SharedPtr<SyntaxTree> |> SyntaxTree_fromLibraryMapText;
         fn root(&self) -> *const SyntaxNode |> SyntaxTree_root;
         fn diagnostics(&self) -> Vec<RawSyntaxDiagnostic> |> SyntaxTree_diagnostics;
         fn diagnostics_with_options(&self, warning_options: Vec<String>) -> Vec<RawSyntaxDiagnostic> |> SyntaxTree_diagnostics_with_options;
