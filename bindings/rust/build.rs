@@ -8,7 +8,10 @@ mod sourcegen;
 fn main() {
     let debug = cfg!(debug_assertions);
     let target = env::var("TARGET").expect("TARGET is not set");
-    let use_mimalloc = !target.starts_with("wasm32-");
+    let use_mimalloc = !target.starts_with("wasm32-")
+        && env::var("SLANG_RUST_USE_MIMALLOC").is_ok_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        });
     let cxxbridge_dir = generate_cxx_bridge();
     let install_dir = build_cpp_lib(&cxxbridge_dir, debug, use_mimalloc);
     setup_linking(&install_dir, debug, use_mimalloc);
@@ -44,6 +47,10 @@ fn build_cpp_lib(cxxbridge_dir: &Path, debug: bool, use_mimalloc: bool) -> PathB
         .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL")
         .profile(cmake_profile)
         .define("CMAKE_VERBOSE_MAKEFILE", "ON");
+
+    if let Some(python) = env::var_os("EMSDK_PYTHON").or_else(|| env::var_os("PYTHON")) {
+        config.define("Python_EXECUTABLE", PathBuf::from(python).to_string_lossy().as_ref());
+    }
 
     config.build()
 }
