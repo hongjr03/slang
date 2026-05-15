@@ -2,7 +2,7 @@
 #![allow(unused)]
 #![allow(clippy::enum_variant_names)]
 
-use crate::{SyntaxChildren, SyntaxNode, SyntaxToken, syntax::SyntaxKind};
+use crate::{SyntaxChildren, SyntaxNode, SyntaxToken, TokenKind, syntax::SyntaxKind};
 
 pub trait AstNode<'a>: Copy + Clone {
     fn can_cast(kind: SyntaxKind) -> bool
@@ -18,12 +18,29 @@ pub trait AstNode<'a>: Copy + Clone {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TokenList<'a> {
-    syntax: SyntaxNode<'a>,
+    parent: SyntaxNode<'a>,
+    start: usize,
+    end: usize,
 }
 
 impl<'a> TokenList<'a> {
-    pub fn children(&self) -> impl Iterator<Item = SyntaxToken<'a>> {
-        SyntaxChildren::new(self.syntax).map(|elem| elem.as_token().unwrap())
+    pub(crate) fn new(parent: SyntaxNode<'a>, start: usize, end: usize) -> Self {
+        Self { parent, start, end }
+    }
+
+    pub(crate) fn end(parent: SyntaxNode<'a>, start: usize) -> usize {
+        let mut index = start;
+        while index < parent.child_count() && parent.child_token(index).is_some() {
+            index += 1;
+        }
+        index
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = SyntaxToken<'a>> + 'a {
+        let parent = self.parent;
+        let start = self.start;
+        let end = self.end;
+        (start..end).filter_map(move |index| parent.child_token(index))
     }
 }
 
@@ -33,23 +50,40 @@ impl<'a> AstNode<'a> for TokenList<'a> {
     }
 
     fn cast(syntax: SyntaxNode<'a>) -> Option<Self> {
-        Self::can_cast(syntax.kind()).then_some(Self { syntax })
+        Self::can_cast(syntax.kind()).then_some(Self::new(syntax, 0, syntax.child_count()))
     }
 
     fn syntax(&self) -> SyntaxNode<'a> {
-        self.syntax
+        self.parent
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SyntaxList<'a, T: AstNode<'a>> {
-    syntax: SyntaxNode<'a>,
+    parent: SyntaxNode<'a>,
+    start: usize,
+    end: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<'a, T: AstNode<'a>> SyntaxList<'a, T> {
+    pub(crate) fn new(parent: SyntaxNode<'a>, start: usize, end: usize) -> Self {
+        Self { parent, start, end, _marker: std::marker::PhantomData }
+    }
+
+    pub(crate) fn end(parent: SyntaxNode<'a>, start: usize) -> usize {
+        let mut index = start;
+        while index < parent.child_count() && parent.child_node(index).and_then(T::cast).is_some() {
+            index += 1;
+        }
+        index
+    }
+
     pub fn children(&self) -> impl Iterator<Item = T> + 'a {
-        SyntaxChildren::new(self.syntax).map(|elem| T::cast(elem.as_node().unwrap()).unwrap())
+        let parent = self.parent;
+        let start = self.start;
+        let end = self.end;
+        (start..end).filter_map(move |index| parent.child_node(index).and_then(T::cast))
     }
 }
 
@@ -59,25 +93,51 @@ impl<'a, T: AstNode<'a>> AstNode<'a> for SyntaxList<'a, T> {
     }
 
     fn cast(syntax: SyntaxNode<'a>) -> Option<Self> {
-        Self::can_cast(syntax.kind()).then_some(Self { syntax, _marker: std::marker::PhantomData })
+        Self::can_cast(syntax.kind()).then_some(Self::new(syntax, 0, syntax.child_count()))
     }
 
     fn syntax(&self) -> SyntaxNode<'a> {
-        self.syntax
+        self.parent
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SeparatedList<'a, T: AstNode<'a>> {
-    syntax: SyntaxNode<'a>,
+    parent: SyntaxNode<'a>,
+    start: usize,
+    end: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<'a, T: AstNode<'a>> SeparatedList<'a, T> {
+    pub(crate) fn new(parent: SyntaxNode<'a>, start: usize, end: usize) -> Self {
+        Self { parent, start, end, _marker: std::marker::PhantomData }
+    }
+
+    pub(crate) fn end(parent: SyntaxNode<'a>, start: usize) -> usize {
+        let mut index = start;
+        let mut expect_separator = false;
+        while index < parent.child_count() {
+            if parent.child_node(index).and_then(T::cast).is_some() {
+                index += 1;
+                expect_separator = true;
+            } else if expect_separator
+                && parent.child_token(index).is_some_and(|tok| tok.kind() == TokenKind::COMMA)
+            {
+                index += 1;
+                expect_separator = false;
+            } else {
+                break;
+            }
+        }
+        index
+    }
+
     pub fn children(&self) -> impl Iterator<Item = T> + 'a {
-        SyntaxChildren::new(self.syntax)
-            .step_by(2)
-            .map(|elem| T::cast(elem.as_node().unwrap()).unwrap())
+        let parent = self.parent;
+        let start = self.start;
+        let end = self.end;
+        (start..end).filter_map(move |index| parent.child_node(index).and_then(T::cast))
     }
 }
 
@@ -87,11 +147,11 @@ impl<'a, T: AstNode<'a>> AstNode<'a> for SeparatedList<'a, T> {
     }
 
     fn cast(syntax: SyntaxNode<'a>) -> Option<Self> {
-        Self::can_cast(syntax.kind()).then_some(Self { syntax, _marker: std::marker::PhantomData })
+        Self::can_cast(syntax.kind()).then_some(Self::new(syntax, 0, syntax.child_count()))
     }
 
     fn syntax(&self) -> SyntaxNode<'a> {
-        self.syntax
+        self.parent
     }
 }
 

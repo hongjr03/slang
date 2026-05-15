@@ -277,30 +277,26 @@ mod tests {
 
         assert!(cursor.goto_first_child());
         assert_eq!(cursor.idx(), Some(0));
-        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::SYNTAX_LIST);
-
-        assert!(cursor.goto_first_child());
         assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::MODULE_DECLARATION);
 
         assert!(cursor.goto_first_child());
-        assert!(cursor.goto_next_sibling());
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::MODULE_HEADER);
         assert!(cursor.goto_first_child());
         assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
 
         assert!(cursor.goto_parent());
         assert!(cursor.goto_next_sibling());
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::NET_DECLARATION);
         assert!(cursor.goto_next_sibling());
-        assert_eq!(cursor.idx(), Some(3));
         assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::END_MODULE_KEYWORD);
 
         assert!(cursor.goto_parent());
-        assert!(cursor.goto_parent());
         assert_eq!(cursor.idx(), Some(0));
-        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::SYNTAX_LIST);
+        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::MODULE_DECLARATION);
 
         assert!(cursor.goto_last_child());
-        assert_eq!(cursor.idx(), Some(1));
-        assert_eq!(cursor.to_node().unwrap().kind(), SyntaxKind::EMPTY_MEMBER);
+        assert_eq!(cursor.idx(), Some(2));
+        assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::END_MODULE_KEYWORD);
 
         cursor.reset_to_root();
         assert_eq!(cursor.idx(), None);
@@ -309,11 +305,9 @@ mod tests {
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
         assert!(cursor.goto_first_child_after_pos(8));
-        assert!(cursor.goto_first_child_after_pos(8));
         assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::OPEN_PARENTHESIS);
 
         cursor.reset_to_root();
-        assert!(cursor.goto_last_child_before_pos(8));
         assert!(cursor.goto_last_child_before_pos(8));
         assert!(cursor.goto_last_child_before_pos(8));
         assert!(cursor.goto_last_child_before_pos(8));
@@ -329,13 +323,11 @@ mod tests {
         assert!(cursor.goto_first_child_after_pos(7));
         assert!(cursor.goto_first_child_after_pos(7));
         assert!(cursor.goto_first_child_after_pos(7));
-        assert!(cursor.goto_first_child_after_pos(7));
         assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::IDENTIFIER);
         assert!(cursor.goto_prev_sibling());
         assert_eq!(cursor.to_token().unwrap().kind(), TokenKind::MODULE_KEYWORD);
 
         cursor.reset_to_root();
-        assert!(cursor.goto_last_child_before_pos(7));
         assert!(cursor.goto_last_child_before_pos(7));
         assert!(cursor.goto_last_child_before_pos(7));
         assert!(cursor.goto_last_child_before_pos(7));

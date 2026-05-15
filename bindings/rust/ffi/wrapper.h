@@ -88,6 +88,10 @@ namespace wrapper {
       return static_cast<uint8_t>(trivia.kind);
     }
 
+    inline static std::unique_ptr<SyntaxTrivia> SyntaxTrivia_clone(const SyntaxTrivia& trivia) {
+      return std::make_unique<SyntaxTrivia>(trivia);
+    }
+
     inline static const SyntaxNode* SyntaxTrivia_syntax(const SyntaxTrivia& trivia) {
       return trivia.syntax();
     }
@@ -97,8 +101,11 @@ namespace wrapper {
       return token.trivia().size();
     }
 
-    inline static const SyntaxTrivia* SyntaxToken_trivia(const SyntaxToken& token, size_t index) {
-      return &token.trivia()[index];
+    inline static std::unique_ptr<SyntaxTrivia> SyntaxToken_trivia(const SyntaxToken& token, size_t index) {
+      auto trivia = token.trivia();
+      if (index >= trivia.size())
+        return nullptr;
+      return std::make_unique<SyntaxTrivia>(trivia[index]);
     }
 
     inline static uint16_t SyntaxToken_kind(const SyntaxToken& token) {
@@ -193,9 +200,55 @@ namespace wrapper {
       return tree.root().sourceRange().start().buffer().getId();
     }
 
+    inline static bool SyntaxToken_hasSourceRange(const SyntaxToken& token) {
+      return token && !token.isMissing() && token.range() != SourceRange::NoLocation;
+    }
+
+    inline static SyntaxToken SyntaxNode_firstPresentToken(const SyntaxNode& node) {
+      auto childCount = node.getChildCount();
+      for (size_t i = 0; i < childCount; i++) {
+        auto token = node.childToken(i);
+        if (SyntaxToken_hasSourceRange(token))
+          return token;
+
+        if (auto childNode = node.childNode(i)) {
+          auto token = SyntaxNode_firstPresentToken(*childNode);
+          if (SyntaxToken_hasSourceRange(token))
+            return token;
+        }
+      }
+      return SyntaxToken();
+    }
+
+    inline static SyntaxToken SyntaxNode_lastPresentToken(const SyntaxNode& node) {
+      auto childCount = node.getChildCount();
+      for (ptrdiff_t i = ptrdiff_t(childCount) - 1; i >= 0; i--) {
+        auto token = node.childToken(size_t(i));
+        if (SyntaxToken_hasSourceRange(token))
+          return token;
+
+        if (auto childNode = node.childNode(size_t(i))) {
+          auto token = SyntaxNode_lastPresentToken(*childNode);
+          if (SyntaxToken_hasSourceRange(token))
+            return token;
+        }
+      }
+      return SyntaxToken();
+    }
+
     inline static std::unique_ptr<SourceRange> SyntaxNode_range(const SyntaxNode& node) {
       auto range = node.sourceRange();
-      return range == SourceRange::NoLocation ? nullptr : std::make_unique<SourceRange>(range);
+      if (range != SourceRange::NoLocation)
+        return std::make_unique<SourceRange>(range);
+
+      auto first = SyntaxNode_firstPresentToken(node);
+      auto last = SyntaxNode_lastPresentToken(node);
+      if (!first || !last)
+        return nullptr;
+
+      auto firstRange = first.range();
+      auto lastRange = last.range();
+      return std::make_unique<SourceRange>(firstRange.start(), lastRange.end());
     }
 
     inline static const SyntaxToken* SyntaxNode_childToken(const SyntaxNode& node, size_t index) {

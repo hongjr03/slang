@@ -448,22 +448,86 @@ pub mod generator {
         if reserved.contains(&name.as_str()) { format!("{}_", name) } else { name }
     }
 
-    fn generate_members(ty_info: &TypeInfo) -> impl Iterator<Item = TokenStream> + '_ {
-        ty_info.combined.iter().enumerate().map(|(idx, (member_ty, member_name))| {
-            let member_name = format_ident!("{}", escape_kw(member_name.to_snake_case()));
-            let transform_ty = |mut ty: &str| {
-                if ty == "SyntaxNode" {
-                    ty = "HybridNode";
+    fn transform_ty(mut ty: &str) -> proc_macro2::Ident {
+        if ty == "SyntaxNode" {
+            ty = "HybridNode";
+        }
+        format_ident!("{}", ty)
+    }
+
+    fn advance_member(member_ty: &Ty) -> TokenStream {
+        match member_ty {
+            Ty::Token | Ty::NotNull(_) | Ty::SyntaxNode(_) => quote! {
+                idx += 1usize;
+            },
+            Ty::TokenList => quote! {
+                idx = TokenList::end(self.syntax(), idx);
+            },
+            Ty::SyntaxList(member_ty) => {
+                let member_ty = transform_ty(member_ty);
+                quote! {
+                    idx = SyntaxList::<#member_ty<'a>>::end(self.syntax(), idx);
                 }
-                format_ident!("{}", ty)
+            }
+            Ty::SeparatedList(member_ty) => {
+                let member_ty = transform_ty(member_ty);
+                quote! {
+                    idx = SeparatedList::<#member_ty<'a>>::end(self.syntax(), idx);
+                }
+            }
+        }
+    }
+
+    fn generate_members(ty_info: &TypeInfo) -> impl Iterator<Item = TokenStream> {
+        let mut members = Vec::new();
+        let has_dynamic_fields = ty_info
+            .combined
+            .iter()
+            .any(|(ty, _)| matches!(ty, Ty::TokenList | Ty::SyntaxList(_) | Ty::SeparatedList(_)));
+
+        if has_dynamic_fields {
+            let advances = ty_info.combined.iter().enumerate().map(|(idx, (ty, _))| {
+                let next_field = idx + 1;
+                let advance = advance_member(ty);
+                quote! {
+                    #advance
+                    if field == #next_field {
+                        return idx;
+                    }
+                }
+            });
+            members.push(quote! {
+                #[inline]
+                fn __child_index(&self, field: usize) -> usize {
+                    let mut idx = 0usize;
+                    if field == 0usize {
+                        return idx;
+                    }
+                    #(#advances)*
+                    idx
+                }
+            });
+        }
+
+        for (idx, (member_ty, member_name)) in ty_info.combined.iter().enumerate() {
+            let member_name = format_ident!("{}", escape_kw(member_name.to_snake_case()));
+            let member_index = if has_dynamic_fields {
+                quote! {
+                    let idx = self.__child_index(#idx);
+                }
+            } else {
+                quote! {
+                    let idx = #idx;
+                }
             };
 
-            match member_ty {
+            let member = match member_ty {
                 Ty::Token => {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> Option<SyntaxToken<'a>> {
-                            self.syntax().child_token(#idx)
+                            #member_index
+                            self.syntax().child_token(idx)
                         }
                     }
                 }
@@ -471,7 +535,9 @@ pub mod generator {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> TokenList<'a> {
-                            self.syntax().child_node(#idx).and_then(TokenList::cast).unwrap()
+                            #member_index
+                            let end = TokenList::end(self.syntax(), idx);
+                            TokenList::new(self.syntax(), idx, end)
                         }
                     }
                 }
@@ -480,7 +546,9 @@ pub mod generator {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> SyntaxList<'a, #member_ty<'a>> {
-                            self.syntax().child_node(#idx).and_then(SyntaxList::cast).unwrap()
+                            #member_index
+                            let end = SyntaxList::<#member_ty<'a>>::end(self.syntax(), idx);
+                            SyntaxList::new(self.syntax(), idx, end)
                         }
                     }
                 }
@@ -489,7 +557,9 @@ pub mod generator {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> SeparatedList<'a, #member_ty<'a>> {
-                            self.syntax().child_node(#idx).and_then(SeparatedList::cast).unwrap()
+                            #member_index
+                            let end = SeparatedList::<#member_ty<'a>>::end(self.syntax(), idx);
+                            SeparatedList::new(self.syntax(), idx, end)
                         }
                     }
                 }
@@ -498,7 +568,8 @@ pub mod generator {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> #member_ty<'a> {
-                            self.syntax().child_node(#idx).and_then(#member_ty::cast).unwrap()
+                            #member_index
+                            self.syntax().child_node(idx).and_then(#member_ty::cast).unwrap()
                         }
                     }
                 }
@@ -507,12 +578,15 @@ pub mod generator {
                     quote! {
                         #[inline]
                         pub fn #member_name(&self) -> Option<#member_ty<'a>> {
-                            self.syntax().child_node(#idx).and_then(#member_ty::cast)
+                            #member_index
+                            self.syntax().child_node(idx).and_then(#member_ty::cast)
                         }
                     }
                 }
-            }
-        })
+            };
+            members.push(member);
+        }
+        members.into_iter()
     }
 
     pub fn generate_ast_file(

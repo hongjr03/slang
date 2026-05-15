@@ -103,6 +103,9 @@ mod slang_ffi {
         fn SyntaxTrivia_kind(trivia: &SyntaxTrivia) -> u8;
 
         #[namespace = "wrapper::parsing"]
+        fn SyntaxTrivia_clone(trivia: &SyntaxTrivia) -> UniquePtr<SyntaxTrivia>;
+
+        #[namespace = "wrapper::parsing"]
         fn SyntaxTrivia_syntax(trivia: &SyntaxTrivia) -> *const SyntaxNode;
 
         #[cxx_name = "Token"]
@@ -138,7 +141,7 @@ mod slang_ffi {
         fn SyntaxToken_trivia_count(tok: &SyntaxToken) -> usize;
 
         #[namespace = "wrapper::parsing"]
-        fn SyntaxToken_trivia(tok: &SyntaxToken, idx: usize) -> *const SyntaxTrivia;
+        fn SyntaxToken_trivia(tok: &SyntaxToken, idx: usize) -> UniquePtr<SyntaxTrivia>;
     }
 
     #[namespace = "wrapper::parsing"]
@@ -342,6 +345,7 @@ impl_functions! {
 impl_functions! {
     impl SyntaxTrivia {
         fn kind(&self) -> u8 |> SyntaxTrivia_kind;
+        fn cloneTrivia(&self) -> UniquePtr<SyntaxTrivia> |> SyntaxTrivia_clone;
         fn syntax(&self) -> *const SyntaxNode |> SyntaxTrivia_syntax;
     }
 }
@@ -354,7 +358,7 @@ impl_functions! {
         fn base(&self) -> u8 |> SyntaxToken_base;
         fn unit(&self) -> u8 |> SyntaxToken_unit;
         fn trivia_count(&self) -> usize |> SyntaxToken_trivia_count;
-        fn trivia(&self, idx: usize) -> *const SyntaxTrivia |> SyntaxToken_trivia;
+        fn trivia(&self, idx: usize) -> UniquePtr<SyntaxTrivia> |> SyntaxToken_trivia;
     }
 }
 

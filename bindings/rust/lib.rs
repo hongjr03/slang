@@ -9,6 +9,7 @@ use std::{
     ffi::c_char,
     fmt::{self, Display},
     hash, iter,
+    marker::PhantomData,
     ops::{self, Not, Range},
     pin::Pin,
 };
@@ -56,9 +57,9 @@ pub struct SyntaxTree {
     _ptr: SharedPtr<ffi::SyntaxTree>,
 }
 
-#[derive(Clone, Copy)]
 pub struct SyntaxTrivia<'a> {
-    _ptr: Pin<&'a ffi::SyntaxTrivia>,
+    _ptr: UniquePtr<ffi::SyntaxTrivia>,
+    _marker: PhantomData<&'a ()>,
 }
 
 pub struct SyntaxFacts;
@@ -396,9 +397,8 @@ pub trait ChildrenIter<It> = DoubleEndedIterator<Item = It> + ExactSizeIterator 
 
 impl<'a> SyntaxTrivia<'a> {
     #[inline]
-    fn from_raw_ptr(_ptr: *const ffi::SyntaxTrivia) -> Option<Self> {
-        assert!(_ptr.is_null().not());
-        Some(SyntaxTrivia { _ptr: unsafe { Pin::new_unchecked(&*_ptr) } })
+    fn from_unique_ptr(_ptr: UniquePtr<ffi::SyntaxTrivia>) -> Option<Self> {
+        _ptr.is_null().not().then(|| SyntaxTrivia { _ptr, _marker: PhantomData })
     }
 
     #[inline]
@@ -414,6 +414,12 @@ impl<'a> SyntaxTrivia<'a> {
     #[inline]
     pub fn syntax(&self) -> Option<SyntaxNode<'a>> {
         SyntaxNode::from_raw_ptr(self._ptr.syntax())
+    }
+}
+
+impl Clone for SyntaxTrivia<'_> {
+    fn clone(&self) -> Self {
+        SyntaxTrivia::from_unique_ptr(self._ptr.cloneTrivia()).unwrap()
     }
 }
 
@@ -500,7 +506,7 @@ impl<'a> SyntaxToken<'a> {
 
     #[inline]
     pub fn trivia_at(&self, idx: usize) -> Option<SyntaxTrivia<'a>> {
-        SyntaxTrivia::from_raw_ptr(self._ptr.trivia(idx))
+        SyntaxTrivia::from_unique_ptr(self._ptr.trivia(idx))
     }
 
     #[inline]
