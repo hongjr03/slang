@@ -153,6 +153,12 @@ mod slang_ffi {
 
         #[namespace = "wrapper::parsing"]
         fn LexerFacts_directive_text(kind: u16) -> String;
+
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxFacts_is_possible_statement(kind: u16) -> bool;
+
+        #[namespace = "wrapper::parsing"]
+        fn SyntaxFacts_is_possible_expression(kind: u16) -> bool;
     }
 
     impl UniquePtr<SyntaxTrivia> {}
@@ -180,6 +186,24 @@ mod slang_ffi {
 
         #[namespace = "wrapper::syntax"]
         fn SyntaxNode_kind(node: &SyntaxNode) -> u16;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_compilation_unit(kind: u16) -> bool;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_generate(kind: u16) -> bool;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_module(kind: u16) -> bool;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_interface(kind: u16) -> bool;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_program(kind: u16) -> bool;
+
+        #[namespace = "wrapper::syntax"]
+        fn SyntaxFacts_is_allowed_in_package(kind: u16) -> bool;
     }
 
     #[namespace = "wrapper::syntax"]
@@ -339,6 +363,19 @@ impl_functions! {
         fn keyword_table_for_version(version: CxxSV) -> Vec<String> |> LexerFacts_keyword_table_for_version;
         fn verilog_2005_keywords() -> Vec<String> |> LexerFacts_verilog_2005_keywords;
         fn directive_text(kind: u16) -> String |> LexerFacts_directive_text;
+        fn is_possible_statement(kind: u16) -> bool |> SyntaxFacts_is_possible_statement;
+        fn is_possible_expression(kind: u16) -> bool |> SyntaxFacts_is_possible_expression;
+    }
+}
+
+impl_functions! {
+    impl SyntaxNode {
+        fn is_allowed_in_compilation_unit(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_compilation_unit;
+        fn is_allowed_in_generate(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_generate;
+        fn is_allowed_in_module(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_module;
+        fn is_allowed_in_interface(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_interface;
+        fn is_allowed_in_program(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_program;
+        fn is_allowed_in_package(kind: u16) -> bool |> SyntaxFacts_is_allowed_in_package;
     }
 }
 

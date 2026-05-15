@@ -7,6 +7,7 @@
 #include <string_view>
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxNode.h"
+#include "slang/syntax/SyntaxFacts.h"
 #include "slang/numeric/SVInt.h"
 #include "slang/parsing/LexerFacts.h"
 #include "slang/syntax/SyntaxPrinter.h"
@@ -159,6 +160,16 @@ namespace wrapper {
       return rust::String(std::string(
           slang::parsing::LexerFacts::getDirectiveText(static_cast<slang::syntax::SyntaxKind>(kind))));
     }
+
+    inline static bool SyntaxFacts_is_possible_statement(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isPossibleStatement(
+          static_cast<slang::parsing::TokenKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_possible_expression(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isPossibleExpression(
+          static_cast<slang::parsing::TokenKind>(kind));
+    }
   }
 
   namespace syntax {
@@ -198,6 +209,36 @@ namespace wrapper {
 
     inline static uint16_t SyntaxNode_kind(const SyntaxNode& node) {
       return static_cast<uint16_t>(node.kind);
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_compilation_unit(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInCompilationUnit(
+          static_cast<slang::syntax::SyntaxKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_generate(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInGenerate(
+          static_cast<slang::syntax::SyntaxKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_module(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInModule(
+          static_cast<slang::syntax::SyntaxKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_interface(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInInterface(
+          static_cast<slang::syntax::SyntaxKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_program(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInProgram(
+          static_cast<slang::syntax::SyntaxKind>(kind));
+    }
+
+    inline static bool SyntaxFacts_is_allowed_in_package(uint16_t kind) {
+      return slang::syntax::SyntaxFacts::isAllowedInPackage(
+          static_cast<slang::syntax::SyntaxKind>(kind));
     }
 
     rust::Vec<::RawSyntaxDiagnostic> SyntaxTree_diagnostics(const SyntaxTree& tree);

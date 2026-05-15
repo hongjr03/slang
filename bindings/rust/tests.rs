@@ -255,6 +255,20 @@ fn keyword_tables_are_available_from_rust() {
 }
 
 #[test]
+fn syntax_facts_are_available_from_rust() {
+    assert!(SyntaxFacts::is_possible_statement(Token![if]));
+    assert!(!SyntaxFacts::is_possible_statement(Token![module]));
+    assert!(!SyntaxFacts::is_possible_expression(Token![module]));
+
+    assert!(SyntaxFacts::is_allowed_in_compilation_unit(SyntaxKind::MODULE_DECLARATION));
+    let _ = SyntaxFacts::is_allowed_in_generate(SyntaxKind::INITIAL_BLOCK);
+    assert!(SyntaxFacts::is_allowed_in_module(SyntaxKind::INITIAL_BLOCK));
+    let _ = SyntaxFacts::is_allowed_in_interface(SyntaxKind::INITIAL_BLOCK);
+    let _ = SyntaxFacts::is_allowed_in_program(SyntaxKind::INITIAL_BLOCK);
+    assert!(!SyntaxFacts::is_allowed_in_package(SyntaxKind::INITIAL_BLOCK));
+}
+
+#[test]
 fn test_partial_eq_syntax_node() {
     let tree = get_complex_tree();
     let root = tree.root().unwrap();

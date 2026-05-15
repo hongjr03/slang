@@ -6,5 +6,11 @@ impl SyntaxKind {
     }
 }
 
+impl TokenKind {
+    pub fn as_u16(self) -> u16 {
+        self.0
+    }
+}
+
 pub mod cursor;
 pub mod iter;

@@ -61,6 +61,8 @@ pub struct SyntaxTrivia<'a> {
     _ptr: Pin<&'a ffi::SyntaxTrivia>,
 }
 
+pub struct SyntaxFacts;
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
@@ -112,6 +114,48 @@ pub struct SyntaxDiagnostic {
     pub primary_range: Option<Range<usize>>,
     pub location: Option<usize>,
     pub buffer_id: Option<u32>,
+}
+
+impl SyntaxFacts {
+    #[inline]
+    pub fn is_possible_statement(kind: TokenKind) -> bool {
+        ffi::SyntaxToken::is_possible_statement(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_possible_expression(kind: TokenKind) -> bool {
+        ffi::SyntaxToken::is_possible_expression(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_compilation_unit(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_compilation_unit(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_generate(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_generate(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_module(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_module(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_interface(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_interface(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_program(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_program(kind.as_u16())
+    }
+
+    #[inline]
+    pub fn is_allowed_in_package(kind: SyntaxKind) -> bool {
+        ffi::SyntaxNode::is_allowed_in_package(kind.as_u16())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
