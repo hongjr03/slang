@@ -40,7 +40,3 @@ proc-macro2 = "1.0.86"
 quote = "1.0.36"
 regex = "1.11.1"
 which = "7.0.2"
-
-[profile.release-lto]
-inherits = "release"
-lto = true
