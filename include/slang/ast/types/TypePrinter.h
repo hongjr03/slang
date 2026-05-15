@@ -39,9 +39,22 @@ struct SLANG_EXPORT TypePrintingOptions {
     /// Include the enum's base type.
     bool fullEnumType = false;
 
+    /// Print typedefs as links instead of their expanded type details.
+    bool typedefsAsLinks = false;
+
+    /// Print enums as links instead of their expanded type details.
+    bool enumsAsLinks = false;
+
+    /// Print classes and covergroups as links instead of their expanded type details.
+    bool classesAsLinks = false;
+
     /// Selects a style for anonymous types, either the system ID name
     /// or a more human-friendly name.
     enum AnonymousTypeStyle { SystemName, FriendlyName } anonymousTypeStyle = SystemName;
+
+    /// A limit on the size of a friendly-named struct / union member list,
+    /// beyond which the output will be abbreviated.
+    size_t friendlyMemberCharLimit = 60;
 };
 
 /// A utility class that prints a SystemVerilog type to a string.
@@ -62,6 +75,8 @@ public:
 
     /// @returns the printer's string buffer as a copy.
     std::string toString() const;
+
+    void appendParameters(std::span<const Symbol* const> parameters, bool includeNames);
 
     void visit(const ScalarType& type, std::string_view overrideName);
     void visit(const PredefinedIntegerType& type, std::string_view overrideName);
@@ -98,6 +113,7 @@ public:
 
 private:
     void appendMembers(const Scope& scope);
+    void appendFriendlyMembers(const Scope& scope);
     void printUnpackedArray(const Type& type);
     void printUnpackedArrayDim(const Type& type);
     void printScope(const Scope* scope);

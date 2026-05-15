@@ -8,15 +8,15 @@
 #pragma once
 
 #include "slang/ast/Expression.h"
+#include "slang/ast/HierarchicalReference.h"
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssertionExpr.h"
-#include "slang/ast/symbols/ValueSymbol.h"
+#include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/syntax/SyntaxFwd.h"
 
 namespace slang::ast {
 
 class AssertionPortSymbol;
-class VariableSymbol;
 
 /// Common base class for both NamedValueExpression and HierarchicalValueExpression.
 class SLANG_EXPORT ValueExpressionBase : public Expression {
@@ -25,22 +25,19 @@ public:
     const ValueSymbol& symbol;
 
     bool requireLValueImpl(const ASTContext& context, SourceLocation location,
-                           bitmask<AssignFlags> flags, const Expression* longestStaticPrefix) const;
-    void getLongestStaticPrefixesImpl(
-        SmallVector<std::pair<const ValueSymbol*, const Expression*>>& results,
-        const Expression* longestStaticPrefix) const;
+                           bitmask<AssignFlags> flags) const;
 
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
     static Expression& fromSymbol(const ASTContext& context, const Symbol& symbol,
-                                  bool isHierarchical, SourceRange sourceRange,
+                                  const HierarchicalReference* hierRef, SourceRange sourceRange,
                                   bool constraintAllowed = false, bool isDottedAccess = false);
 
-    static bool checkVariableAssignment(const ASTContext& context, const VariableSymbol& var,
-                                        bitmask<AssignFlags> flags, SourceLocation assignLoc,
-                                        SourceRange varRange);
+    static bool checkLValue(const ASTContext& context, const ValueSymbol& symbol,
+                            bitmask<AssignFlags> flags, SourceLocation assignLoc,
+                            SourceRange varRange);
 
     static bool isKind(ExpressionKind kind) {
         return kind == ExpressionKind::NamedValue || kind == ExpressionKind::HierarchicalValue;
@@ -54,13 +51,14 @@ protected:
 };
 
 /// Represents an expression that references a named value.
-class SLANG_EXPORT NamedValueExpression : public ValueExpressionBase {
+class SLANG_EXPORT NamedValueExpression final : public ValueExpressionBase {
 public:
     NamedValueExpression(const ValueSymbol& symbol, SourceRange sourceRange) :
         ValueExpressionBase(ExpressionKind::NamedValue, symbol, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
     LValue evalLValueImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const NamedValueExpression& rhs) const;
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::NamedValue; }
 
@@ -69,12 +67,19 @@ private:
 };
 
 /// Represents an expression that references a named value via hierarchical path.
-class SLANG_EXPORT HierarchicalValueExpression : public ValueExpressionBase {
+class SLANG_EXPORT HierarchicalValueExpression final : public ValueExpressionBase {
 public:
-    HierarchicalValueExpression(const ValueSymbol& symbol, SourceRange sourceRange) :
-        ValueExpressionBase(ExpressionKind::HierarchicalValue, symbol, sourceRange) {}
+    /// Information about the hierarchical reference.
+    HierarchicalReference ref;
+
+    HierarchicalValueExpression(const ValueSymbol& symbol, const HierarchicalReference& ref,
+                                SourceRange sourceRange);
+
+    HierarchicalValueExpression(const Scope& scope, const ValueSymbol& symbol,
+                                const HierarchicalReference& ref, SourceRange sourceRange);
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const HierarchicalValueExpression& rhs) const;
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::HierarchicalValue; }
 };
@@ -84,12 +89,13 @@ public:
 /// This is for cases where both an expression and a data type is
 /// valid; for example, as an argument to a $bits() call or as a
 /// parameter assignment (because of type parameters).
-class SLANG_EXPORT DataTypeExpression : public Expression {
+class SLANG_EXPORT DataTypeExpression final : public Expression {
 public:
     DataTypeExpression(const Type& type, SourceRange sourceRange) :
         Expression(ExpressionKind::DataType, type, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const DataTypeExpression&) const { return true; }
 
     void serializeTo(ASTSerializer&) const {}
 
@@ -103,7 +109,7 @@ public:
 ///
 /// The result is only allowed in a few places in the grammar, namely in comparisons
 /// with other type reference expressions.
-class SLANG_EXPORT TypeReferenceExpression : public Expression {
+class SLANG_EXPORT TypeReferenceExpression final : public Expression {
 public:
     /// The target type of the type reference.
     const Type& targetType;
@@ -114,6 +120,7 @@ public:
         targetType(targetType) {}
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const TypeReferenceExpression&) const { return true; }
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -125,15 +132,20 @@ public:
 /// This is for cases like the $printtimescale system function that require a
 /// module name to be passed. This is not a NamedValueExpression because the
 /// symbol in question is not a value and is not normally usable in an expression.
-class SLANG_EXPORT ArbitrarySymbolExpression : public Expression {
+class SLANG_EXPORT ArbitrarySymbolExpression final : public Expression {
 public:
     /// The symbol being referenced.
     not_null<const Symbol*> symbol;
 
-    ArbitrarySymbolExpression(const Symbol& symbol, const Type& type, SourceRange sourceRange) :
-        Expression(ExpressionKind::ArbitrarySymbol, type, sourceRange), symbol(&symbol) {}
+    /// Information about the path used to refer to the symbol,
+    /// if this expression was created via hierarchical reference.
+    HierarchicalReference hierRef;
+
+    ArbitrarySymbolExpression(const Scope& scope, const Symbol& symbol, const Type& type,
+                              const HierarchicalReference* hierRef, SourceRange sourceRange);
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const ArbitrarySymbolExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -150,12 +162,13 @@ public:
 ///
 /// It indicates to the constant evaluator that it should look on
 /// the lvalue stack for the value to use.
-class SLANG_EXPORT LValueReferenceExpression : public Expression {
+class SLANG_EXPORT LValueReferenceExpression final : public Expression {
 public:
     LValueReferenceExpression(const Type& type, SourceRange sourceRange) :
         Expression(ExpressionKind::LValueReference, type, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const LValueReferenceExpression&) const { return true; }
 
     void serializeTo(ASTSerializer&) const {}
 
@@ -166,12 +179,13 @@ public:
 ///
 /// There's no actual syntax to go along with this, but we use this
 /// as a placeholder to hold the fact that the argument is empty.
-class SLANG_EXPORT EmptyArgumentExpression : public Expression {
+class SLANG_EXPORT EmptyArgumentExpression final : public Expression {
 public:
     EmptyArgumentExpression(const Type& type, SourceRange sourceRange) :
         Expression(ExpressionKind::EmptyArgument, type, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const EmptyArgumentExpression&) const { return true; }
 
     void serializeTo(ASTSerializer&) const {}
 
@@ -182,7 +196,7 @@ public:
 ///
 /// This is a special kind of expression that is only allowed with the
 /// sampled value system functions and assertion instance arguments.
-class SLANG_EXPORT ClockingEventExpression : public Expression {
+class SLANG_EXPORT ClockingEventExpression final : public Expression {
 public:
     /// The clocking event.
     const TimingControl& timingControl;
@@ -193,6 +207,7 @@ public:
     }
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const ClockingEventExpression& rhs) const;
 
     static Expression& fromSyntax(const syntax::ClockingPropertyExprSyntax& syntax,
                                   const ASTContext& context);
@@ -209,7 +224,7 @@ public:
 
 /// Represents an instance of an assertion item, either a sequence, a property,
 /// or a formal argument that is being referenced and expanded.
-class SLANG_EXPORT AssertionInstanceExpression : public Expression {
+class SLANG_EXPORT AssertionInstanceExpression final : public Expression {
 public:
     using ActualArg = std::variant<const Expression*, const AssertionExpr*, const TimingControl*>;
 
@@ -220,10 +235,10 @@ public:
     const AssertionExpr& body;
 
     /// Arguments to the assertion item.
-    std::span<std::tuple<const Symbol*, ActualArg> const> arguments;
+    std::span<std::tuple<const AssertionPortSymbol*, ActualArg> const> arguments;
 
     /// Local variables materialized in the body of the assertion item.
-    std::span<const Symbol* const> localVars;
+    std::span<const LocalAssertionVarSymbol* const> localVars;
 
     /// True if this is a recursive property instantiation.
     bool isRecursiveProperty;
@@ -234,6 +249,7 @@ public:
         body(body), isRecursiveProperty(isRecursiveProperty) {}
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const AssertionInstanceExpression& rhs) const;
 
     static Expression& fromLookup(const Symbol& symbol,
                                   const syntax::InvocationExpressionSyntax* syntax,
@@ -264,7 +280,7 @@ public:
 };
 
 /// Represents a min:typ:max expression.
-class SLANG_EXPORT MinTypMaxExpression : public Expression {
+class SLANG_EXPORT MinTypMaxExpression final : public Expression {
 public:
     MinTypMaxExpression(const Type& type, Expression& min, Expression& typ, Expression& max,
                         Expression* selected, SourceRange sourceRange) :
@@ -298,9 +314,11 @@ public:
     Expression& selected() { return *selected_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const MinTypMaxExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -325,7 +343,7 @@ private:
 };
 
 /// Represents a `new` expression that copies a class instance.
-class SLANG_EXPORT CopyClassExpression : public Expression {
+class SLANG_EXPORT CopyClassExpression final : public Expression {
 public:
     CopyClassExpression(const Type& type, const Expression& sourceExpr, SourceRange sourceRange) :
         Expression(ExpressionKind::CopyClass, type, sourceRange), sourceExpr_(sourceExpr) {}
@@ -334,6 +352,7 @@ public:
     const Expression& sourceExpr() const { return sourceExpr_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const CopyClassExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -357,7 +376,7 @@ private:
 ///
 /// This can't occur in normal expression code; it's used as part
 /// of constraints and properties (and always has the type 'void').
-class SLANG_EXPORT DistExpression : public Expression {
+class SLANG_EXPORT DistExpression final : public Expression {
 public:
     /// A weight to apply to a distribution.
     struct DistWeight {
@@ -366,6 +385,11 @@ public:
 
         /// The weight expression.
         const Expression* expr;
+
+        bool isEquivalentTo(const DistWeight& rhs) const {
+            return kind == rhs.kind && bool(expr) == bool(rhs.expr) &&
+                   (!expr || expr->isEquivalentTo(*rhs.expr));
+        }
     };
 
     /// A single distribution item.
@@ -375,6 +399,12 @@ public:
 
         /// The weight to apply to the expression.
         std::optional<DistWeight> weight;
+
+        bool isEquivalentTo(const DistItem& rhs) const {
+            return value.isEquivalentTo(rhs.value) &&
+                   weight.has_value() == rhs.weight.has_value() &&
+                   (!weight.has_value() || weight->isEquivalentTo(*rhs.weight));
+        }
     };
 
     DistExpression(const Type& type, const Expression& left, std::span<DistItem> items,
@@ -394,6 +424,7 @@ public:
     }
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const DistExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -422,7 +453,7 @@ private:
 };
 
 /// Represents a tagged union member setter expression.
-class SLANG_EXPORT TaggedUnionExpression : public Expression {
+class SLANG_EXPORT TaggedUnionExpression final : public Expression {
 public:
     /// The member being set.
     const Symbol& member;
@@ -437,6 +468,7 @@ public:
         valueExpr(valueExpr) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const TaggedUnionExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 

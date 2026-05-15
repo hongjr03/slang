@@ -84,7 +84,7 @@ enum class NondegeneracyStatus {
     /// The sequence definitely admits no match.
     AdmitsNoMatch = 1 << 2
 };
-SLANG_BITMASK(NondegeneracyStatus, AdmitsNoMatch);
+SLANG_BITMASK(NondegeneracyStatus, AdmitsNoMatch)
 
 /// Represents a range of potential sequence matches.
 struct SequenceRange {
@@ -98,6 +98,10 @@ struct SequenceRange {
                                     bool allowUnbounded);
     static SequenceRange fromSyntax(const syntax::RangeSelectSyntax& syntax,
                                     const ASTContext& context, bool allowUnbounded);
+
+    bool isEquivalentTo(const SequenceRange& other) const {
+        return min == other.min && max == other.max;
+    }
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -126,6 +130,9 @@ public:
 
     /// Indicates whether the expression is invalid.
     bool bad() const { return kind == AssertionExprKind::Invalid; }
+
+    /// Returns true if this assertion expression is structurally equivalent to the other one.
+    bool isEquivalentTo(const AssertionExpr& other) const;
 
     /// Specifies binding behavior of property expressions as
     /// it pertains to nondegeneracy checking.
@@ -178,6 +185,14 @@ public:
 
     /// Computes possible clock ticks (delay) length of sequence under assertion expression.
     std::optional<SequenceRange> computeSequenceLength() const;
+
+    /// Returns true if this expression can succeed vacuously, according to the
+    /// SystemVerilog LRM rules for vacuous evaluation attempts.
+    bool canSucceedVacuously() const;
+
+    /// Returns true if this expression is known to be within a pair of parentheses,
+    /// and otherwise false.
+    bool isParenthesized() const;
 
     static const AssertionExpr& bind(const syntax::SequenceExprSyntax& syntax,
                                      const ASTContext& context, bool allowDisable = false);
@@ -250,7 +265,7 @@ protected:
 ///
 /// Usually generated and inserted into an expression tree due
 /// to violation of language semantics or type checking.
-class SLANG_EXPORT InvalidAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT InvalidAssertionExpr final : public AssertionExpr {
 public:
     /// A wrapped sub-expression that is considered invalid.
     const AssertionExpr* child;
@@ -259,8 +274,9 @@ public:
         AssertionExpr(AssertionExprKind::Invalid), child(child) {}
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
-
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const { return false; }
+    bool isEquivalentImpl(const InvalidAssertionExpr&) const { return true; }
 
     static bool isKind(AssertionExprKind kind) { return kind == AssertionExprKind::Invalid; }
 
@@ -294,11 +310,15 @@ struct SequenceRepetition {
     /// Applies the repetition to the given range, scaling it and returning the result.
     SequenceRange applyTo(SequenceRange other) const;
 
+    bool isEquivalentTo(const SequenceRepetition& rhs) const {
+        return kind == rhs.kind && range.isEquivalentTo(rhs.range);
+    }
+
     void serializeTo(ASTSerializer& serializer) const;
 };
 
 /// Represents an assertion expression defined as a simple regular expression.
-class SLANG_EXPORT SimpleAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT SimpleAssertionExpr final : public AssertionExpr {
 public:
     /// The expression that constitutes the sequence.
     const Expression& expr;
@@ -317,6 +337,8 @@ public:
     void requireSequence(const ASTContext& context, DiagCode code) const;
     NondegeneracyCheckResult checkNondegeneracyImpl() const;
     std::optional<SequenceRange> computeSequenceLengthImpl() const;
+    bool canSucceedVacuouslyImpl() const;
+    bool isEquivalentImpl(const SimpleAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::SimpleSequenceExprSyntax& syntax,
                                      const ASTContext& context, bool allowDisable);
@@ -332,12 +354,15 @@ public:
 };
 
 /// Represents an assertion expression defined as a delayed concatenation of other expressions.
-class SLANG_EXPORT SequenceConcatExpr : public AssertionExpr {
+class SLANG_EXPORT SequenceConcatExpr final : public AssertionExpr {
 public:
     /// An element of a sequence concatenation.
     struct Element {
         /// A delay that applies to the element.
         SequenceRange delay;
+
+        /// An optional source range for the delay syntax.
+        SourceRange delayRange;
 
         /// The element expression.
         not_null<const AssertionExpr*> sequence;
@@ -351,6 +376,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const;
     std::optional<SequenceRange> computeSequenceLengthImpl() const;
+    bool canSucceedVacuouslyImpl() const { return false; }
+    bool isEquivalentImpl(const SequenceConcatExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::DelayedSequenceExprSyntax& syntax,
                                      const ASTContext& context);
@@ -368,7 +395,7 @@ public:
 
 /// Represents a sequence expression along with a list of actions to perform upon matching
 /// and/or instructions for repetition.
-class SLANG_EXPORT SequenceWithMatchExpr : public AssertionExpr {
+class SLANG_EXPORT SequenceWithMatchExpr final : public AssertionExpr {
 public:
     /// The sequence expression.
     const AssertionExpr& expr;
@@ -386,6 +413,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const;
     std::optional<SequenceRange> computeSequenceLengthImpl() const;
+    bool canSucceedVacuouslyImpl() const { return false; }
+    bool isEquivalentImpl(const SequenceWithMatchExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::ParenthesizedSequenceExprSyntax& syntax,
                                      const ASTContext& context);
@@ -405,7 +434,7 @@ public:
 };
 
 /// Represents a unary operator in a property expression.
-class SLANG_EXPORT UnaryAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT UnaryAssertionExpr final : public AssertionExpr {
 public:
     /// The operator.
     UnaryAssertionOperator op;
@@ -422,6 +451,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const;
+    bool isEquivalentImpl(const UnaryAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::UnaryPropertyExprSyntax& syntax,
                                      const ASTContext& context);
@@ -440,7 +471,7 @@ public:
 };
 
 /// Represents a binary operator in a sequence or property expression.
-class SLANG_EXPORT BinaryAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT BinaryAssertionExpr final : public AssertionExpr {
 public:
     /// The operator.
     BinaryAssertionOperator op;
@@ -451,14 +482,20 @@ public:
     /// The right operand.
     const AssertionExpr& right;
 
+    /// The source range of the operator token.
+    SourceRange opRange;
+
     BinaryAssertionExpr(BinaryAssertionOperator op, const AssertionExpr& left,
-                        const AssertionExpr& right) :
-        AssertionExpr(AssertionExprKind::Binary), op(op), left(left), right(right) {}
+                        const AssertionExpr& right, SourceRange opRange) :
+        AssertionExpr(AssertionExprKind::Binary), op(op), left(left), right(right),
+        opRange(opRange) {}
 
     void requireSequence(const ASTContext& context, DiagCode code) const;
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const;
     std::optional<SequenceRange> computeSequenceLengthImpl() const;
+    bool canSucceedVacuouslyImpl() const;
+    bool isEquivalentImpl(const BinaryAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::BinarySequenceExprSyntax& syntax,
                                      const ASTContext& context);
@@ -478,7 +515,7 @@ public:
 };
 
 /// Represents a first_match operator in a sequence expression.
-class SLANG_EXPORT FirstMatchAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT FirstMatchAssertionExpr final : public AssertionExpr {
 public:
     /// The operand.
     const AssertionExpr& seq;
@@ -496,6 +533,9 @@ public:
         return seq.computeSequenceLength();
     }
 
+    bool canSucceedVacuouslyImpl() const { return false; }
+    bool isEquivalentImpl(const FirstMatchAssertionExpr& rhs) const;
+
     static AssertionExpr& fromSyntax(const syntax::FirstMatchSequenceExprSyntax& syntax,
                                      const ASTContext& context);
 
@@ -512,7 +552,7 @@ public:
 };
 
 /// Represents an assertion expression with attached clocking control.
-class SLANG_EXPORT ClockingAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT ClockingAssertionExpr final : public AssertionExpr {
 public:
     /// The clocking control.
     const TimingControl& clocking;
@@ -528,6 +568,9 @@ public:
     std::optional<SequenceRange> computeSequenceLengthImpl() const {
         return expr.computeSequenceLength();
     }
+
+    bool canSucceedVacuouslyImpl() const { return expr.canSucceedVacuously(); }
+    bool isEquivalentImpl(const ClockingAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::ClockingSequenceExprSyntax& syntax,
                                      const ASTContext& context);
@@ -553,7 +596,7 @@ public:
 };
 
 /// Represents a strong or weak operator in a property expression.
-class SLANG_EXPORT StrongWeakAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT StrongWeakAssertionExpr final : public AssertionExpr {
 public:
     /// The expression that is being modified.
     const AssertionExpr& expr;
@@ -566,6 +609,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const { return false; }
+    bool isEquivalentImpl(const StrongWeakAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::StrongWeakPropertyExprSyntax& syntax,
                                      const ASTContext& context);
@@ -581,7 +626,7 @@ public:
 };
 
 /// Represents an abort (accept_on / reject_on) property expression.
-class SLANG_EXPORT AbortAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT AbortAssertionExpr final : public AssertionExpr {
 public:
     /// The condition of the abort.
     const Expression& condition;
@@ -602,6 +647,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const { return true; }
+    bool isEquivalentImpl(const AbortAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::AcceptOnPropertyExprSyntax& syntax,
                                      const ASTContext& context);
@@ -618,7 +665,7 @@ public:
 };
 
 /// Represents a conditional operator in a property expression.
-class SLANG_EXPORT ConditionalAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT ConditionalAssertionExpr final : public AssertionExpr {
 public:
     /// The condition expression.
     const Expression& condition;
@@ -636,6 +683,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const;
+    bool isEquivalentImpl(const ConditionalAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::ConditionalPropertyExprSyntax& syntax,
                                      const ASTContext& context);
@@ -654,7 +703,7 @@ public:
 };
 
 /// Represents a case operator in a property expression.
-class SLANG_EXPORT CaseAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT CaseAssertionExpr final : public AssertionExpr {
 public:
     /// A group of items that match one case item.
     struct ItemGroup {
@@ -681,6 +730,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const;
+    bool isEquivalentImpl(const CaseAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::CasePropertyExprSyntax& syntax,
                                      const ASTContext& context);
@@ -704,7 +755,7 @@ public:
 };
 
 /// Represents a disable iff condition in a property spec.
-class SLANG_EXPORT DisableIffAssertionExpr : public AssertionExpr {
+class SLANG_EXPORT DisableIffAssertionExpr final : public AssertionExpr {
 public:
     /// The disable condition expression.
     const Expression& condition;
@@ -717,6 +768,8 @@ public:
 
     NondegeneracyCheckResult checkNondegeneracyImpl() const { return {}; }
     std::optional<SequenceRange> computeSequenceLengthImpl() const { return {}; }
+    bool canSucceedVacuouslyImpl() const { return expr.canSucceedVacuously(); }
+    bool isEquivalentImpl(const DisableIffAssertionExpr& rhs) const;
 
     static AssertionExpr& fromSyntax(const syntax::DisableIffSyntax& syntax,
                                      const AssertionExpr& expr, const ASTContext& context);

@@ -57,7 +57,8 @@ TEST_CASE("Driver library default ordering") {
     CHECK(driver.parseAllSources());
 
     auto compilation = driver.createCompilation();
-    CHECK(driver.reportCompilation(*compilation, false));
+    driver.reportCompilation(*compilation, false);
+    CHECK(driver.reportDiagnostics(false));
 
     auto& m = compilation->getRoot().lookupName<InstanceSymbol>("top.m");
     CHECK(m.getDefinition().sourceLibrary.name == "lib1");
@@ -77,7 +78,8 @@ TEST_CASE("Driver library explicit ordering") {
     CHECK(driver.parseAllSources());
 
     auto compilation = driver.createCompilation();
-    CHECK(driver.reportCompilation(*compilation, false));
+    driver.reportCompilation(*compilation, false);
+    CHECK(driver.reportDiagnostics(false));
 
     auto& m = compilation->getRoot().lookupName<InstanceSymbol>("top.m");
     CHECK(m.getDefinition().sourceLibrary.name == "lib2");
@@ -1242,4 +1244,154 @@ endmodule : cmp
         compilation.addSyntaxTree(cmpSv);
         NO_COMPILATION_ERRORS;
     }
+}
+
+TEST_CASE("Configs with virtual interfaces") {
+    auto tree = SyntaxTree::fromText(R"(
+config cfg1;
+    design top;
+    instance top.i use J;
+    cell I use J;
+endconfig
+
+interface J;
+endinterface
+
+module top;
+    I i();
+    virtual I vi = i;
+endmodule
+)");
+    CompilationOptions options;
+    options.topModules.emplace("cfg1");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::VirtualIfaceConfigRule);
+}
+
+TEST_CASE("Configs with instance caching") {
+    auto tree = SyntaxTree::fromText(R"(
+config cfg1;
+    design top;
+    instance top.i2.j.k use L#(.b(3));
+endconfig
+
+module I;
+    J j();
+endmodule
+
+module J;
+    K k();
+endmodule
+
+module K;
+endmodule
+
+module L #(parameter int b);
+    if (b == 3) begin : blk
+        $warning("b is 3");
+    end
+endmodule
+
+module top;
+    I i1();
+    I i2();
+endmodule
+)");
+
+    CompilationOptions options;
+    options.topModules.emplace("cfg1");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::WarningTask);
+}
+
+TEST_CASE("Config cell override keeps subtree active for defparams") {
+    auto tree = SyntaxTree::fromText(R"(
+module leaf #(parameter int p = 0);
+    if (p) begin : blk
+        $info("Hello");
+    end
+endmodule
+
+module b_alt;
+    leaf l();
+    defparam l.p = 1;
+endmodule
+
+module b;
+endmodule
+
+module a;
+    b b1();
+endmodule
+
+module top;
+    a a1();
+endmodule
+
+config cfg1;
+    design top;
+    cell b use b_alt;
+endconfig
+)");
+
+    CompilationOptions options;
+    options.topModules.emplace("cfg1");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
+}
+
+TEST_CASE("Config instance override keeps subtree active for defparams") {
+    auto tree = SyntaxTree::fromText(R"(
+module leaf #(parameter int p = 0);
+    if (p) begin : blk
+        $info("Hello");
+    end
+endmodule
+
+module b_alt;
+    leaf l();
+    defparam l.p = 1;
+endmodule
+
+module b;
+endmodule
+
+module a;
+    b b1();
+endmodule
+
+module top;
+    a a1();
+endmodule
+
+config cfg1;
+    design top;
+    instance top.a1.b1 use b_alt;
+endconfig
+)");
+
+    CompilationOptions options;
+    options.topModules.emplace("cfg1");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
 }

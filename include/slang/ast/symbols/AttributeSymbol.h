@@ -16,7 +16,8 @@ namespace slang::ast {
 class ASTSerializer;
 class Scope;
 
-class SLANG_EXPORT AttributeSymbol : public Symbol {
+/// Represents an attribute attached to a symbol, such as (* foo = 42 *).
+class SLANG_EXPORT AttributeSymbol final : public Symbol {
 public:
     AttributeSymbol(std::string_view name, SourceLocation loc, const Symbol& symbol,
                     const syntax::ExpressionSyntax& expr);

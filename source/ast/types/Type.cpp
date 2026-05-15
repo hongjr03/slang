@@ -10,6 +10,7 @@
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Bitstream.h"
 #include "slang/ast/Compilation.h"
+#include "slang/ast/TypeProvider.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/ast/types/TypePrinter.h"
 #include "slang/diagnostics/LookupDiags.h"
@@ -89,8 +90,6 @@ bitwidth_t Type::getBitWidth() const {
                 return 64;
             case FloatingType::ShortReal:
                 return 32;
-            default:
-                SLANG_UNREACHABLE;
         }
     }
     return 0;
@@ -264,7 +263,7 @@ bool Type::isBitstreamType(bool destination) const {
         if (classType.isInterface || classType.hasCycles())
             return false;
 
-        for (auto& prop : classType.membersOfType<ClassPropertySymbol>()) {
+        for (auto& prop : classType.properties()) {
             if (!prop.getType().isBitstreamType(destination))
                 return false;
         }
@@ -390,6 +389,18 @@ bool Type::isHandleType() const {
     }
 }
 
+bool Type::isObjectHandleType() const {
+    auto ct = &getCanonicalType();
+    switch (ct->kind) {
+        case SymbolKind::VirtualInterfaceType:
+        case SymbolKind::ClassType:
+        case SymbolKind::CovergroupType:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool Type::isUnion() const {
     const Type& ct = getCanonicalType();
     switch (ct.kind) {
@@ -427,8 +438,13 @@ bool Type::isMatching(const Type& rhs) const {
         return true;
 
     if (l->getSyntax() && l->getSyntax() == r->getSyntax() && l->getParentScope() &&
-        l->getParentScope() == r->getParentScope())
-        return true;
+        l->getParentScope() == r->getParentScope()) {
+        // Types declared with the same syntax in the same scope are identical,
+        // unless they are instances of a generic class.
+        return !l->isClass() || l->as<ClassType>().genericClass == nullptr ||
+               ParameterSymbolBase::allMatching(l->as<ClassType>().genericParameters,
+                                                r->as<ClassType>().genericParameters);
+    }
 
     // Special casing for type synonyms: real/realtime
     if (l->isFloating() && r->isFloating()) {
@@ -575,6 +591,26 @@ bool Type::isEquivalent(const Type& rhs) const {
     return false;
 }
 
+static bool isSameUnboundGenericClass(const Type& left, const Type& right) {
+    // In an uninstantiated generic class body, type parameters are not yet bound,
+    // so two specializations of the same generic class (e.g. Callback#(T) and
+    // Callback#(Base)) appear as different types but may become identical once the
+    // class is instantiated with a particular T. Treat them as assignment compatible
+    // so we don't emit spurious errors; concrete specializations of incompatible
+    // types will not be uninstantiated and will continue to be reported normally.
+    auto& lt = left.getCanonicalType();
+    auto& rt = right.getCanonicalType();
+    if (lt.isClass() && rt.isClass()) {
+        auto& lc = lt.as<ClassType>();
+        auto& rc = rt.as<ClassType>();
+        if (lc.genericClass && lc.genericClass == rc.genericClass &&
+            (lc.isUninstantiated || rc.isUninstantiated)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Type::isAssignmentCompatible(const Type& rhs) const {
     // See [6.22.3] for Assignment Compatible
     const Type* l = &getCanonicalType();
@@ -619,6 +655,9 @@ bool Type::isAssignmentCompatible(const Type& rhs) const {
         // Classes can also be assigned to interface classes that they implement.
         if (r->implements(*l))
             return true;
+
+        if (r->isClass())
+            return isSameUnboundGenericClass(*l, *r);
     }
 
     if (l->isVirtualInterface()) {
@@ -687,7 +726,7 @@ bool Type::isDerivedFrom(const Type& base) const {
 
     while (d && d->isClass()) {
         d = d->as<ClassType>().getBaseClass();
-        if (d == b)
+        if (d == b || (d && isSameUnboundGenericClass(*d, *b)))
             return true;
     }
 
@@ -704,12 +743,68 @@ bool Type::implements(const Type& ifaceClass) const {
     if (!c->isClass())
         return false;
 
-    for (auto iface : c->as<ClassType>().getImplementedInterfaces()) {
-        if (iface->isMatching(ifaceClass))
-            return true;
+    const ClassType* cls = &c->as<ClassType>();
+    while (cls) {
+        for (auto iface : cls->getImplementedInterfaces()) {
+            if (iface->isMatching(ifaceClass))
+                return true;
+        }
+
+        auto base = cls->getBaseClass();
+        if (!base || base->isError())
+            break;
+        cls = &base->getCanonicalType().as<ClassType>();
     }
 
     return false;
+}
+
+bool Type::isIdenticalStructUnion(const Type& rhs) const {
+    const Type& lt = getCanonicalType();
+    const Type& rt = rhs.getCanonicalType();
+    if (lt.kind != rt.kind)
+        return false;
+
+    if (!lt.isStruct() && !lt.isUnion())
+        return false;
+
+    auto lr = lt.as<Scope>().membersOfType<FieldSymbol>();
+    auto rr = rt.as<Scope>().membersOfType<FieldSymbol>();
+
+    auto lit = lr.begin();
+    auto rit = rr.begin();
+    while (lit != lr.end()) {
+        if (rit == rr.end() || lit->name != rit->name || lit->randMode != rit->randMode ||
+            lit->flags != rit->flags) {
+            return false;
+        }
+
+        auto& lft = lit->getType();
+        auto& rft = rit->getType();
+        if (!lft.isMatching(rft) && !lft.isIdenticalStructUnion(rft))
+            return false;
+
+        ++lit;
+        ++rit;
+    }
+
+    if (rit != rr.end())
+        return false;
+
+    if (lt.kind == SymbolKind::UnpackedUnionType) {
+        auto& lu = lt.as<UnpackedUnionType>();
+        auto& ru = rt.as<UnpackedUnionType>();
+        if (lu.isTagged != ru.isTagged)
+            return false;
+    }
+    else if (lt.kind == SymbolKind::PackedUnionType) {
+        auto& lu = lt.as<PackedUnionType>();
+        auto& ru = rt.as<PackedUnionType>();
+        if (lu.isTagged != ru.isTagged || lu.isSoft != ru.isSoft)
+            return false;
+    }
+
+    return true;
 }
 
 bitmask<IntegralFlags> Type::getIntegralFlags() const {
@@ -804,8 +899,9 @@ bool Type::isValidForDPIReturn() const {
         case SymbolKind::CHandleType:
         case SymbolKind::StringType:
         case SymbolKind::ScalarType:
-        case SymbolKind::PredefinedIntegerType:
             return true;
+        case SymbolKind::PredefinedIntegerType:
+            return !isFourState();
         default:
             return false;
     }
@@ -896,7 +992,7 @@ ConstantValue Type::coerceValue(const ConstantValue& value) const {
     return nullptr;
 }
 
-static const Type* changeSign(Compilation& compilation, const Type& type, bool set) {
+static const Type* changeSign(const TypeProvider& typeProvider, const Type& type, bool set) {
     // This deliberately does not look at the canonical type; type aliases
     // are not convertible to a different signedness.
     SmallVector<ConstantRange, 4> dims;
@@ -916,30 +1012,32 @@ static const Type* changeSign(Compilation& compilation, const Type& type, bool s
         flags &= ~IntegralFlags::Signed;
 
     if (dims.size() == 1)
-        return &compilation.getType(type.getBitWidth(), flags);
+        return &typeProvider.getType(type.getBitWidth(), flags);
 
     // Rebuild the array with the new element type.
-    curr = &compilation.getScalarType(flags);
+    curr = &typeProvider.getScalarType(flags);
+    auto& alloc = typeProvider.alloc;
     size_t count = dims.size();
     for (size_t i = 0; i < count; i++) {
         // There's no worry about size overflow here because we started with a valid type.
         ConstantRange dim = dims[count - i - 1];
-        curr = compilation.emplace<PackedArrayType>(*curr, dim, curr->getBitWidth() * dim.width());
+        curr = alloc.emplace<PackedArrayType>(*curr, dim, curr->getBitWidth() * dim.width());
     }
 
     return curr;
 }
 
-const Type& Type::makeSigned(Compilation& compilation) const {
-    return *changeSign(compilation, *this, true);
+const Type& Type::makeSigned(const TypeProvider& typeProvider) const {
+    return *changeSign(typeProvider, *this, true);
 }
 
-const Type& Type::makeUnsigned(Compilation& compilation) const {
-    return *changeSign(compilation, *this, false);
+const Type& Type::makeUnsigned(const TypeProvider& typeProvider) const {
+    return *changeSign(typeProvider, *this, false);
 }
 
 std::string Type::toString() const {
     TypePrinter printer;
+    printer.options.skipTypeDefs = true;
     printer.append(*this);
     return printer.toString();
 }
@@ -947,21 +1045,15 @@ std::string Type::toString() const {
 size_t Type::hash() const {
     size_t h = size_t(kind);
     auto& ct = getCanonicalType();
-    if (ct.isScalar()) {
-        auto sk = ct.as<ScalarType>().scalarKind;
-        if (sk == ScalarType::Reg)
-            sk = ScalarType::Logic;
-        hash_combine(h, sk);
+    if (ct.isIntegral()) {
+        auto& it = ct.as<IntegralType>();
+        hash_combine(h, it.isSigned, it.isFourState, it.bitWidth);
     }
     else if (ct.isFloating()) {
         auto fk = ct.as<FloatingType>().floatKind;
         if (fk == FloatingType::RealTime)
             fk = FloatingType::Real;
         hash_combine(h, fk);
-    }
-    else if (ct.isIntegral()) {
-        auto& it = ct.as<IntegralType>();
-        hash_combine(h, it.isSigned, it.isFourState, it.bitWidth);
     }
     else if (ct.kind == SymbolKind::FixedSizeUnpackedArrayType) {
         auto& uat = ct.as<FixedSizeUnpackedArrayType>();
@@ -989,6 +1081,22 @@ size_t Type::hash() const {
         auto& vi = ct.as<VirtualInterfaceType>();
         hash_combine(h, &vi.iface);
         hash_combine(h, vi.modport);
+    }
+    else if (ct.kind == SymbolKind::UnpackedStructType) {
+        for (auto field : ct.as<UnpackedStructType>().fields) {
+            hash_combine(h, field->name);
+            hash_combine(h, field->fieldIndex);
+            hash_combine(h, field->getType().hash());
+        }
+    }
+    else if (ct.kind == SymbolKind::UnpackedUnionType) {
+        auto& uu = ct.as<UnpackedUnionType>();
+        hash_combine(h, uu.isTagged);
+        for (auto field : uu.fields) {
+            hash_combine(h, field->name);
+            hash_combine(h, field->fieldIndex);
+            hash_combine(h, field->getType().hash());
+        }
     }
     else {
         h = (size_t)slang::hash<const Type*>()(&ct);
@@ -1118,7 +1226,7 @@ const Type& Type::fromSyntax(Compilation& compilation, const DataTypeSyntax& nod
     }
 }
 
-const Type& Type::fromSyntax(Compilation& compilation, const Type& elementType,
+const Type& Type::fromSyntax(Compilation& comp, const Type& elementType,
                              const SyntaxList<VariableDimensionSyntax>& dimensions,
                              const ASTContext& context) {
     if (dimensions.empty())
@@ -1131,7 +1239,7 @@ const Type& Type::fromSyntax(Compilation& compilation, const Type& elementType,
             if (!context.flags.has(ASTFlags::AllowInterconnect)) {
                 context.addDiag(diag::InvalidArrayElemType, dimensions.sourceRange())
                     << elementType;
-                return compilation.getErrorType();
+                return comp.getErrorType();
             }
             break;
         default:
@@ -1149,32 +1257,32 @@ const Type& Type::fromSyntax(Compilation& compilation, const Type& elementType,
 
         switch (dim.kind) {
             case DimensionKind::Unknown:
-                return compilation.getErrorType();
+                return comp.getErrorType();
             case DimensionKind::Range:
             case DimensionKind::AbbreviatedRange:
-                result = &FixedSizeUnpackedArrayType::fromDim(*context.scope, *result, dim.range,
+                result = &FixedSizeUnpackedArrayType::fromDim(comp, context, *result, dim.range,
                                                               syntax);
                 break;
             case DimensionKind::Dynamic: {
-                auto next = compilation.emplace<DynamicArrayType>(*result);
+                auto next = comp.emplace<DynamicArrayType>(*result);
                 next->setSyntax(syntax);
                 result = next;
                 break;
             }
             case DimensionKind::DPIOpenArray: {
-                auto next = compilation.emplace<DPIOpenArrayType>(*result, /* isPacked */ false);
+                auto next = comp.emplace<DPIOpenArrayType>(*result, /* isPacked */ false);
                 next->setSyntax(syntax);
                 result = next;
                 break;
             }
             case DimensionKind::Associative: {
-                auto next = compilation.emplace<AssociativeArrayType>(*result, dim.associativeType);
+                auto next = comp.emplace<AssociativeArrayType>(*result, dim.associativeType);
                 next->setSyntax(syntax);
                 result = next;
                 break;
             }
             case DimensionKind::Queue: {
-                auto next = compilation.emplace<QueueType>(*result, dim.queueMaxSize);
+                auto next = comp.emplace<QueueType>(*result, dim.queueMaxSize);
                 next->setSyntax(syntax);
                 result = next;
                 break;
@@ -1243,11 +1351,11 @@ const Type& Type::lookupNamedType(Compilation& compilation, const NameSyntax& sy
     return fromLookupResult(compilation, result, syntax.sourceRange(), context);
 }
 
-const Type& Type::fromLookupResult(Compilation& compilation, const LookupResult& result,
+const Type& Type::fromLookupResult(Compilation& comp, const LookupResult& result,
                                    SourceRange sourceRange, const ASTContext& context) {
     const Symbol* symbol = result.found;
     if (!symbol)
-        return compilation.getErrorType();
+        return comp.getErrorType();
 
     if (!symbol->isType()) {
         if (symbol->kind == SymbolKind::NetType && context.flags.has(ASTFlags::AllowNetType)) {
@@ -1256,7 +1364,7 @@ const Type& Type::fromLookupResult(Compilation& compilation, const LookupResult&
         }
 
         context.addDiag(diag::NotAType, sourceRange) << symbol->name;
-        return compilation.getErrorType();
+        return comp.getErrorType();
     }
 
     const Type* finalType = &symbol->as<Type>();
@@ -1268,7 +1376,7 @@ const Type& Type::fromLookupResult(Compilation& compilation, const LookupResult&
         // fail the isType() check above.
         auto selectSyntax = std::get<const ElementSelectSyntax*>(result.selectors[count - i - 1]);
         auto dim = context.evalPackedDimension(*selectSyntax);
-        finalType = &PackedArrayType::fromSyntax(*context.scope, *finalType, dim, *selectSyntax);
+        finalType = &PackedArrayType::fromSyntax(context, *finalType, dim, *selectSyntax);
     }
 
     return *finalType;

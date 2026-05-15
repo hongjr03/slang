@@ -140,6 +140,21 @@ std::string_view SemanticFacts::getProcedureKindStr(ProceduralBlockKind kind) {
     SLANG_UNREACHABLE;
 }
 
+std::string_view SemanticFacts::getCaseConditionStr(CaseStatementCondition kind) {
+    switch (kind) {
+        case CaseStatementCondition::WildcardXOrZ:
+            return "casex"sv;
+        case CaseStatementCondition::WildcardJustZ:
+            return "casez"sv;
+        default:
+            return "case"sv;
+    }
+}
+
+std::string_view SemanticFacts::getSubroutineKindStr(SubroutineKind kind) {
+    return kind == SubroutineKind::Task ? "task"sv : "function"sv;
+}
+
 static DriveStrength getDriveStrengthVal(TokenKind kind) {
     switch (kind) {
         case TokenKind::Supply0Keyword:
@@ -257,6 +272,18 @@ std::string_view SemanticFacts::getTypeRestrictionText(ForwardTypeRestriction ty
     }
 }
 
+std::string_view SemanticFacts::getRangeSelectOpText(RangeSelectionKind kind) {
+    switch (kind) {
+        case RangeSelectionKind::Simple:
+            return ":"sv;
+        case RangeSelectionKind::IndexedUp:
+            return "+:"sv;
+        case RangeSelectionKind::IndexedDown:
+            return "-:"sv;
+    }
+    SLANG_UNREACHABLE;
+}
+
 void SemanticFacts::populateTimeScale(TimeScale& timeScale, const Scope& scope,
                                       const TimeUnitsDeclarationSyntax& syntax,
                                       std::optional<SourceRange>& unitsRange,
@@ -365,6 +392,14 @@ bool SemanticFacts::isAllowedInModport(SymbolKind kind) {
         default:
             return false;
     }
+}
+
+static const flat_hash_set<KnownSystemName> FutureGlobalNames = {
+    KnownSystemName::FutureGclk, KnownSystemName::RisingGclk, KnownSystemName::FallingGclk,
+    KnownSystemName::SteadyGclk, KnownSystemName::ChangingGclk};
+
+bool SemanticFacts::isGlobalFutureSampledValueFunc(KnownSystemName name) {
+    return FutureGlobalNames.contains(name);
 }
 
 ClockingSkew ClockingSkew::fromSyntax(const ClockingSkewSyntax& syntax, const ASTContext& context) {

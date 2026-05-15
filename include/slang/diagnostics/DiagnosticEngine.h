@@ -8,16 +8,21 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <typeindex>
 #include <typeinfo>
 
 #include "slang/diagnostics/Diagnostics.h"
-#include "slang/util/Hash.h"
+#include "slang/util/FlatMap.h"
 #include "slang/util/TypeTraits.h"
 
 namespace slang {
+
+namespace ast {
+class Symbol;
+}
 
 class DiagArgFormatter;
 class DiagnosticClient;
@@ -48,6 +53,9 @@ class SLANG_EXPORT DiagnosticEngine {
 public:
     /// Constructs a new diagnostic engine, using the specified source manager
     /// for reporting source-based information from diagnostics.
+    ///
+    /// @note All diagnostics passed to this engine must use locations that
+    /// are managed by the given source manager.
     explicit DiagnosticEngine(const SourceManager& sourceManager);
     ~DiagnosticEngine();
 
@@ -60,6 +68,9 @@ public:
     /// Issues a diagnostic to all registered clients. The issued diagnostic can
     /// be filtered or remapped based on current settings.
     void issue(const Diagnostic& diagnostic);
+
+    /// Issues all of the diagnostics in the provided collection.
+    void issue(const Diagnostics& diagnostics);
 
     /// Gets the source manager associated with the engine.
     const SourceManager& getSourceManager() const { return sourceManager; }
@@ -110,8 +121,14 @@ public:
     /// be used to define a new user-specified diagnostic.
     void setSeverity(DiagCode code, DiagnosticSeverity severity);
 
-    /// Sets the severity for all of diagnostics in the given group.
-    void setSeverity(const DiagGroup& group, DiagnosticSeverity severity);
+    /// Sets the baseline severity for the given diagnostic.
+    ///
+    /// Baseline severities are populated from compat settings and error-by-default
+    /// diagnostics, and are consulted after any user-specified severity overrides.
+    ///
+    /// Baseline severities can be explicitly overridden by the user but are *not* affected
+    /// by the user specifying Wnone.
+    void setBaselineSeverity(DiagCode code, DiagnosticSeverity severity);
 
     /// Gets the severity currently mapped for the given diagnostic, at the given
     /// location in the source code.
@@ -138,10 +155,11 @@ public:
 
     /// Clears out all custom mappings for diagnostics, reverting built-ins back to
     /// their defaults and removing all user-specified diagnostics.
+    /// This clears both user-specified and baseline severity tables.
     void clearMappings();
 
     /// Clears out all custom mappings for diagnostics that are set to the specific
-    /// severity type.
+    /// severity type. This clears matching entries from both user-specified and baseline tables.
     void clearMappings(DiagnosticSeverity severity);
 
     /// Adds paths for which all warnings will be supressed. This applies to
@@ -168,27 +186,60 @@ public:
         defaultFormatters[SLANG_TYPEOF(ForType)] = std::move(formatter);
     }
 
+    using FormatterMap = flat_hash_map<SLANG_TYPEINDEX, std::shared_ptr<DiagArgFormatter>>;
+
+    /// Gets the custom argument formatters registered with this diagnostic engine.
+    const FormatterMap& getFormatters() const;
+
+    using SymbolPathCB = std::function<std::string(const ast::Symbol&)>;
+
+    /// Sets a callback that will be used to get a symbol path for a given symbol.
+    template<typename TFunc>
+    void setSymbolPathCB(TFunc&& func) {
+        symbolPathCB = std::forward<TFunc>(func);
+    }
+
+    /// Gets the callback to use for getting a symbol path for a given symbol.
+    const SymbolPathCB& getSymbolPathCB() const { return symbolPathCB; }
+
+    /// Sets the default callback to use for getting a symbol path for a given symbol,
+    /// which will be used if a specific callback is not set on a DiagnosticEngine instance.
+    template<typename TFunc>
+    static void setDefaultSymbolPathCB(TFunc&& func) {
+        defaultSymbolPathCB = std::forward<TFunc>(func);
+    }
+
     /// Formats the given diagnostic using its arguments and the currently mapped
     /// message for its diagnostic code.
     std::string formatMessage(const Diagnostic& diag) const;
 
-    /// Initializes diagnostic warnings to the default group.
-    void setDefaultWarnings();
+    /// Formats a single diagnostic argument to a string.
+    /// @note Throws an exception if no formatter is found for the argument type.
+    std::string formatArg(const Diagnostic::CustomArgType& arg) const;
+
+    /// Formats a single diagnostic argument to a string.
+    /// @note Throws an exception if no formatter is found for the argument type.
+    std::string formatArg(const Diagnostic::Arg& arg) const;
 
     /// Sets diagnostic options from the given option strings, typically from a list of -W
     /// arguments passed to a command line invocation. Any errors encountered while parsing
     /// the options are returned via the diagnostics set.
     Diagnostics setWarningOptions(std::span<const std::string> options);
 
-    /// Sets diagnostic options from the `pragma diagnostic entries in all of the various
+    /// Sets diagnostic options from the pragma diagnostic entries in all of the various
     /// source files tracked by the engine's source manager. Any errors encountered
     /// while applying options are returned via the diagnostics set.
     Diagnostics setMappingsFromPragmas();
 
-    /// Sets diagnostic options from the `pragma diagnostic entries in the given
+    /// Sets diagnostic options from the pragma diagnostic entries in the given
     /// source file tracked by the engine's source manager. Any errors encountered
     /// while applying options are returned via the diagnostics set.
     Diagnostics setMappingsFromPragmas(BufferID buffer);
+
+    /// Sets per-buffer specific warning options that override the global ones.
+    /// Any errors encountered are returned via the diagnostics set.
+    Diagnostics setBufferWarningOptions(
+        const flat_hash_map<BufferID, std::vector<std::string>>& options);
 
     /// A helper function that takes a set of source ranges and translates them
     /// to be relevant to the given context location. For normal file ranges
@@ -207,6 +258,10 @@ public:
     static std::string reportAll(const SourceManager& sourceManager,
                                  std::span<const Diagnostic> diags);
 
+    /// Clears the set of buffers for which include stacks have been reported.
+    /// This allows include stacks to be reported again for the same buffers.
+    void clearIncludeStack();
+
 private:
     // An entry added by `pragma diagnostic at the given source offset which
     // sets a diagnostic to the given severity.
@@ -218,8 +273,23 @@ private:
             offset(offset), severity(severity) {}
     };
 
+    struct ParsedOptions {
+        flat_hash_map<DiagCode, DiagnosticSeverity> overrides;
+        bool ignoreAll = false;
+        bool enableAll = false;
+        bool warningsAsErrors = false;
+    };
+
+    // Parses the given -W option strings and applies them to the target severity map.
+    // If includeDefault is true, the "default" warning group is applied first.
+    void parseWarningOptions(std::span<const std::string> options, Diagnostics& diags,
+                             bool includeDefault, ParsedOptions& results);
+
     std::optional<DiagnosticSeverity> findMappedSeverity(DiagCode code,
                                                          SourceLocation location) const;
+    std::optional<DiagnosticSeverity> findPerBufferSeverity(DiagCode code, SourceLocation location,
+                                                            bool& overrideWarnAsError) const;
+
     bool issueImpl(const Diagnostic& diagnostic, DiagnosticSeverity severity);
 
     template<typename TDirective>
@@ -246,7 +316,13 @@ private:
     bool issuedOverLimitErr = false;
 
     // A global mapping from diagnostic to a configured severity it should have.
+    // Populated by user-specified options and direct setSeverity() calls.
     flat_hash_map<DiagCode, DiagnosticSeverity> severityTable;
+
+    // Baseline severity overrides populated by compat settings and error-by-default
+    // diagnostics. These are always applied and cannot be overridden by -Wnone,
+    // but they can be overridden by explicit user options.
+    flat_hash_map<DiagCode, DiagnosticSeverity> baselineSeverityTable;
 
     // A global mapping from diagnostic to the message it should display.
     flat_hash_map<DiagCode, std::string> messageTable;
@@ -259,6 +335,10 @@ private:
     // These correspond to `pragma diagnostic entries in the source code.
     flat_hash_map<DiagCode, flat_hash_map<BufferID, std::vector<DiagnosticMapping>>> diagMappings;
 
+    // Per-buffer warning state derived from compilation unit listing -W options.
+    // Checked in getSeverity after pragma-based mappings but before global settings.
+    flat_hash_map<BufferID, ParsedOptions> perBufferSeverity;
+
     // A list of path patterns in which to suppress warnings.
     std::vector<std::filesystem::path> ignoreWarnPatterns;
     std::vector<std::filesystem::path> ignoreMacroWarnPatterns;
@@ -266,9 +346,12 @@ private:
     // A list of all registered clients that receive issued diagnostics.
     std::vector<std::shared_ptr<DiagnosticClient>> clients;
 
+    // Callbacks for retrieving a path for symbol arguments in diagnostics.
+    SymbolPathCB symbolPathCB;
+    static SymbolPathCB defaultSymbolPathCB;
+
     // A map from type_index to a formatter for that type. Used to register custom
     // formatters for subsystem-specific types.
-    using FormatterMap = flat_hash_map<SLANG_TYPEINDEX, std::shared_ptr<DiagArgFormatter>>;
     mutable FormatterMap formatters;
 
     // A set of default formatters that will be assigned to each new DiagnosticEngine instance

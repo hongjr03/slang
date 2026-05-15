@@ -11,7 +11,7 @@
 
 #include "slang/numeric/MathUtils.h"
 #include "slang/text/FormatBuffer.h"
-#include "slang/util/Hash.h"
+#include "slang/util/FlatMap.h"
 
 namespace slang {
 
@@ -19,6 +19,7 @@ template<typename T>
 struct always_false : std::false_type {};
 
 const ConstantValue ConstantValue::Invalid;
+const ConstantValue NullConstant{ConstantValue::NullPlaceholder{}};
 
 std::string ConstantValue::toString(bitwidth_t abbreviateThresholdBits, bool exactUnknowns,
                                     bool useAssignmentPatterns) const {
@@ -253,6 +254,8 @@ bool ConstantValue::isTrue() const {
                 return (bool)arg;
             else if constexpr (std::is_same_v<T, ConstantValue::UnboundedPlaceholder>)
                 return true;
+            else if constexpr (std::is_same_v<T, std::string>)
+                return !arg.empty();
             else
                 return false;
         },
@@ -273,6 +276,8 @@ bool ConstantValue::isFalse() const {
                 return !(bool)arg;
             else if constexpr (std::is_same_v<T, ConstantValue::NullPlaceholder>)
                 return true;
+            else if constexpr (std::is_same_v<T, std::string>)
+                return arg.empty();
             else
                 return false;
         },
@@ -482,7 +487,6 @@ uint64_t ConstantValue::getBitstreamWidth() const {
     // Note that we don't have to worry about overflow in this
     // method because we have an artificial limit on how
     // large constant values are allowed to be.
-    // TODO: actually implement the mentioned limit
     if (isInteger())
         return integer().getBitWidth();
 
@@ -648,7 +652,7 @@ ConstantRange ConstantRange::subrange(ConstantRange select) const {
     result.right = select.upper() + l;
 
     SLANG_ASSERT(result.right <= upper());
-    if (isLittleEndian())
+    if (isDescending())
         return result;
     else
         return result.reverse();
@@ -665,7 +669,7 @@ ConstantRange ConstantRange::intersect(ConstantRange other) const {
 }
 
 int32_t ConstantRange::translateIndex(int32_t index) const {
-    if (!isLittleEndian())
+    if (!isDescending())
         return upper() - index;
     else
         return index - lower();
@@ -683,7 +687,7 @@ bool ConstantRange::overlaps(ConstantRange other) const {
     return lower() <= other.upper() && upper() >= other.lower();
 }
 
-std::optional<ConstantRange> ConstantRange::getIndexedRange(int32_t l, int32_t r, bool littleEndian,
+std::optional<ConstantRange> ConstantRange::getIndexedRange(int32_t l, int32_t r, bool descending,
                                                             bool indexedUp) {
     ConstantRange result;
     int32_t count = r - 1;
@@ -704,7 +708,7 @@ std::optional<ConstantRange> ConstantRange::getIndexedRange(int32_t l, int32_t r
         result.right = *lower;
     }
 
-    if (!littleEndian)
+    if (!descending)
         return result.reverse();
 
     return result;

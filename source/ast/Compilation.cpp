@@ -17,10 +17,9 @@
 #include "slang/ast/types/TypePrinter.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
 #include "slang/diagnostics/LookupDiags.h"
-#include "slang/diagnostics/StatementsDiags.h"
-#include "slang/diagnostics/TextDiagnosticClient.h"
 #include "slang/parsing/Parser.h"
 #include "slang/parsing/Preprocessor.h"
+#include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/text/CharInfo.h"
 #include "slang/text/SourceManager.h"
@@ -40,12 +39,11 @@ const PackageSymbol& createStdPackage(Compilation&);
 namespace slang::ast {
 
 Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
-    options(options.getOrDefault<CompilationOptions>()), driverMapAllocator(*this),
-    unrollIntervalMapAllocator(*this), tempDiag({}, {}), netAliasAllocator(*this),
+    options(options.getOrDefault<CompilationOptions>()), tempDiag({}, {}), netAliasAllocator(*this),
     defaultLibPtr(defaultLib) {
 
     // Construct all built-in types.
-    auto& bi = slang::ast::builtins::Builtins::Instance;
+    auto& bi = builtins::Builtins::Instance;
     bitType = &bi.bitType;
     logicType = &bi.logicType;
     intType = &bi.intType;
@@ -55,12 +53,9 @@ Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
     shortRealType = &bi.shortRealType;
     stringType = &bi.stringType;
     voidType = &bi.voidType;
-    errorType = &bi.errorType;
+    errorType = &ErrorType::Instance;
 
     auto regType = &bi.regType;
-    auto signedBitType = &bi.signedBitType;
-    auto signedLogicType = &bi.signedLogicType;
-    auto signedRegType = &bi.signedRegType;
     auto shortIntType = &bi.shortIntType;
     auto longIntType = &bi.longIntType;
     auto timeType = &bi.timeType;
@@ -125,21 +120,11 @@ Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
 
 #undef MAKE_NETTYPE
 
-    // Scalar types are indexed by bit flags.
-    auto registerScalar = [this](auto type) {
-        scalarTypeTable[type->getIntegralFlags().bits() & 0x7] = type;
-    };
-    registerScalar(bitType);
-    registerScalar(logicType);
-    registerScalar(regType);
-    registerScalar(signedBitType);
-    registerScalar(signedLogicType);
-    registerScalar(signedRegType);
-
     root = std::make_unique<RootSymbol>(*this);
 
     // Copy in all built-in system tasks, functions, and methods.
-    subroutineMap = bi.subroutineMap;
+    systemSubroutines = bi.systemSubroutines;
+    subroutineNameMap = bi.subroutineNameMap;
     methodMap = bi.methodMap;
 
     // Register the built-in std package.
@@ -164,11 +149,8 @@ Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
     static std::once_flag onceFlag;
     std::call_once(onceFlag, [] {
         DiagnosticEngine::setDefaultFormatter<const Type*>(std::make_unique<TypeArgFormatter>());
-        TextDiagnosticClient::setDefaultSymbolPathCB([](const Symbol& sym) {
-            std::string str;
-            sym.getHierarchicalPath(str);
-            return str;
-        });
+        DiagnosticEngine::setDefaultSymbolPathCB(
+            [](const Symbol& sym) { return sym.getHierarchicalPath(); });
     });
 
     // Reset systemId counters that may have been changed due to creation of types
@@ -181,6 +163,8 @@ Compilation::Compilation(const Bag& options, const SourceLibrary* defaultLib) :
 Compilation::~Compilation() = default;
 
 void Compilation::addSyntaxTree(std::shared_ptr<SyntaxTree> tree) {
+    SLANG_ASSERT(!isFrozen());
+
     if (!tree)
         SLANG_THROW(std::invalid_argument("tree cannot be null"));
 
@@ -216,7 +200,7 @@ void Compilation::addSyntaxTree(std::shared_ptr<SyntaxTree> tree) {
     root->addMember(*unit);
     compilationUnits.push_back(unit);
 
-    for (auto& [n, meta] : tree->getMetadata().nodeMap) {
+    for (auto& [n, meta] : tree->getMetadata().nodeMeta) {
         SyntaxMetadata result;
         result.tree = tree.get();
         result.defaultNetType = &getNetType(meta.defaultNetType);
@@ -234,11 +218,13 @@ void Compilation::addSyntaxTree(std::shared_ptr<SyntaxTree> tree) {
                 break;
         }
 
+        result.cellDefine = meta.cellDefine;
+
         syntaxMetadata[n] = result;
     }
 
-    for (auto& name : tree->getMetadata().globalInstances)
-        globalInstantiations.emplace(name);
+    for (auto& inst : tree->getMetadata().globalInstances)
+        globalInstantiations.emplace(inst->type.valueText());
 
     if (node.kind == SyntaxKind::CompilationUnit) {
         for (auto member : node.as<CompilationUnitSyntax>().members)
@@ -300,6 +286,8 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
     if (finalized)
         return *root;
 
+    SLANG_ASSERT(!isFrozen());
+
     // Resolve default lib list now that we have all syntax trees added.
     defaultLiblist.reserve(options.defaultLiblist.size());
     for (auto& libName : options.defaultLiblist) {
@@ -308,8 +296,8 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
     }
 
     // If any top-level parameter overrides were provided, parse them now.
-    flat_hash_map<std::string_view, const ConstantValue*> cliOverrides;
-    parseParamOverrides(cliOverrides);
+    flat_hash_map<std::string_view, HierarchyOverrideNode::ParamOverride> cliOverrides;
+    parseParamOverrides(skipDefParamsAndBinds, cliOverrides);
 
     // If there are defparams we need to fully resolve their values up front before
     // we start elaborating any instances.
@@ -368,9 +356,11 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
                     if (def.definitionKind == DefinitionKind::Module ||
                         def.definitionKind == DefinitionKind::Program) {
                         if (isValidTop(def)) {
-                            // This definition can be automatically instantiated.
+                            // This definition can be automatically instantiated. Break out
+                            // of the inner loop since there may be duplicate definitions
+                            // with the same name; we only want to instantiate one of them.
                             topDefs.push_back({{&def}, {}});
-                            continue;
+                            break;
                         }
                     }
                 }
@@ -516,9 +506,7 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
     });
     std::ranges::sort(unreferencedDefs, [](auto a, auto b) { return a->name < b->name; });
 
-    // If we have any cli param overrides we should apply them to
-    // each top-level instance.
-    // TODO: generalize these to full hierarchical paths
+    // If we have any cli param overrides we should apply them to each top-level instance.
     if (!cliOverrides.empty()) {
         for (auto [result, _] : topDefs) {
             auto& def = result.definition->as<DefinitionSymbol>();
@@ -527,7 +515,7 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
                     auto it = cliOverrides.find(param.name);
                     if (it != cliOverrides.end()) {
                         hierarchyOverrides.childNodes[*def.getSyntax()].paramOverrides.emplace(
-                            param.valueDecl, std::pair{*it->second, nullptr});
+                            param.valueDecl, it->second);
                     }
                 }
             }
@@ -549,13 +537,17 @@ const RootSymbol& Compilation::getRoot(bool skipDefParamsAndBinds) {
         topList.push_back(&instance);
     }
 
-    if (!hasFlag(CompilationFlags::SuppressUnused) && topDefs.empty())
+    if (!hasFlag(CompilationFlags::LintMode | CompilationFlags::AllowTopLevelIfacePorts) &&
+        topDefs.empty()) {
         root->addDiag(diag::NoTopModules, SourceLocation::NoLocation);
+    }
 
     // For unreferenced definitions, go through and instantiate them with all empty
     // parameter values so that we get at least some semantic checking of the contents.
-    for (auto def : unreferencedDefs)
-        root->addMember(InstanceSymbol::createInvalid(*this, *def));
+    if (!hasFlag(CompilationFlags::IgnoreUninstantiatedModules)) {
+        for (auto def : unreferencedDefs)
+            root->addMember(InstanceSymbol::createInvalid(*this, *def));
+    }
 
     root->topInstances = topList.copy(*this);
     root->compilationUnits = compilationUnits;
@@ -629,12 +621,18 @@ static Token getExternNameToken(const SyntaxNode& sn) {
                                                    : sn.as<ExternUdpDeclSyntax>().name;
 }
 
-Compilation::DefinitionLookupResult Compilation::getDefinition(std::string_view name,
-                                                               const Scope& scope,
-                                                               SourceRange sourceRange,
-                                                               DiagCode code) const {
+Compilation::DefinitionLookupResult Compilation::getDefinition(
+    std::string_view name, const Scope& scope, SourceRange sourceRange, DiagCode code,
+    std::span<syntax::AttributeInstanceSyntax* const> attributes) const {
     if (auto result = tryGetDefinition(name, scope); result.definition)
         return result;
+
+    for (auto attrInst : attributes) {
+        for (auto spec : attrInst->specs) {
+            if (spec->name.valueText() == "maybe_unknown"sv)
+                return {};
+        }
+    }
 
     errorMissingDef(name, scope, sourceRange, code);
     return {};
@@ -702,15 +700,7 @@ Compilation::DefinitionLookupResult Compilation::getDefinition(
 const DefinitionSymbol* Compilation::getDefinition(const Scope& scope,
                                                    const ModuleDeclarationSyntax& syntax) const {
     if (auto it = definitionFromSyntax.find(&syntax); it != definitionFromSyntax.end()) {
-        SmallMap<const Scope*, const DefinitionSymbol*, 4> scopeMap;
-        for (auto def : it->second) {
-            auto insertScope = def->getParentScope();
-            if (insertScope && insertScope->asSymbol().kind == SymbolKind::CompilationUnit)
-                insertScope = root.get();
-
-            scopeMap[insertScope] = def;
-        }
-
+        auto& scopeMap = it->second;
         auto lookupScope = &scope;
         do {
             if (auto scopeIt = scopeMap.find(lookupScope); scopeIt != scopeMap.end())
@@ -806,6 +796,8 @@ static void checkExternUdpMatch(const Scope& scope, const UdpPortListSyntax& ext
 
 void Compilation::createDefinition(const Scope& scope, LookupLocation location,
                                    const ModuleDeclarationSyntax& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     // We can only be missing metadata if the definition is created programmatically
     // (i.e. not via the parser) so we just fill in the parent's default net type
     // so that it's not a null pointer.
@@ -816,19 +808,22 @@ void Compilation::createDefinition(const Scope& scope, LookupLocation location,
     auto def = definitionMemory
                    .emplace_back(std::make_unique<DefinitionSymbol>(
                        scope, location, syntax, *metadata.defaultNetType, metadata.unconnectedDrive,
-                       metadata.timeScale, metadata.tree))
+                       metadata.cellDefine, metadata.timeScale, metadata.tree))
                    .get();
-    definitionFromSyntax[&syntax].push_back(def);
 
     insertDefinition(*def, scope);
 
     auto targetScope = scope.asSymbol().kind == SymbolKind::CompilationUnit ? root.get() : &scope;
+    definitionFromSyntax[&syntax][targetScope] = def;
+
     const bool isRoot = targetScope == root.get();
     if (isRoot)
         checkElemTimeScale(def->timeScale, syntax.header->name.range());
 }
 
 void Compilation::insertDefinition(Symbol& symbol, const Scope& scope) {
+    SLANG_ASSERT(!isFrozen());
+
     auto reportRedefinition = [&](SourceLocation oldLoc, DiagCode code) {
         if (!symbol.name.empty()) {
             auto& diag = scope.addDiag(code, symbol.location);
@@ -873,9 +868,26 @@ void Compilation::insertDefinition(Symbol& symbol, const Scope& scope) {
                 auto vSym = *v;
                 auto vLib = vSym->getSourceLibrary();
                 if (vLib == symLib) {
-                    // Duplicate in the same library. If they are both the same kind
-                    // then we report a warning and take the first one, otherwise
-                    // we give a hard error.
+                    // Duplicate in the same library.
+                    if (hasFlag(CompilationFlags::AllowLibModuleRedefinition)) {
+                        // Silently keep the first definition and discard all subsequent ones,
+                        // but only when the incoming duplicate comes from a library file.
+                        if (symbol.kind == SymbolKind::Definition) {
+                            auto st = symbol.as<DefinitionSymbol>().syntaxTree;
+                            if (st && st->isLibraryUnit)
+                                return;
+                        }
+                        else if (sourceManager) {
+                            auto loc = symbol.location;
+                            if (loc.valid() && sourceManager->getBufferKind(loc.buffer()) ==
+                                                   SourceManager::BufferKind::LibraryFile) {
+                                return;
+                            }
+                        }
+                    }
+
+                    // If they are both the same kind then we report a warning and
+                    // take the first one, otherwise we give a hard error.
                     if (vSym->kind == symbol.kind) {
                         if (!warned) {
                             // We keep going after this because there might also
@@ -905,7 +917,6 @@ void Compilation::insertDefinition(Symbol& symbol, const Scope& scope) {
     }
 
     if (isRoot) {
-        // TODO: how do extern modules work with libraries?
         if (auto externDef = getExternDefinition(symbol.name, scope)) {
             auto syntax = symbol.getSyntax();
             SLANG_ASSERT(syntax);
@@ -942,6 +953,8 @@ const PackageSymbol* Compilation::getPackage(std::string_view lookupName) const 
 
 const PackageSymbol& Compilation::createPackage(const Scope& scope,
                                                 const ModuleDeclarationSyntax& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     auto& metadata = syntaxMetadata[&syntax];
     if (!metadata.defaultNetType)
         metadata.defaultNetType = &scope.getDefaultNetType();
@@ -952,7 +965,7 @@ const PackageSymbol& Compilation::createPackage(const Scope& scope,
     auto [it, inserted] = packageMap.emplace(package.name, &package);
     if (!inserted && !package.name.empty() &&
         scope.asSymbol().kind == SymbolKind::CompilationUnit) {
-        auto& diag = scope.addDiag(diag::Redefinition, package.location);
+        auto& diag = scope.addDiag(diag::DuplicateDefinition, package.location);
         diag << package.name;
         diag.addNote(diag::NotePreviousDefinition, it->second->location);
     }
@@ -964,6 +977,8 @@ const PackageSymbol& Compilation::createPackage(const Scope& scope,
 
 const ConfigBlockSymbol& Compilation::createConfigBlock(const Scope& scope,
                                                         const ConfigDeclarationSyntax& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     auto& config = ConfigBlockSymbol::fromSyntax(scope, syntax);
 
     // Register lookups by syntax node. Note that we register rule entries here
@@ -1000,6 +1015,8 @@ const ConfigBlockSymbol& Compilation::createConfigBlock(const Scope& scope,
 
 const PrimitiveSymbol& Compilation::createPrimitive(Scope& scope,
                                                     const UdpDeclarationSyntax& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     auto& prim = PrimitiveSymbol::fromSyntax(scope, syntax);
     scope.addMember(prim);
     insertDefinition(prim, scope);
@@ -1013,24 +1030,37 @@ const PrimitiveSymbol* Compilation::getGateType(std::string_view lookupName) con
 }
 
 void Compilation::addGateType(const PrimitiveSymbol& prim) {
+    SLANG_ASSERT(!isFrozen());
     SLANG_ASSERT(!prim.name.empty());
     gateMap.emplace(prim.name, &prim);
 }
 
 void Compilation::addSystemSubroutine(const std::shared_ptr<SystemSubroutine>& subroutine) {
-    subroutineMap.emplace(subroutine->name, subroutine);
+    SLANG_ASSERT(!isFrozen());
+    SLANG_ASSERT(!subroutine->name.empty());
+    SLANG_ASSERT(subroutine->knownNameId == KnownSystemName::Unknown);
+    subroutineNameMap.emplace(subroutine->name, subroutine);
 }
 
 void Compilation::addSystemMethod(SymbolKind typeKind,
                                   const std::shared_ptr<SystemSubroutine>& method) {
+    SLANG_ASSERT(!isFrozen());
+    SLANG_ASSERT(!method->name.empty());
+    SLANG_ASSERT(method->knownNameId == KnownSystemName::Unknown);
     methodMap.emplace(std::make_tuple(std::string_view(method->name), typeKind), method);
 }
 
 const SystemSubroutine* Compilation::getSystemSubroutine(std::string_view name) const {
-    auto it = subroutineMap.find(name);
-    if (it == subroutineMap.end())
+    auto it = subroutineNameMap.find(name);
+    if (it == subroutineNameMap.end())
         return nullptr;
     return it->second.get();
+}
+
+const SystemSubroutine* Compilation::getSystemSubroutine(
+    parsing::KnownSystemName knownNameId) const {
+
+    return systemSubroutines[(size_t)knownNameId].get();
 }
 
 const SystemSubroutine* Compilation::getSystemMethod(SymbolKind typeKind,
@@ -1087,21 +1117,31 @@ std::span<const AttributeSymbol* const> Compilation::getAttributes(const void* p
 }
 
 void Compilation::noteBindDirective(const BindDirectiveSyntax& syntax, const Scope& scope) {
-    if (!scope.isUninstantiated())
+    SLANG_ASSERT(!isFrozen());
+
+    if (!scope.isUninstantiated()) {
         bindDirectives.emplace_back(&syntax, &scope);
+        noteCannotCache(scope);
+    }
 }
 
 void Compilation::noteInstanceWithDefBind(const Symbol& instance) {
+    SLANG_ASSERT(!isFrozen());
+
     auto& def = instance.as<InstanceBodySymbol>().getDefinition();
     instancesWithDefBinds[&def].push_back(&instance);
 }
 
 void Compilation::noteDPIExportDirective(const DPIExportSyntax& syntax, const Scope& scope) {
-    dpiExports.emplace_back(&syntax, &scope);
+    SLANG_ASSERT(!isFrozen());
+
+    dpiExportDirectives.emplace_back(&syntax, &scope);
 }
 
 void Compilation::addOutOfBlockDecl(const Scope& scope, const ScopedNameSyntax& name,
                                     const SyntaxNode& syntax, SymbolIndex index) {
+    SLANG_ASSERT(!isFrozen());
+
     std::string_view className = name.left->getLastToken().valueText();
     std::string_view declName = name.right->getLastToken().valueText();
     auto [it, inserted] = outOfBlockDecls.emplace(std::make_tuple(className, declName, &scope),
@@ -1130,20 +1170,37 @@ std::tuple<const SyntaxNode*, SymbolIndex, bool*> Compilation::findOutOfBlockDec
 }
 
 void Compilation::addExternInterfaceMethod(const SubroutineSymbol& method) {
+    SLANG_ASSERT(!isFrozen());
     externInterfaceMethods.push_back(&method);
 }
 
 void Compilation::noteDefaultClocking(const Scope& scope, const Symbol& clocking,
                                       SourceRange range) {
-    auto [it, inserted] = defaultClockingMap.emplace(&scope, &clocking);
-    if (!inserted) {
-        auto& diag = scope.addDiag(diag::MultipleDefaultClocking, range);
-        diag.addNote(diag::NotePreviousDefinition, it->second->location);
+    SLANG_ASSERT(!isFrozen());
+
+    if (scope.isUninstantiated())
+        return;
+
+    // The LRM is not clear about this, but this Accellera issue states
+    // that default clocking declarations inside child scopes actually
+    // belong to the parent instance body. Only VCS implements this correctly,
+    // other tools treat it the way you'd naturally expect.
+    // https://accellera.mantishub.io/view.php?id=3515
+
+    auto inst = scope.getContainingInstanceOrChecker();
+    if (inst) {
+        auto [it, inserted] = defaultClockingMap.emplace(inst, &clocking);
+        if (!inserted) {
+            auto& diag = scope.addDiag(diag::MultipleDefaultClocking, range);
+            diag.addNote(diag::NotePreviousDefinition, it->second->location);
+        }
     }
 }
 
 void Compilation::noteDefaultClocking(const ASTContext& context,
                                       const DefaultClockingReferenceSyntax& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     auto name = syntax.name.valueText();
     auto range = syntax.name.range();
     auto sym = Lookup::unqualifiedAt(*context.scope, name, context.getLocation(), range);
@@ -1161,19 +1218,23 @@ void Compilation::noteDefaultClocking(const ASTContext& context,
 }
 
 const Symbol* Compilation::getDefaultClocking(const Scope& scope) const {
-    auto curr = &scope;
-    while (true) {
-        if (auto it = defaultClockingMap.find(curr); it != defaultClockingMap.end())
-            return it->second;
+    auto lookupSym = scope.getContainingInstanceOrChecker();
+    if (auto it = defaultClockingMap.find(lookupSym); it != defaultClockingMap.end())
+        return it->second;
 
-        curr = curr->asSymbol().getParentScope();
-        if (!curr || curr->asSymbol().kind == SymbolKind::CompilationUnit)
-            return nullptr;
+    // If we're in a checker we can inherit from the containing instance.
+    if (lookupSym && lookupSym->kind == SymbolKind::CheckerInstanceBody) {
+        if (auto parent = lookupSym->getParentScope())
+            return getDefaultClocking(*parent);
     }
+
+    return nullptr;
 }
 
 void Compilation::noteGlobalClocking(const Scope& scope, const Symbol& clocking,
                                      SourceRange range) {
+    SLANG_ASSERT(!isFrozen());
+
     auto [it, inserted] = globalClockingMap.emplace(&scope, &clocking);
     if (!inserted) {
         auto& diag = scope.addDiag(diag::MultipleGlobalClocking, range);
@@ -1181,19 +1242,34 @@ void Compilation::noteGlobalClocking(const Scope& scope, const Symbol& clocking,
     }
 }
 
-const Symbol* Compilation::getGlobalClocking(const Scope& scope) const {
+const Symbol* Compilation::getGlobalClockingAndNoteUse(const Scope& scope) {
+    SLANG_ASSERT(!isFrozen());
+
+    size_t upwardCount = 0;
     auto curr = &scope;
     do {
-        if (auto it = globalClockingMap.find(curr); it != globalClockingMap.end())
-            return it->second;
+        if (auto it = globalClockingMap.find(curr); it != globalClockingMap.end()) {
+            auto found = it->second;
+            if (upwardCount > 0) {
+                auto ref = emplace<HierarchicalReference>();
+                ref->target = found;
+                ref->upwardCount = upwardCount;
+                noteUpwardReference(scope, *ref);
+            }
+
+            return found;
+        }
 
         curr = curr->asSymbol().getHierarchicalParent();
+        upwardCount++;
     } while (curr);
 
     return nullptr;
 }
 
 void Compilation::noteDefaultDisable(const Scope& scope, const Expression& expr) {
+    SLANG_ASSERT(!isFrozen());
+
     auto [it, inserted] = defaultDisableMap.emplace(&scope, &expr);
     if (!inserted) {
         auto& diag = scope.addDiag(diag::MultipleDefaultDisable, expr.sourceRange);
@@ -1202,16 +1278,17 @@ void Compilation::noteDefaultDisable(const Scope& scope, const Expression& expr)
 }
 
 void Compilation::noteNameConflict(const Symbol& symbol) {
+    SLANG_ASSERT(!isFrozen());
     nameConflicts.push_back(&symbol);
 }
 
-void Compilation::noteNetAlias(const Scope& scope, const Symbol& firstSym,
-                               DriverBitRange firstRange, const Expression& firstExpr,
-                               const Symbol& secondSym, DriverBitRange secondRange,
-                               const Expression& secondExpr) {
+void Compilation::noteNetAlias(const Scope& scope, const Symbol& firstSym, AliasBitRange firstRange,
+                               const Expression& firstExpr, const Symbol& secondSym,
+                               AliasBitRange secondRange, const Expression& secondExpr) {
+    SLANG_ASSERT(!isFrozen());
     SLANG_ASSERT(firstRange.second - firstRange.first == secondRange.second - secondRange.first);
 
-    auto overlaps = [](DriverBitRange a, DriverBitRange b) {
+    auto overlaps = [](AliasBitRange a, AliasBitRange b) {
         return a.first <= b.second && b.first <= a.second;
     };
 
@@ -1219,7 +1296,7 @@ void Compilation::noteNetAlias(const Scope& scope, const Symbol& firstSym,
     const Symbol* b = &secondSym;
     const Expression* firstExprPtr = &firstExpr;
     const Expression* secondExprPtr = &secondExpr;
-    if (a > b) {
+    if (b->isDeclaredBefore(*a).value_or(false)) {
         std::swap(a, b);
         std::swap(firstRange, secondRange);
         std::swap(firstExprPtr, secondExprPtr);
@@ -1254,6 +1331,50 @@ void Compilation::noteNetAlias(const Scope& scope, const Symbol& firstSym,
     }
 }
 
+void Compilation::noteUpwardReference(const Scope& initialScope, const HierarchicalReference& ref) {
+    SLANG_ASSERT(!isFrozen());
+    SLANG_ASSERT(ref.isUpward());
+
+    size_t count = ref.upwardCount;
+    if (count == 0) {
+        // If the name targets the root scope the count doesn't mean
+        // anything, we should walk all the way up.
+        count = SIZE_MAX;
+    }
+
+    auto currScope = &initialScope;
+    for (size_t i = 0; i < count; i++) {
+        auto& sym = currScope->asSymbol();
+        if (sym.kind == SymbolKind::Root)
+            break;
+
+        if (sym.kind == SymbolKind::InstanceBody) {
+            auto& entry = getOrAddSideEffects(sym);
+            entry.upwardNames.push_back(&ref);
+        }
+
+        currScope = sym.getHierarchicalParent();
+        SLANG_ASSERT(currScope);
+    }
+}
+
+void Compilation::noteHierarchicalAssignment(const HierarchicalReference& ref) {
+    SLANG_ASSERT(!isFrozen());
+    hierarchicalAssignments.push_back(&ref);
+}
+
+const InstanceSymbol& Compilation::getOrAddVirtualIface(const InstanceSymbol& symbol) {
+    bool valid = true;
+    SmallSet<const InstanceSymbol*, 2> visited;
+    InstanceCacheKey key(symbol, valid, visited);
+
+    auto [it, inserted] = virtualIfaceCache.try_emplace(std::move(key), &symbol);
+    if (inserted)
+        virtualIfaceInstances.push_back(it->second);
+
+    return *it->second;
+}
+
 const Expression* Compilation::getDefaultDisable(const Scope& scope) const {
     auto curr = &scope;
     while (true) {
@@ -1267,6 +1388,8 @@ const Expression* Compilation::getDefaultDisable(const Scope& scope) const {
 }
 
 void Compilation::noteExternDefinition(const Scope& scope, const SyntaxNode& syntax) {
+    SLANG_ASSERT(!isFrozen());
+
     auto nameToken = getExternNameToken(syntax);
     auto name = nameToken.valueText();
     if (name.empty())
@@ -1295,19 +1418,22 @@ void Compilation::noteExternDefinition(const Scope& scope, const SyntaxNode& syn
 
 const SyntaxNode* Compilation::getExternDefinition(std::string_view name,
                                                    const Scope& scope) const {
-    const Scope* searchScope = &scope;
-    do {
-        auto it = externDefMap.find(std::make_tuple(name, searchScope));
-        if (it != externDefMap.end())
-            return it->second;
+    if (!externDefMap.empty()) {
+        const Scope* searchScope = &scope;
+        do {
+            auto it = externDefMap.find(std::make_tuple(name, searchScope));
+            if (it != externDefMap.end())
+                return it->second;
 
-        searchScope = searchScope->asSymbol().getParentScope();
-    } while (searchScope);
+            searchScope = searchScope->asSymbol().getParentScope();
+        } while (searchScope);
+    }
 
     return nullptr;
 }
 
 void Compilation::noteReference(const SyntaxNode& node, bool isLValue) {
+    SLANG_ASSERT(!isFrozen());
     auto [it, inserted] = referenceStatusMap.emplace(&node, std::pair{!isLValue, isLValue});
     if (!inserted) {
         it->second.first |= !isLValue;
@@ -1316,6 +1442,7 @@ void Compilation::noteReference(const SyntaxNode& node, bool isLValue) {
 }
 
 void Compilation::noteReference(const Symbol& symbol, bool isLValue) {
+    SLANG_ASSERT(!isFrozen());
     if (auto syntax = symbol.getSyntax())
         noteReference(*syntax, isLValue);
 }
@@ -1333,17 +1460,16 @@ const NameSyntax& Compilation::parseName(std::string_view name) {
     auto& result = tryParseName(name, localDiags);
 
     if (!localDiags.empty()) {
-        SourceManager& sourceMan = SyntaxTree::getDefaultSourceManager();
-        localDiags.sort(sourceMan);
-        SLANG_THROW(std::runtime_error(DiagnosticEngine::reportAll(sourceMan, localDiags)));
+        localDiags.sort(*sourceManager);
+        SLANG_THROW(std::runtime_error(DiagnosticEngine::reportAll(*sourceManager, localDiags)));
     }
 
     return result;
 }
 
 const NameSyntax& Compilation::tryParseName(std::string_view name, Diagnostics& localDiags) {
-    SourceManager& sourceMan = SyntaxTree::getDefaultSourceManager();
-    Preprocessor preprocessor(sourceMan, *this, localDiags);
+    SLANG_ASSERT(sourceManager);
+    Preprocessor preprocessor(*sourceManager, *this, localDiags);
     preprocessor.pushSource(name);
 
     Parser parser(preprocessor);
@@ -1351,22 +1477,36 @@ const NameSyntax& Compilation::tryParseName(std::string_view name, Diagnostics& 
 }
 
 CompilationUnitSymbol& Compilation::createScriptScope() {
+    SLANG_ASSERT(!isFrozen());
+
     auto unit = emplace<CompilationUnitSymbol>(*this, getDefaultLibrary());
     root->addMember(*unit);
     return *unit;
 }
 
 void Compilation::elaborate() {
+    SLANG_ASSERT(!isFrozen());
+
+    // Make sure our root is created. It's possible that this results in a fatal
+    // error if defparam resolution sees an infinitely recursive hierarchy,
+    // in which case we should get out early.
+    auto& rootSym = getRoot();
+    if (sawFatalError)
+        return;
+
     // Touch every symbol, scope, statement, and expression tree so that
     // we can be sure we have all the diagnostics.
     uint32_t errorLimit = options.errorLimit == 0 ? UINT32_MAX : options.errorLimit;
     DiagnosticVisitor elabVisitor(*this, numErrors, errorLimit);
-    getRoot().visit(elabVisitor);
+    rootSym.visit(elabVisitor);
 
-    if (elabVisitor.finishedEarly())
+    if (!elabVisitor.finishedEarly())
+        elabVisitor.finalize();
+
+    if (elabVisitor.finishedEarly()) {
+        sawFatalError = true;
         return;
-
-    elabVisitor.finalize();
+    }
 
     // Note for the following checks here: anything that depends on a list
     // stored in the compilation object should think carefully about taking
@@ -1375,7 +1515,7 @@ void Compilation::elaborate() {
     // causing undefined behavior.
 
     // Check all DPI methods for correctness.
-    if (!dpiExports.empty() || !elabVisitor.dpiImports.empty())
+    if (!dpiExportDirectives.empty() || !elabVisitor.dpiImports.empty())
         checkDPIMethods(elabVisitor.dpiImports);
 
     // Check extern interface methods for correctness.
@@ -1478,37 +1618,32 @@ void Compilation::elaborate() {
         }
     }
 
-    if (!hasFlag(CompilationFlags::SuppressUnused)) {
-        TimeTraceScope timeScope("postElabVisitors"sv, ""sv);
-
-        // Report on unused definitions.
-        for (auto def : unreferencedDefs) {
-            // If this is an interface, it may have been referenced in a port.
-            if (elabVisitor.usedIfacePorts.find(def) != elabVisitor.usedIfacePorts.end())
-                continue;
-
-            auto hasUnusedAttrib = [&] {
-                for (auto attr : getAttributes(*def)) {
-                    if (attr->name == "unused"sv || attr->name == "maybe_unused"sv)
-                        return attr->getValue().isTrue();
-                }
-                return false;
-            };
-
-            if (!def->name.empty() && def->name != "_"sv && !hasUnusedAttrib()) {
-                def->getParentScope()->addDiag(diag::UnusedDefinition, def->location)
-                    << def->getKindString();
-            }
-        }
-
-        PostElabVisitor postElabVisitor(*this);
-        getRoot().visit(postElabVisitor);
+    // Remove definitions from the "unused" set if they were referenced
+    // in an interface port somewhere.
+    std::vector<const DefinitionSymbol*> newUnreferencedDefs;
+    newUnreferencedDefs.reserve(unreferencedDefs.size());
+    for (auto def : unreferencedDefs) {
+        if (elabVisitor.usedIfacePorts.find(def) == elabVisitor.usedIfacePorts.end())
+            newUnreferencedDefs.push_back(def);
     }
+    unreferencedDefs = std::move(newUnreferencedDefs);
+}
+
+size_t Compilation::getTotalBytesAllocated() const {
+    return BumpAllocator::getTotalBytesAllocated() + symbolMapAllocator.getTotalBytesAllocated() +
+           pointerMapAllocator.getTotalBytesAllocated() +
+           constantAllocator.getTotalBytesAllocated() +
+           genericClassAllocator.getTotalBytesAllocated() +
+           assertionDetailsAllocator.getTotalBytesAllocated() +
+           configBlockAllocator.getTotalBytesAllocated() +
+           wildcardImportAllocator.getTotalBytesAllocated();
 }
 
 const Diagnostics& Compilation::getParseDiagnostics() {
     if (cachedParseDiagnostics)
         return *cachedParseDiagnostics;
+
+    SLANG_ASSERT(!isFrozen());
 
     cachedParseDiagnostics.emplace();
     for (auto& tree : syntaxTrees)
@@ -1526,110 +1661,15 @@ const Diagnostics& Compilation::getSemanticDiagnostics() {
     // Elaborate the design.
     elaborate();
 
-    Diagnostics results;
-    for (auto& [key, diagList] : diagMap) {
-        // If the location is NoLocation, just issue each diagnostic.
-        if (std::get<1>(key) == SourceLocation::NoLocation) {
-            for (auto& diag : diagList)
-                results.emplace_back(diag);
-            continue;
-        }
-
-        // Try to find a diagnostic in an instance that isn't at the top-level
-        // (printing such a path seems silly).
-        const Diagnostic* found = nullptr;
-        const Symbol* inst = nullptr;
-        size_t count = 0;
-        bool differingArgs = false;
-
-        for (auto& diag : diagList) {
-            if (found && *found != diag) {
-                differingArgs = true;
-                break;
-            }
-
-            auto symbol = diag.symbol;
-            while (symbol && symbol->kind != SymbolKind::InstanceBody) {
-                const Scope* scope;
-                if (symbol->kind == SymbolKind::CheckerInstanceBody) {
-                    auto& checkerBody = symbol->as<CheckerInstanceBodySymbol>();
-                    SLANG_ASSERT(checkerBody.parentInstance);
-                    scope = checkerBody.parentInstance->getParentScope();
-
-                    // Add an expansion note to the diagnostic since
-                    // we won't have added it yet for the checker.
-                    if (!checkerBody.flags.has(InstanceFlags::Uninstantiated)) {
-                        diag.addNote(diag::NoteWhileExpanding, checkerBody.parentInstance->location)
-                            << "checker"sv << checkerBody.checker.name;
-                    }
-                }
-                else {
-                    scope = symbol->getParentScope();
-                }
-
-                symbol = scope ? &scope->asSymbol() : nullptr;
-            }
-
-            if (!symbol)
-                continue;
-
-            auto parent = symbol->as<InstanceBodySymbol>().parentInstance;
-            SLANG_ASSERT(parent);
-
-            count++;
-            if (auto scope = parent->getParentScope()) {
-                auto& sym = scope->asSymbol();
-                if (sym.kind != SymbolKind::Root && sym.kind != SymbolKind::CompilationUnit) {
-                    found = &diag;
-                    inst = parent;
-                }
-            }
-        }
-
-        if (!differingArgs && found &&
-            inst->as<InstanceSymbol>().getDefinition().getInstanceCount() > count) {
-            // The diagnostic is present only in some instances, so include the coalescing
-            // information to point the user towards the right ones.
-            Diagnostic diag = *found;
-            diag.symbol = inst;
-            diag.coalesceCount = count;
-            results.emplace_back(std::move(diag));
-        }
-        else {
-            // Otherwise no coalescing. If we had differing arguments then set each
-            // diagnostic's coalesce count to 1 (as opposed to letting it stay nullopt)
-            // so that we get the instance path to it printed automatically.
-            auto it = diagList.begin();
-            SLANG_ASSERT(it != diagList.end());
-
-            {
-                Diagnostic d = *it;
-                if (differingArgs)
-                    d.coalesceCount = 1;
-                results.emplace_back(std::move(d));
-            }
-
-            for (++it; it != diagList.end(); ++it) {
-                Diagnostic d = *it;
-                if (d != results.back()) {
-                    if (differingArgs)
-                        d.coalesceCount = 1;
-                    results.emplace_back(std::move(d));
-                }
-            }
-        }
-    }
-
-    if (sourceManager)
-        results.sort(*sourceManager);
-
-    cachedSemanticDiagnostics.emplace(std::move(results));
+    cachedSemanticDiagnostics.emplace(diagMap.coalesce(sourceManager));
     return *cachedSemanticDiagnostics;
 }
 
 const Diagnostics& Compilation::getAllDiagnostics() {
     if (cachedAllDiagnostics)
         return *cachedAllDiagnostics;
+
+    SLANG_ASSERT(!isFrozen());
 
     cachedAllDiagnostics.emplace();
     cachedAllDiagnostics->append_range(getParseDiagnostics());
@@ -1641,11 +1681,19 @@ const Diagnostics& Compilation::getAllDiagnostics() {
 }
 
 void Compilation::addDiagnostics(const Diagnostics& diagnostics) {
+    SLANG_ASSERT(!isFrozen());
     for (auto& diag : diagnostics)
         addDiag(diag);
 }
 
 Diagnostic& Compilation::addDiag(Diagnostic diag) {
+    SLANG_ASSERT(!isFrozen());
+
+    if (diagsDisabled) {
+        tempDiag = std::move(diag);
+        return tempDiag;
+    }
+
     auto isSuppressed = [](const Symbol* symbol) {
         while (symbol) {
             if (symbol->kind == SymbolKind::GenerateBlock)
@@ -1665,46 +1713,48 @@ Diagnostic& Compilation::addDiag(Diagnostic diag) {
         return tempDiag;
     }
 
-    // Coalesce diagnostics that are at the same source location and have the same code.
-    if (auto it = diagMap.find({diag.code, diag.location}); it != diagMap.end()) {
-        auto& diagList = it->second;
-        diagList.emplace_back(std::move(diag));
-        return diagList.back();
-    }
+    const bool isError = diag.isError();
 
-    if (diag.isError())
+    bool isNew;
+    auto& result = diagMap.add(std::move(diag), isNew);
+    if (isNew && isError)
         numErrors++;
 
-    auto key = std::make_tuple(diag.code, diag.location);
-    std::vector<Diagnostic> newEntry;
-    newEntry.emplace_back(std::move(diag));
-
-    auto [it, inserted] = diagMap.emplace(key, std::move(newEntry));
-    return it->second.back();
+    return result;
 }
 
 AssertionInstanceDetails* Compilation::allocAssertionDetails() {
+    SLANG_ASSERT(!isFrozen());
     return assertionDetailsAllocator.emplace();
 }
 
 ConfigBlockSymbol* Compilation::allocConfigBlock(std::string_view name, SourceLocation loc) {
+    SLANG_ASSERT(!isFrozen());
     return configBlockAllocator.emplace(*this, name, loc);
 }
 
 Scope::WildcardImportData* Compilation::allocWildcardImportData() {
+    SLANG_ASSERT(!isFrozen());
     return wildcardImportAllocator.emplace();
 }
 
 const ImplicitTypeSyntax& Compilation::createEmptyTypeSyntax(SourceLocation loc) {
+    SLANG_ASSERT(!isFrozen());
     return *emplace<ImplicitTypeSyntax>(Token(), nullptr,
                                         Token(*this, TokenKind::Placeholder, {}, {}, loc));
 }
 
 void Compilation::forceElaborate(const Symbol& symbol) {
+    SLANG_ASSERT(!isFrozen());
     DiagnosticVisitor visitor(*this, numErrors,
                               options.errorLimit == 0 ? UINT32_MAX : options.errorLimit);
     visitor.visitInstances = false;
     symbol.visit(visitor);
+
+    // Make sure each generic class we found is touched at least
+    // once so that all name lookups are performed.
+    for (auto genericClass : visitor.genericClasses)
+        genericClass->getInvalidSpecialization().visit(visitor);
 }
 
 const Type& Compilation::getType(SyntaxKind typeKind) const {
@@ -1714,12 +1764,14 @@ const Type& Compilation::getType(SyntaxKind typeKind) const {
 
 const Type& Compilation::getType(const DataTypeSyntax& node, const ASTContext& context,
                                  const Type* typedefTarget) {
+    SLANG_ASSERT(!isFrozen());
     return Type::fromSyntax(*this, node, context, typedefTarget);
 }
 
 const Type& Compilation::getType(const Type& elementType,
                                  const SyntaxList<VariableDimensionSyntax>& dimensions,
                                  const ASTContext& context) {
+    SLANG_ASSERT(!isFrozen());
     return Type::fromSyntax(*this, elementType, dimensions, context);
 }
 
@@ -1731,14 +1783,16 @@ const Type& Compilation::getType(bitwidth_t width, bitmask<IntegralFlags> flags)
     if (it != vectorTypeCache.end())
         return *it->second;
 
+    SLANG_ASSERT(!isFrozen());
+
     auto type = emplace<PackedArrayType>(getScalarType(flags), ConstantRange{int32_t(width - 1), 0},
                                          width);
     vectorTypeCache.emplace_hint(it, key, type);
     return *type;
 }
 
-const Type& Compilation::getScalarType(bitmask<IntegralFlags> flags) {
-    Type* ptr = scalarTypeTable[flags.bits() & 0x7];
+const Type& Compilation::getScalarType(bitmask<IntegralFlags> flags) const {
+    auto ptr = builtins::Builtins::Instance.scalarTypeTable[flags.bits() & 0x7];
     SLANG_ASSERT(ptr);
     return *ptr;
 }
@@ -1753,51 +1807,64 @@ const Type& Compilation::getUnsignedIntType() {
     return getType(32, IntegralFlags::Unsigned | IntegralFlags::TwoState);
 }
 
-const Type& Compilation::getNullType() {
+const Type& Compilation::getNullType() const {
     return getType(SyntaxKind::NullLiteralExpression);
 }
 
-const Type& Compilation::getUnboundedType() {
+const Type& Compilation::getUnboundedType() const {
     return getType(SyntaxKind::WildcardLiteralExpression);
 }
 
-const Type& Compilation::getTypeRefType() {
+const Type& Compilation::getTypeRefType() const {
     return getType(SyntaxKind::TypeReference);
 }
 
-Scope::DeferredMemberData& Compilation::getOrAddDeferredData(Scope::DeferredMemberIndex& index) {
-    if (index == Scope::DeferredMemberIndex::Invalid)
-        index = deferredData.emplace();
-    return deferredData[index];
-}
-
 void Compilation::parseParamOverrides(
-    flat_hash_map<std::string_view, const ConstantValue*>& results) {
-    if (options.paramOverrides.empty())
-        return;
+    bool skipDefParams,
+    flat_hash_map<std::string_view, HierarchyOverrideNode::ParamOverride>& results) {
 
-    ScriptSession session;
     for (auto& opt : options.paramOverrides) {
         // Strings must be of the form <name>=<value>
         size_t index = opt.find('=');
         if (index != std::string::npos) {
             // We found the equals sign, so split out the name and parse that.
-            // For now, the name must always be a simple identifier.
             Diagnostics localDiags;
             std::string_view optView = opt;
             std::string_view name = optView.substr(0, index);
-            if (tryParseName(name, localDiags).kind == SyntaxKind::IdentifierName &&
-                localDiags.empty()) {
 
-                // The name is good, evaluate the value string. Using the ScriptSession
-                // here is a little bit lazy but oh well, this executes almost never
-                // compared to everything else during compilation.
-                std::string_view value = optView.substr(index + 1);
-                ConstantValue cv = session.eval(value);
-                if (cv) {
-                    // Success, store in the map so we can apply the value later.
-                    results.emplace(name, allocConstant(std::move(cv)));
-                    continue;
+            auto& nameSyntax = tryParseName(name, localDiags);
+            if (localDiags.empty()) {
+                if (nameSyntax.kind == SyntaxKind::IdentifierName) {
+                    std::string_view value = optView.substr(index + 1);
+                    if (!value.empty()) {
+                        SLANG_ASSERT(sourceManager);
+                        auto tree = SyntaxTree::fromText(value, *sourceManager, "<command-line>"sv);
+
+                        auto& treeRoot = tree->root();
+                        if (tree->diagnostics().empty() &&
+                            ExpressionSyntax::isKind(treeRoot.kind)) {
+
+                            paramOverrideTrees.push_back(std::move(tree));
+                            results.emplace(name, HierarchyOverrideNode::ParamOverride{
+                                                      ConstantValue{},
+                                                      &treeRoot.as<ExpressionSyntax>(), nullptr});
+                            continue;
+                        }
+                    }
+                }
+                else {
+                    // Not a simple identifier, so treat this as a full defparam.
+                    if (skipDefParams)
+                        continue;
+
+                    SLANG_ASSERT(sourceManager);
+                    auto tree = SyntaxTree::fromText(fmt::format("defparam {};", opt),
+                                                     *sourceManager, "<command-line>"sv);
+
+                    if (tree->diagnostics().empty() && tree->root().kind == SyntaxKind::DefParam) {
+                        addSyntaxTree(std::move(tree));
+                        continue;
+                    }
                 }
             }
         }
@@ -1871,7 +1938,7 @@ void Compilation::checkDPIMethods(std::span<const SubroutineSymbol* const> dpiIm
     flat_hash_map<std::tuple<std::string_view, const Scope*>, const DPIExportSyntax*>
         exportsByScope;
     flat_hash_map<const SubroutineSymbol*, const DPIExportSyntax*> previousExports;
-    auto exports = dpiExports;
+    auto exports = dpiExportDirectives;
     for (auto [syntax, scope] : exports) {
         if (syntax->specString.valueText() == "DPI")
             scope->addDiag(diag::DPISpecDisallowed, syntax->specString.range());
@@ -1946,25 +2013,29 @@ void Compilation::checkDPIMethods(std::span<const SubroutineSymbol* const> dpiIm
 
         std::string_view cId = getCId(*scope, syntax->c_identifier, syntax->name);
         if (!cId.empty()) {
-            {
-                auto [it, inserted] = nameMap.emplace(cId, &sub);
-                if (!inserted) {
-                    if (!checkSignaturesMatch(sub, *it->second)) {
-                        auto& diag = scope->addDiag(diag::DPISignatureMismatch,
-                                                    syntax->name.range());
-                        diag << cId;
-                        diag.addNote(diag::NotePreviousDefinition, it->second->location);
-                    }
-                }
-            }
-            {
-                auto [it, inserted] = exportsByScope.emplace(std::make_tuple(cId, scope), syntax);
-                if (!inserted) {
-                    auto& diag = scope->addDiag(diag::DPIExportDuplicateCId, syntax->name.range());
+            bool shouldRecordResolved = true;
+
+            auto [nameIt, nameInserted] = nameMap.emplace(cId, &sub);
+            if (!nameInserted) {
+                shouldRecordResolved = false;
+                if (!checkSignaturesMatch(sub, *nameIt->second)) {
+                    auto& diag = scope->addDiag(diag::DPISignatureMismatch, syntax->name.range());
                     diag << cId;
-                    diag.addNote(diag::NotePreviousDefinition, it->second->name.location());
+                    diag.addNote(diag::NotePreviousDefinition, nameIt->second->location);
                 }
             }
+
+            auto [scopeIt, scopeInserted] = exportsByScope.emplace(std::make_tuple(cId, scope),
+                                                                   syntax);
+            if (!scopeInserted) {
+                shouldRecordResolved = false;
+                auto& diag = scope->addDiag(diag::DPIExportDuplicateCId, syntax->name.range());
+                diag << cId;
+                diag.addNote(diag::NotePreviousDefinition, scopeIt->second->name.location());
+            }
+
+            if (shouldRecordResolved)
+                dpiExports.push_back(DPIExport{&sub, std::string(cId), syntax});
         }
     }
 }
@@ -1978,8 +2049,7 @@ void Compilation::checkExternIfaceMethods(std::span<const MethodPrototypeSymbol*
             auto& parent = scope->asSymbol();
             if (!parent.name.empty() && !proto->name.empty()) {
                 auto& diag = scope->addDiag(diag::MissingExternImpl, proto->location);
-                diag << (proto->subroutineKind == SubroutineKind::Function ? "function"sv
-                                                                           : "task"sv);
+                diag << SemanticFacts::getSubroutineKindStr(proto->subroutineKind);
                 diag << parent.name << proto->name;
             }
         }
@@ -1994,7 +2064,9 @@ void Compilation::checkModportExports(
         SLANG_ASSERT(def);
 
         for (auto& method : modport->membersOfType<MethodPrototypeSymbol>()) {
-            if (method.flags.has(MethodFlags::ModportExport)) {
+            if (method.flags.has(MethodFlags::ModportExport) && !method.name.empty() &&
+                !def->name.empty()) {
+
                 bool found = false;
                 auto impl = method.getFirstExternImpl();
                 while (impl) {
@@ -2190,258 +2262,50 @@ void Compilation::checkBindTargetParams(const syntax::BindDirectiveSyntax& synta
     }
 }
 
-void Compilation::resolveDefParamsAndBinds() {
-    TimeTraceScope timeScope("resolveDefParamsAndBinds"sv, ""sv);
+void Compilation::checkVirtualIfaceInstance(const InstanceSymbol& instance) {
+    auto body = instance.getCanonicalBody();
+    if (!body)
+        body = &instance.body;
 
-    struct OverrideEntry {
-        OpaqueInstancePath path;
-        const SyntaxNode* targetSyntax = nullptr;
-        const SyntaxNode* defparamSyntax = nullptr;
-        ConstantValue value;
-        std::string pathStr;
-    };
-    SmallVector<OverrideEntry, 4> overrides;
-
-    struct BindEntry {
-        OpaqueInstancePath path;
-        const ModuleDeclarationSyntax* definitionTarget = nullptr;
-        BindDirectiveInfo info;
-    };
-    SmallVector<BindEntry> binds;
-
-    auto getNodeFor = [](const OpaqueInstancePath& path, Compilation& c) {
-        HierarchyOverrideNode* node = &c.hierarchyOverrides;
-        for (auto& entry : path.entries)
-            node = &node->childNodes[entry];
-        return node;
-    };
-
-    auto copyStateInto = [&](Compilation& c, bool isFinal) {
-        for (auto& entry : overrides) {
-            if (!entry.targetSyntax)
-                continue;
-
-            SLANG_ASSERT(entry.defparamSyntax);
-
-            auto node = getNodeFor(entry.path, c);
-            auto [it, inserted] = node->paramOverrides.emplace(
-                entry.targetSyntax, std::pair{entry.value, entry.defparamSyntax});
-
-            if (!inserted && isFinal) {
-                SLANG_ASSERT(it->second.second);
-                auto& diag = c.root->addDiag(diag::DuplicateDefparam,
-                                             entry.defparamSyntax->sourceRange());
-                diag.addNote(diag::NotePreviousDefinition, it->second.second->sourceRange());
-            }
+    if (auto it = instanceSideEffectMap.find(body); it != instanceSideEffectMap.end()) {
+        auto& upwardNames = it->second->upwardNames;
+        if (!upwardNames.empty()) {
+            auto& diag = body->addDiag(diag::VirtualIfaceHierRef, instance.location);
+            diag.addNote(diag::NoteHierarchicalRef, upwardNames[0]->expr->sourceRange);
         }
-
-        for (auto& entry : binds) {
-            if (entry.definitionTarget) {
-                if (!entry.path.empty()) {
-                    // This is a nested definition, so we need to put the
-                    // bind into the override node.
-                    auto node = getNodeFor(entry.path, c);
-                    node->binds.push_back({entry.info, entry.definitionTarget});
-                }
-                else {
-                    auto def = c.getDefinition(*c.root, *entry.definitionTarget);
-                    if (def) {
-                        // const_cast is fine; we accessed the private data of the compilation
-                        // through a public interface that added the const on top.
-                        const_cast<DefinitionSymbol*>(def)->bindDirectives.push_back(entry.info);
-                    }
-                }
-            }
-            else {
-                auto node = getNodeFor(entry.path, c);
-                node->binds.push_back({entry.info, nullptr});
-            }
-        }
-    };
-
-    auto cloneInto = [&](Compilation& c) {
-        c.options = options;
-        for (auto& tree : syntaxTrees)
-            c.addSyntaxTree(tree);
-
-        copyStateInto(c, false);
-    };
-
-    auto saveState = [&](DefParamVisitor& visitor, Compilation& c) {
-        overrides.clear();
-        for (auto defparam : visitor.found) {
-            auto target = defparam->getTarget();
-            if (!target) {
-                overrides.emplace_back();
-            }
-            else {
-                std::string path;
-                target->getHierarchicalPath(path);
-
-                overrides.push_back({OpaqueInstancePath(*target), target->getSyntax(),
-                                     defparam->getSyntax(), defparam->getValue(), std::move(path)});
-            }
-        }
-
-        // We make a copy of the bind directives list here because resolveBindTargets
-        // can cause the compilation to add more entries to the list (for recursive
-        // module instantiations).
-        binds.clear();
-        auto bindDirs = c.bindDirectives;
-        for (auto [syntax, scope] : bindDirs) {
-            ResolvedBind resolvedBind;
-            c.resolveBindTargets(*syntax, *scope, resolvedBind);
-
-            BindDirectiveInfo info;
-            info.bindSyntax = syntax;
-
-            auto& def = resolvedBind.instanceDef;
-            info.configRuleSyntax = def.configRule ? def.configRule->syntax.get() : nullptr;
-            info.configBlockSyntax = def.configRoot ? def.configRoot->getSyntax() : nullptr;
-            info.instantiationDefSyntax = def.definition ? def.definition->getSyntax() : nullptr;
-            info.isNewConfigRoot = def.configRoot != nullptr;
-            if (!info.isNewConfigRoot && resolvedBind.resolvedConfig) {
-                info.configBlockSyntax = resolvedBind.resolvedConfig->useConfig.getSyntax();
-
-                // Make a copy of the list; the memory for it is owned by
-                // the old compilation that is going away.
-                info.liblist = copyFrom(resolvedBind.resolvedConfig->liblist);
-            }
-
-            for (auto target : resolvedBind.instTargets)
-                binds.emplace_back(BindEntry{OpaqueInstancePath(*target), nullptr, info});
-
-            if (auto defTarget = resolvedBind.defTarget) {
-                auto parentScope = defTarget->getParentScope();
-                auto defSyntax = defTarget->getSyntax();
-                SLANG_ASSERT(parentScope && defSyntax);
-
-                // If this is a nested definition we'll put it into the
-                // override node of the parent scope that contains the
-                // definition. Otherwise it's a globally targeted bind.
-                OpaqueInstancePath path;
-                auto& parentSym = parentScope->asSymbol();
-                if (parentSym.kind != SymbolKind::CompilationUnit)
-                    path = OpaqueInstancePath(parentSym);
-
-                binds.emplace_back(
-                    BindEntry{std::move(path), &defSyntax->as<ModuleDeclarationSyntax>(), info});
-            }
-        }
-    };
-
-    auto checkProblem = [&](const DefParamVisitor& visitor) {
-        if (visitor.hierarchyProblem) {
-            auto& diag = root->addDiag(diag::MaxInstanceDepthExceeded,
-                                       visitor.hierarchyProblem->location);
-            diag << visitor.hierarchyProblem->getDefinition().getKindString();
-            diag << options.maxInstanceDepth;
-            return true;
-        }
-        return false;
-    };
-
-    // [23.10.4.1] gives an algorithm for elaboration in the face of defparams.
-    // Specifically, we need to resolve all possible defparams at one "level" of
-    // hierarchy before moving on to a deeper level, where a "level" in this case
-    // is each successive set of nested generate blocks.
-    size_t generateLevel = 0;
-    size_t numBlocksSeen = 0;
-    size_t numBindsSeen = 0;
-    while (true) {
-        // Traverse the design and find all defparams and their values.
-        // defparam resolution happens in a cloned compilation unit because we will be
-        // constantly mucking with parameter values in ways that can change the actual
-        // hierarchy that gets instantiated. Cloning lets us do that in an isolated context
-        // and throw that work away once we know the final parameter values.
-        Compilation initialClone({}, defaultLibPtr);
-        cloneInto(initialClone);
-
-        DefParamVisitor initialVisitor(options.maxInstanceDepth, generateLevel);
-        initialClone.getRoot(/* skipDefParamsAndBinds */ true).visit(initialVisitor);
-        if (checkProblem(initialVisitor))
-            return;
-
-        saveState(initialVisitor, initialClone);
-
-        // If we have found more binds, do another visit to let them be applied
-        // and potentially add blocks and defparams to our set for this level.
-        if (initialClone.bindDirectives.size() > numBindsSeen) {
-            numBindsSeen = initialClone.bindDirectives.size();
-            continue;
-        }
-
-        // defparams can change the value of parameters, further affecting the value of
-        // other defparams elsewhere in the design. This means we need to iterate,
-        // reevaluating defparams until they all settle to a stable value or until we
-        // give up due to the potential of cyclical references.
-        bool allSame = true;
-        for (uint32_t i = 0; i < options.maxDefParamSteps; i++) {
-            Compilation c({}, defaultLibPtr);
-            cloneInto(c);
-
-            DefParamVisitor v(options.maxInstanceDepth, generateLevel);
-            c.getRoot(/* skipDefParamsAndBinds */ true).visit(v);
-            if (checkProblem(v))
-                return;
-
-            // We're only done if we have the same set of defparams with the same set of values.
-            allSame = true;
-            SLANG_ASSERT(v.found.size() == overrides.size());
-            for (size_t j = 0; j < v.found.size(); j++) {
-                // Check that the defparam resolved to the same target we saw previously.
-                // The spec declares it to be an error if a defparam target changes based
-                // on elaboration of other defparam values.
-                const SyntaxNode* targetNode = nullptr;
-                auto target = v.found[j]->getTarget();
-                if (target)
-                    targetNode = target->getSyntax();
-
-                auto getRange = [&] {
-                    auto syntax = v.found[j]->getSyntax();
-                    SLANG_ASSERT(syntax);
-                    return syntax->sourceRange();
-                };
-
-                auto& prevEntry = overrides[j];
-                if (prevEntry.targetSyntax && targetNode && prevEntry.targetSyntax != targetNode) {
-                    std::string path;
-                    target->getHierarchicalPath(path);
-
-                    auto& diag = root->addDiag(diag::DefParamTargetChange, getRange());
-                    diag << prevEntry.pathStr;
-                    diag << path;
-                    return;
-                }
-
-                if (prevEntry.value != v.found[j]->getValue()) {
-                    allSame = false;
-                    if (i == options.maxDefParamSteps - 1)
-                        root->addDiag(diag::DefParamCycle, getRange());
-                    break;
-                }
-            }
-
-            if (allSame)
-                break;
-
-            saveState(v, c);
-        }
-
-        // If we gave up due to a potential infinite loop, continue exiting.
-        if (!allSame)
-            break;
-
-        SLANG_ASSERT(initialVisitor.numBlocksSeen >= numBlocksSeen);
-        if (initialVisitor.numBlocksSeen == numBlocksSeen)
-            break;
-
-        generateLevel++;
-        numBlocksSeen = initialVisitor.numBlocksSeen;
     }
 
-    // We have our final overrides; copy them into the main compilation unit.
-    copyStateInto(*this, true);
+    Diagnostic* portDiag = nullptr;
+    for (auto port : body->getPortList()) {
+        if (port->kind == SymbolKind::InterfacePort) {
+            if (!portDiag)
+                portDiag = &body->addDiag(diag::VirtualIfaceIfacePort, instance.location);
+            portDiag->addNote(diag::NoteDeclarationHere, port->location);
+        }
+    }
+}
+
+Compilation::InstanceSideEffects& Compilation::getOrAddSideEffects(const Symbol& instanceBody) {
+    auto& entry = instanceSideEffectMap[&instanceBody];
+    if (!entry)
+        entry = std::make_unique<InstanceSideEffects>();
+    return *entry;
+}
+
+void Compilation::noteCannotCache(const Scope& scope) {
+    auto currScope = &scope;
+    do {
+        auto& symbol = currScope->asSymbol();
+        if (symbol.kind == SymbolKind::InstanceBody) {
+            auto& entry = getOrAddSideEffects(symbol);
+            if (entry.cannotCache)
+                break;
+
+            entry.cannotCache = true;
+        }
+
+        currScope = symbol.getHierarchicalParent();
+    } while (currScope);
 }
 
 template<typename TDefList>

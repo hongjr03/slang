@@ -3,12 +3,27 @@
 
 #include "Test.h"
 
+#include "slang/ast/ASTVisitor.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
+#include "slang/syntax/AllSyntax.h"
 #include "slang/text/SourceManager.h"
+
+// Walks up from a generate block to the enclosing if/case/loop-generate node.
+// Needed because if-else and case arms sit under an intermediate
+// ElseClause / StandardCaseItem / DefaultCaseItem syntax node.
+static const SyntaxNode* constructOf(const GenerateBlockSymbol& block) {
+    auto s = block.getSyntax();
+    const SyntaxNode* p = s ? s->parent : nullptr;
+    while (p && p->kind != SyntaxKind::IfGenerate && p->kind != SyntaxKind::CaseGenerate &&
+           p->kind != SyntaxKind::LoopGenerate) {
+        p = p->parent;
+    }
+    return p;
+}
 
 TEST_CASE("Finding top level") {
     auto file1 = SyntaxTree::fromText(
@@ -71,6 +86,33 @@ endmodule
     CHECK(diags[0].code == diag::DuplicateDefinition);
 }
 
+TEST_CASE("Duplicate module as auto-top -- only one instance created") {
+    // Regression test: when duplicate module definitions both qualify as valid top
+    // modules, only one top-level instance should be created (not one per definition).
+    auto tree = SyntaxTree::fromText(R"(
+module foo;
+endmodule
+
+module foo;
+endmodule
+
+module bar;
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::DuplicateDefinition);
+
+    auto& root = compilation.getRoot();
+    REQUIRE(root.topInstances.size() == 2);
+    CHECK(root.topInstances[0]->name == "bar");
+    CHECK(root.topInstances[1]->name == "foo");
+}
+
 TEST_CASE("Duplicate package") {
     auto tree = SyntaxTree::fromText(R"(
 package pack;
@@ -85,7 +127,7 @@ endpackage
 
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::Redefinition);
+    CHECK(diags[0].code == diag::DuplicateDefinition);
 }
 
 TEST_CASE("Instance missing name") {
@@ -177,10 +219,10 @@ endmodule
     Compilation compilation;
     const auto& instance = evalModule(tree, compilation).body.memberAt<GenerateBlockArraySymbol>(1);
 
-    REQUIRE(std::ranges::distance(instance.members()) == 10);
+    REQUIRE(std::ranges::distance(instance.members()) == 11);
 
     for (uint32_t i = 0; i < 10; i++) {
-        auto& leaf = instance.memberAt<GenerateBlockSymbol>(i).memberAt<InstanceSymbol>(1).body;
+        auto& leaf = instance.memberAt<GenerateBlockSymbol>(i + 1).memberAt<InstanceSymbol>(1).body;
         auto& foo = leaf.find<ParameterSymbol>("foo");
         CHECK(foo.getValue().integer() == i);
     }
@@ -202,6 +244,266 @@ endmodule
     NO_COMPILATION_ERRORS;
 
     compilation.getRoot().lookupName<GenerateBlockSymbol>("Top.u2");
+}
+
+TEST_CASE("Generate construct provenance is preserved") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top #(parameter int MODE = 1, parameter int N = 3)();
+    // if-generate
+    if (MODE == 1) begin : if_true
+        int a;
+    end
+    else begin : if_false
+        int b;
+    end
+
+    // case-generate
+    case (MODE)
+        1, 2: begin : case_item_lo
+            int c;
+        end
+        default: begin : case_default
+            int d;
+        end
+    endcase
+
+    // loop-generate with external genvar
+    genvar g;
+    for (g = 0; g < N; g = g + 1) begin : loop_arr
+        int e;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& root = compilation.getRoot();
+
+    // if-generate
+    auto& ifTrue = root.lookupName<GenerateBlockSymbol>("Top.if_true");
+    auto& ifFalse = root.lookupName<GenerateBlockSymbol>("Top.if_false");
+    CHECK(ifTrue.branchKind == GenerateBranchKind::IfTrue);
+    CHECK(ifFalse.branchKind == GenerateBranchKind::IfFalse);
+    CHECK(!ifTrue.isUninstantiated);
+    CHECK(ifFalse.isUninstantiated);
+    REQUIRE(ifTrue.getConditionExpression() != nullptr);
+    CHECK(ifTrue.getConditionExpression() == ifFalse.getConditionExpression());
+    CHECK(ifTrue.caseItemExpressions.empty());
+    CHECK(ifTrue.getArrayIndex() == nullptr);
+    REQUIRE(constructOf(ifTrue) != nullptr);
+    CHECK(constructOf(ifTrue)->kind == SyntaxKind::IfGenerate);
+    CHECK(constructOf(ifTrue) == constructOf(ifFalse));
+
+    // case-generate
+    auto& caseItem = root.lookupName<GenerateBlockSymbol>("Top.case_item_lo");
+    auto& caseDefault = root.lookupName<GenerateBlockSymbol>("Top.case_default");
+    CHECK(caseItem.branchKind == GenerateBranchKind::CaseItem);
+    CHECK(caseDefault.branchKind == GenerateBranchKind::CaseDefault);
+    REQUIRE(caseItem.getConditionExpression() != nullptr);
+    CHECK(caseItem.getConditionExpression() == caseDefault.getConditionExpression());
+    CHECK(caseItem.caseItemExpressions.size() == 2);
+    CHECK(caseDefault.caseItemExpressions.empty());
+    CHECK(caseItem.getArrayIndex() == nullptr);
+    REQUIRE(constructOf(caseItem) != nullptr);
+    CHECK(constructOf(caseItem)->kind == SyntaxKind::CaseGenerate);
+    CHECK(constructOf(caseItem) == constructOf(caseDefault));
+
+    // loop-generate: the array's getSyntax() returns the LoopGenerateSyntax
+    // directly; each entry block's getSyntax()->parent walks up to that same
+    // construct.
+    auto& loopArr = root.lookupName<GenerateBlockArraySymbol>("Top.loop_arr");
+    CHECK(loopArr.initialExpression != nullptr);
+    CHECK(loopArr.stopExpression != nullptr);
+    CHECK(loopArr.iterExpression != nullptr);
+    REQUIRE(loopArr.loopVariable != nullptr);
+    CHECK(loopArr.loopVariable->kind == SymbolKind::Variable);
+    CHECK(loopArr.loopVariable->name == "g");
+    REQUIRE(loopArr.loopVariable->getSyntax() != nullptr);
+    CHECK(loopArr.loopVariable->getSyntax()->kind == SyntaxKind::IdentifierName);
+    REQUIRE(loopArr.loopVariable->getSyntax()->parent != nullptr);
+    CHECK(loopArr.loopVariable->getSyntax()->parent->kind == SyntaxKind::GenvarDeclaration);
+    REQUIRE(loopArr.getSyntax() != nullptr);
+    CHECK(loopArr.getSyntax()->kind == SyntaxKind::LoopGenerate);
+    CHECK(loopArr.entries.size() == 3);
+    for (auto entry : loopArr.entries) {
+        CHECK(entry->branchKind == GenerateBranchKind::LoopIteration);
+        CHECK(constructOf(*entry) == loopArr.getSyntax());
+        CHECK(entry->getArrayIndex() != nullptr);
+        CHECK(entry->getConditionExpression() == nullptr);
+    }
+}
+
+TEST_CASE("Generate provenance for nested if-in-if with begin/end") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top #(parameter int A = 1, parameter int B = 1)();
+    if (A == 1) begin : outer
+        if (B == 1) begin : inner
+            int x;
+        end
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& root = compilation.getRoot();
+    auto& outer = root.lookupName<GenerateBlockSymbol>("Top.outer");
+    auto& inner = root.lookupName<GenerateBlockSymbol>("Top.outer.inner");
+
+    auto* outerConstruct = constructOf(outer);
+    auto* innerConstruct = constructOf(inner);
+    REQUIRE(outerConstruct != nullptr);
+    REQUIRE(innerConstruct != nullptr);
+    CHECK(outerConstruct->kind == SyntaxKind::IfGenerate);
+    CHECK(innerConstruct->kind == SyntaxKind::IfGenerate);
+    CHECK(outerConstruct != innerConstruct);
+
+    CHECK(outer.branchKind == GenerateBranchKind::IfTrue);
+    CHECK(inner.branchKind == GenerateBranchKind::IfTrue);
+    REQUIRE(outer.getConditionExpression() != nullptr);
+    REQUIRE(inner.getConditionExpression() != nullptr);
+    CHECK(outer.getConditionExpression() != inner.getConditionExpression());
+}
+
+TEST_CASE("Generate provenance for directly-nested if-in-if") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top #(parameter int A = 1, parameter int B = 1)();
+    if (A == 1)
+        if (B == 1) begin : t
+            int x;
+        end
+        else begin : f
+            int y;
+        end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& root = compilation.getRoot();
+    auto& t = root.lookupName<GenerateBlockSymbol>("Top.t");
+    auto& f = root.lookupName<GenerateBlockSymbol>("Top.f");
+
+    auto* innerIf = constructOf(t);
+    REQUIRE(innerIf != nullptr);
+    CHECK(innerIf->kind == SyntaxKind::IfGenerate);
+    CHECK(innerIf == constructOf(f));
+
+    CHECK(t.branchKind == GenerateBranchKind::IfTrue);
+    CHECK(f.branchKind == GenerateBranchKind::IfFalse);
+    REQUIRE(t.getConditionExpression() != nullptr);
+    CHECK(t.getConditionExpression() == f.getConditionExpression());
+
+    // The directly-nested outer construct is reachable by continuing the walk.
+    const SyntaxNode* outerIf = innerIf->parent;
+    while (outerIf && outerIf->kind != SyntaxKind::IfGenerate)
+        outerIf = outerIf->parent;
+    REQUIRE(outerIf != nullptr);
+    CHECK(outerIf != innerIf);
+}
+
+TEST_CASE("Generate provenance for case inside if") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top #(parameter int A = 1, parameter int MODE = 1)();
+    if (A == 1) begin : wrapper
+        case (MODE)
+            1, 2: begin : m1 end
+            default: begin : md end
+        endcase
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& root = compilation.getRoot();
+    auto& wrapper = root.lookupName<GenerateBlockSymbol>("Top.wrapper");
+    auto& m1 = root.lookupName<GenerateBlockSymbol>("Top.wrapper.m1");
+    auto& md = root.lookupName<GenerateBlockSymbol>("Top.wrapper.md");
+
+    CHECK(wrapper.branchKind == GenerateBranchKind::IfTrue);
+    auto* wrapperConstruct = constructOf(wrapper);
+    REQUIRE(wrapperConstruct != nullptr);
+    CHECK(wrapperConstruct->kind == SyntaxKind::IfGenerate);
+
+    CHECK(m1.branchKind == GenerateBranchKind::CaseItem);
+    CHECK(md.branchKind == GenerateBranchKind::CaseDefault);
+    auto* m1Construct = constructOf(m1);
+    REQUIRE(m1Construct != nullptr);
+    CHECK(m1Construct->kind == SyntaxKind::CaseGenerate);
+    CHECK(m1Construct == constructOf(md));
+
+    // Walk up from the inner case-generate to the enclosing if-generate.
+    const SyntaxNode* cur = m1Construct->parent;
+    while (cur && cur->kind != SyntaxKind::IfGenerate)
+        cur = cur->parent;
+    REQUIRE(cur != nullptr);
+    CHECK(cur == wrapperConstruct);
+}
+
+TEST_CASE("Generate provenance with inline genvar") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top;
+    for (genvar i = 0; i < 2; i = i + 1) begin : arr
+        int x;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& arr = compilation.getRoot().lookupName<GenerateBlockArraySymbol>("Top.arr");
+    REQUIRE(arr.loopVariable != nullptr);
+    CHECK(arr.loopVariable->kind == SymbolKind::Variable);
+    CHECK(arr.loopVariable->name == "i");
+    REQUIRE(arr.loopVariable->getSyntax() != nullptr);
+    CHECK(arr.loopVariable->getSyntax()->kind == SyntaxKind::IdentifierName);
+    // Inline form: fabricated IdentifierNameSyntax has no parent linkage.
+    CHECK(arr.loopVariable->getSyntax()->parent == nullptr);
+    // Source location matches the LoopGenerate identifier token.
+    REQUIRE(arr.getSyntax() != nullptr);
+    auto& loop = arr.getSyntax()->as<LoopGenerateSyntax>();
+    auto& idSyntax = arr.loopVariable->getSyntax()->as<IdentifierNameSyntax>();
+    CHECK(idSyntax.identifier.location() == loop.identifier.location());
+    CHECK(arr.entries.size() == 2);
+}
+
+TEST_CASE("Loop-generate stop/iter expressions reference loopVariable") {
+    auto tree = SyntaxTree::fromText(R"(
+module Top;
+    genvar g;
+    for (g = 0; g < 3; g = g + 1) begin : arr
+        int e;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& arr = compilation.getRoot().lookupName<GenerateBlockArraySymbol>("Top.arr");
+    REQUIRE(arr.loopVariable != nullptr);
+    REQUIRE(arr.stopExpression != nullptr);
+    REQUIRE(arr.iterExpression != nullptr);
+
+    auto& stopSym =
+        arr.stopExpression->as<BinaryExpression>().left().as<NamedValueExpression>().symbol;
+    CHECK(&stopSym == arr.loopVariable);
+
+    auto& iterSym =
+        arr.iterExpression->as<AssignmentExpression>().left().as<NamedValueExpression>().symbol;
+    CHECK(&iterSym == arr.loopVariable);
 }
 
 TEST_CASE("Program instantiation") {
@@ -300,7 +602,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     auto it = diags.begin();
     CHECK((it++)->code == diag::NotAValue);
     CHECK((it++)->code == diag::InvalidGenvarIterExpression);
@@ -347,7 +649,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     auto it = diags.begin();
     CHECK((it++)->code == diag::CaseGenerateEmpty);
     CHECK((it++)->code == diag::ConstEvalNonConstVariable);
@@ -452,7 +754,7 @@ module bar;
 endmodule
 
 module baz #(parameter int i)();
-    if (i == 1 || i == 3) begin
+    if (i == 1 || i == 3) begin : blk
         always asdf = 1;
     end
 endmodule
@@ -512,8 +814,8 @@ endmodule
 TEST_CASE("Generate loops -- too many iterations") {
     auto tree = SyntaxTree::fromText(R"(
 module bar;
-    for (genvar i = 0; i < 1024; i++) begin
-        for (genvar j = 0; j < 1024; j++) begin
+    for (genvar i = 0; i < 1024; i++) begin : blk1
+        for (genvar j = 0; j < 1024; j++) begin : blk2
         end
     end
 endmodule
@@ -605,9 +907,9 @@ endmodule
     auto range = top.membersOfType<GenerateBlockSymbol>();
     auto it = range.begin();
     CHECK((it++)->getExternalName() == "genblk1");
-    it++;
+    CHECK((it++)->getExternalName() == "genblk1");
     CHECK((it++)->getExternalName() == "genblk02");
-    it++;
+    CHECK((it++)->getExternalName() == "genblk02");
     CHECK((it++)->getExternalName() == "genblk5");
 
     auto& g1 = top.find<GenerateBlockArraySymbol>("g1");
@@ -624,7 +926,7 @@ endinterface
 module bar #(parameter int foo);
     localparam int bar = foo;
     int j = int'(bar[foo]);
-    if (j != 10) begin
+    if (j != 10) begin : blk
         int k = j[3.4];
     end
     int k = {};
@@ -644,10 +946,9 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
+    REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::ConstEvalNonConstVariable);
     CHECK(diags[1].code == diag::EmptyConcatNotAllowed);
-    CHECK(diags[2].code == diag::EmptyConcatNotAllowed);
 }
 
 TEST_CASE("Manually specify top modules") {
@@ -662,35 +963,31 @@ module top;
 endmodule
 )");
 
-    CompilationOptions coptions;
-    coptions.flags &= ~CompilationFlags::SuppressUnused;
-    coptions.topModules.emplace("invalid"sv);
-    coptions.topModules.emplace("unknown"sv);
-    coptions.topModules.emplace("top"sv);
-
-    Bag options;
-    options.set(coptions);
+    CompilationOptions options;
+    options.topModules.emplace("invalid"sv);
+    options.topModules.emplace("unknown"sv);
+    options.topModules.emplace("top"sv);
 
     Compilation compilation(options);
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::UnusedDefinition);
-    CHECK(diags[1].code == diag::UnusedDefinition);
-    CHECK(diags[2].code == diag::InvalidTopModule);
-    CHECK(diags[3].code == diag::InvalidTopModule);
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::InvalidTopModule);
+    CHECK(diags[1].code == diag::InvalidTopModule);
+
+    auto unusedDefs = compilation.getUnreferencedDefinitions();
+    REQUIRE(unusedDefs.size() == 2);
+    CHECK(unusedDefs[0]->name == "invalid");
+    CHECK(unusedDefs[1]->name == "nottop");
 }
 
 TEST_CASE("No top warning") {
     auto tree = SyntaxTree::fromText(R"(
 )");
 
-    CompilationOptions coptions;
-    coptions.flags &= ~CompilationFlags::SuppressUnused;
-
-    Bag options;
-    options.set(coptions);
+    CompilationOptions options;
+    options.flags = CompilationFlags::None;
 
     Compilation compilation(options);
     compilation.addSyntaxTree(tree);
@@ -737,7 +1034,7 @@ primitive foo(output a, input b);
 endprimitive
 
 interface I;
-    if (1) begin
+    if (1) begin : blk
         m m1();
     end
     foo (a, b);
@@ -865,7 +1162,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::WidthTruncate);
 }
@@ -937,7 +1234,7 @@ endmodule
     Compilation compilation(options);
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::ConstEvalParamCycle);
     CHECK(diags[1].code == diag::ConstEvalParamCycle);
@@ -1038,7 +1335,7 @@ module m;
     defparam;
 
     module top;
-        if (1) begin
+        if (1) begin : blk
             top t1();
             top t2();
         end
@@ -1052,7 +1349,7 @@ endmodule
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::ExpectedVariableAssignment);
-    CHECK(diags[1].code == diag::MaxInstanceDepthExceeded);
+    CHECK(diags[1].code == diag::InfinitelyRecursiveHierarchy);
 }
 
 TEST_CASE("Top level program") {
@@ -1086,7 +1383,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::IllegalReferenceToProgramItem);
 }
@@ -1119,7 +1416,7 @@ program q;
 endprogram
 
 module m;
-    if (1) begin
+    if (1) begin : blk
         C c = new(3);
         int j = p::bar();
     end
@@ -1139,7 +1436,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 7);
     CHECK(diags[0].code == diag::NotAllowedInAnonymousProgram);
     CHECK(diags[1].code == diag::Redefinition);
@@ -1383,7 +1680,7 @@ module o;
 endmodule
 
 module p #(parameter bar);
-    if (bar == 1) begin
+    if (bar == 1) begin : blk
         bind top q q1();
     end
 
@@ -1397,7 +1694,7 @@ endmodule
 
 module r;
     parameter p = 0;
-    if (p == 1) begin
+    if (p == 1) begin : blk
         $info("World");
     end
 endmodule
@@ -1413,7 +1710,7 @@ module top;
 
     assign q1.w = 1;
 
-    if (1) begin
+    if (1) begin : blk
         r r1();
         defparam r1.p = 1;
     end
@@ -1423,10 +1720,44 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::InfoTask);
     CHECK(diags[1].code == diag::InfoTask);
+}
+
+TEST_CASE("Instance targeted bind reaches otherwise unreachable subtree") {
+    auto tree = SyntaxTree::fromText(R"(
+module leaf #(parameter int p = 0);
+    if (p) begin : blk
+        $info("Hello");
+    end
+endmodule
+
+module bound;
+    leaf l();
+    defparam l.p = 1;
+endmodule
+
+module b;
+endmodule
+
+module a;
+    b b1();
+endmodule
+
+module top;
+    a a1();
+    bind top.a1.b1 bound bound1();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
 }
 
 TEST_CASE("Extern module missing impl errors") {
@@ -1684,6 +2015,8 @@ TEST_CASE("Nested modules with infinite recursion regress") {
  module top;
      I i();
  endmodule
+
+module a a,b b.a,c,c
 )");
 
     Compilation compilation;
@@ -1755,7 +2088,7 @@ module m #(parameter P);
   module n;
     int i;
   endmodule
-  if (P == 2) begin
+  if (P == 2) begin : blk
   	bind n foo f();
   end
 endmodule
@@ -1784,7 +2117,7 @@ module m #(parameter P);
   module n;
     int i;
   endmodule
-  if (P == 2) begin
+  if (P == 2) begin : blk
     bind n foo f();
   end
   n n1();
@@ -1843,6 +2176,39 @@ endmodule
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::VirtualIfaceDefparam);
     CHECK(diags[1].code == diag::VirtualIfaceDefparam);
+}
+
+TEST_CASE("AllowVirtualIfaceWithOverride flag") {
+    auto tree = SyntaxTree::fromText(R"(
+interface J;
+    parameter q = 1;
+endinterface
+
+interface I;
+    J j();
+endinterface
+
+interface K;
+endinterface
+
+module m;
+    I i1();
+    I i2();
+
+    virtual I vi1 = i1;
+    virtual I vi2 = i2;
+
+    defparam i1.j.q = 2;
+    bind i2.j K k();
+endmodule
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::AllowVirtualIfaceWithOverride;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
 }
 
 TEST_CASE("Spurious errors in uninstantiated blocks, GH #1028") {
@@ -1922,6 +2288,483 @@ endmodule
 )");
 
     Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Interface instance array to virtual interface in uninstantiated module -- GH #1766") {
+    auto tree = SyntaxTree::fromText(R"(
+interface intf #(
+  parameter int WIDTH = 8
+)(
+  input logic clk_i
+);
+  logic [WIDTH-1:0] data;
+endinterface
+
+class cls #(
+  parameter int W = 8,
+  parameter int N = 2
+);
+  virtual intf #(.WIDTH(W)) vif [N];
+
+  function new(virtual intf #(.WIDTH(W)) my_intf [N]);
+    this.vif = my_intf;
+  endfunction
+endclass
+
+module other_top;
+endmodule
+
+module bug_top #(
+  parameter int NumPorts = 2,
+  parameter int Width    = 16
+);
+  logic clk;
+  intf #(.WIDTH(Width)) i_array [NumPorts] (clk);
+
+  initial begin : proc
+    static cls #(.W(Width), .N(NumPorts)) c = new(i_array);
+  end
+endmodule
+)");
+
+    CompilationOptions options;
+    options.topModules.emplace("other_top");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Instance caching with nested bind directives") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    l l1();
+endmodule
+
+module l;
+    n n1();
+endmodule
+
+module n;
+    bind q1.o1 o o1();
+endmodule
+
+module o;
+endmodule
+
+module p;
+    m m2();
+endmodule
+
+module q;
+    o o1();
+endmodule
+
+module top;
+    if (1) begin
+        m m1();
+        q q1();
+    end
+    if (1) begin
+        p p1();
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::UndeclaredIdentifier);
+}
+
+TEST_CASE("Bind with package elab loop regress -- GH #1249") {
+    auto tree = SyntaxTree::fromText(R"(
+module rv_plic import rv_plic_reg_pkg::*; (
+    input  [63:0] c
+);
+endmodule
+
+package rv_plic_reg_pkg;
+    parameter int NumSrc = 64;
+endpackage
+
+module rv_plic_bind_fpv;
+  bind rv_plic rv_plic_assert_fpv #(
+    .P(rv_plic_reg_pkg::NumSrc)
+  ) m(
+    .intr_src_i(c)
+  );
+endmodule
+
+module rv_plic_assert_fpv #(parameter int P = 1) (input [P-1:0] intr_src_i);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Instance caching with visitation -- GH #1285") {
+    auto tree = SyntaxTree::fromText(R"(
+interface bus();
+	logic w;
+endinterface
+
+module m1(bus intf);
+	assign intf.w = 0;
+endmodule
+
+module top();
+	bus intf1();
+	bus intf2();
+
+	m1 a(.intf(intf1));
+	m1 b(.intf(intf2));
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto visitor = slang::ast::makeVisitor();
+    for (auto instance : compilation.getRoot().topInstances)
+        instance->visit(visitor);
+
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Incorrect generate loop regress -- GH #1328") {
+    auto tree = SyntaxTree::fromText(R"(
+module Test;
+  for (genvar i = 4/2; i >= 0; i--) begin
+  end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Disallow hier-ref to uninstantiated defs option") {
+    auto tree = SyntaxTree::fromText(R"(
+module test_top ();
+    foo bar ();
+    assign bar.a = !(bar.b);
+endmodule
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::IgnoreUnknownModules;
+    options.flags |= CompilationFlags::DisallowRefsToUnknownInstances;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::HierarchicalRefUnknownModule);
+    CHECK(diags[1].code == diag::HierarchicalRefUnknownModule);
+}
+
+TEST_CASE("Disallow hier-ref to uninstantiated defs spurious error regress -- GH #1571") {
+    auto tree = SyntaxTree::fromText(R"(
+interface bus(input clk);
+	logic a, b;
+	modport primary(input a, output b, input clk);
+	modport secondary(input b, output a, input clk);
+endinterface
+
+module submod(bus.primary intf);
+	assign intf.b = !intf.a;
+endmodule
+
+module top(input logic w1, output logic w2,
+		   input logic clk);
+	bus intf(clk);
+	assign intf.a = w1;
+	assign w2 = intf.b;
+	submod sm(intf);
+endmodule
+
+module top2();
+endmodule
+
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::IgnoreUnknownModules;
+    options.flags |= CompilationFlags::DisallowRefsToUnknownInstances;
+    options.topModules.emplace("top2");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Empty connection in uninstantiated module") {
+    auto tree = SyntaxTree::fromText(R"(
+module top ();
+    foo bar (.i());
+endmodule
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::IgnoreUnknownModules;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    NO_COMPILATION_ERRORS;
+
+    auto& bar = compilation.getRoot().lookupName<UninstantiatedDefSymbol>("top.bar");
+    CHECK(bar.getPortConnections()[0]->as<SimpleAssertionExpr>().expr.kind ==
+          ExpressionKind::EmptyArgument);
+}
+
+TEST_CASE("maybe_unknown attribute suppresses unknown module errors") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+    // This should error - unknown module without attribute
+    unknown_ip u1();
+
+    // This should NOT error - has maybe_unknown attribute
+    (* maybe_unknown *) unknown_ip2 u2();
+
+    // This should also work with multiple attributes
+    (* other_attr, maybe_unknown *) unknown_ip3 u3();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::UnknownModule);
+}
+
+TEST_CASE("Package ordering dependency 1 -- GH #1424") {
+    auto tree = SyntaxTree::fromText(R"(
+package A_pkg;
+  import B_pkg::*;
+  bstruct_t bstruct;
+endpackage
+
+package B_pkg;
+  typedef struct {
+    logic b0;
+    logic b1;
+  } bstruct_t;
+endpackage
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Package ordering dependency 2 -- GH #1449") {
+    auto tree = SyntaxTree::fromText(R"(
+package P;
+    typedef class C2;
+
+    import uvm_pkg::*;
+
+    class C1 extends uvm_sequence_item;
+        function new(string name = "C1");
+            super.new(name);
+        endfunction
+
+        function void pre_randomize();
+            C2 sqr;
+        endfunction
+    endclass
+
+    class C2 extends uvm_sequencer #(C1);
+    endclass
+endpackage
+
+package uvm_pkg;
+    class uvm_sequence_item;
+        function new(string name); endfunction
+    endclass
+
+    class uvm_component;
+    endclass
+
+    class uvm_sequencer #(type C);
+    endclass
+endpackage
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Package ordering dependency 3 -- GH #1449") {
+    auto tree = SyntaxTree::fromText(R"(
+package P;
+    typedef class C2;
+
+    class C1 extends uvm_pkg::uvm_sequence_item;
+        function new(string name = "C1");
+            super.new(name);
+        endfunction
+
+        function void pre_randomize();
+            C2 sqr;
+        endfunction
+    endclass
+
+    class C2 extends uvm_pkg::uvm_sequencer #(C1);
+    endclass
+endpackage
+
+package uvm_pkg;
+    class uvm_sequence_item;
+        function new(string name); endfunction
+    endclass
+
+    class uvm_component;
+    endclass
+
+    class uvm_sequencer #(type C);
+    endclass
+endpackage
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Infinite recursion regress -- GH #1476") {
+    auto tree = SyntaxTree::fromText(R"(
+module m();
+  m m1();
+endmodule
+
+module top();
+  m m1();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfinitelyRecursiveHierarchy);
+}
+
+TEST_CASE("Uinstantiated module assignment pattern param regress -- GH #1572") {
+    auto tree = SyntaxTree::fromText(R"(
+module uninst;
+    submod #(
+        .PARAM2 ('{default: 0})
+    ) i_submod ();
+endmodule
+
+module submod #(
+    parameter int PARAM2[1:0] = '{default: 0}
+    );
+endmodule
+
+module empty;
+endmodule
+)");
+
+    CompilationOptions options;
+    options.topModules.emplace("empty");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Infinite module hierarchy empty name error message regress") {
+    auto tree = SyntaxTree::fromText(R"(
+module k module f f(
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    compilation.getAllDiagnostics();
+}
+
+TEST_CASE("Infinite module hierarchy triggered during scope elaboration") {
+    auto tree = SyntaxTree::fromText(R"(
+I(interface I(d.o;I d
+)");
+
+    CompilationOptions options;
+    options.maxInstanceDepth = 16;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    compilation.getAllDiagnostics();
+}
+
+TEST_CASE("Package import from later package regress") {
+    auto tree = SyntaxTree::fromText(R"(
+package p1;
+    import p2::baz;
+    export p2::baz;
+endpackage
+
+package p2;
+    function void baz; endfunction
+endpackage
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Uninstantiated def with assignment pattern ports") {
+    auto tree = SyntaxTree::fromText(R"(
+module sub(
+  input logic [31:0] data [3:0]
+);
+endmodule
+
+module unused;
+  sub u0(.data('{default:'0}));
+endmodule
+
+module top;
+endmodule
+)");
+    CompilationOptions options;
+    options.topModules.insert("top");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Ignore uninstantiated modules") {
+    auto tree = SyntaxTree::fromText(R"(
+module unused;
+  initial undeclared = 1; // normally an error
+endmodule
+
+module top;
+endmodule
+)");
+    CompilationOptions options;
+    options.flags |= CompilationFlags::IgnoreUninstantiatedModules;
+    options.topModules.insert("top");
+
+    Compilation compilation(options);
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
 }

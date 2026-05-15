@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <vector>
 
 #include "slang/util/SmallVector.h"
 #include "slang/util/Util.h"
@@ -38,7 +39,8 @@ std::optional<int32_t> strToInt(std::string_view str, size_t* pos = nullptr, int
 /// source string that was not part of the conversion.
 ///
 /// @return the converted value, or nullopt if conversion fails (invalid string, overflow, etc).
-std::optional<uint32_t> strToUInt(std::string_view str, size_t* pos = nullptr, int base = 10);
+SLANG_EXPORT std::optional<uint32_t> strToUInt(std::string_view str, size_t* pos = nullptr,
+                                               int base = 10);
 
 /// Parses the provided @a str into a floating point value.
 /// If @a pos is non-null, it will be set to point to the first character in the
@@ -55,6 +57,9 @@ void strToUpper(std::string& str);
 /// The string is converted in place.
 void strToLower(std::string& str);
 
+/// Splits the provided string into substrings based on the provided delimiter.
+std::vector<std::string_view> splitString(std::string_view str, char delimiter);
+
 /// Converts a character to uppercase (assuming ASCII).
 inline char charToUpper(char c) {
     return (char)::toupper(c);
@@ -67,13 +72,10 @@ inline char charToLower(char c) {
 
 /// Determines the number of edits to the left string that are required to
 /// change it into the right string.
-/// If @a allowReplacements is true, characters can be substituted as needed.
-/// Otherwise, only swaps are allowed.
 ///
 /// If @a maxDistance is >0 and the computed distance is at least that much, give
 /// up and return maxDistance + 1.
-int editDistance(std::string_view left, std::string_view right, bool allowReplacements = true,
-                 int maxDistance = 0);
+int editDistance(std::string_view left, std::string_view right, int maxDistance = 0);
 
 #if defined(_WIN32)
 

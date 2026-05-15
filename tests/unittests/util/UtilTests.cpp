@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #include "Test.h"
+#include <BS_thread_pool.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <sstream>
 
+#include "slang/util/Bag.h"
 #include "slang/util/Random.h"
-#include "slang/util/ThreadPool.h"
 #include "slang/util/TimeTrace.h"
 
 using namespace Catch::Matchers;
@@ -37,6 +38,34 @@ TEST_CASE("createRandomGenerator construction") {
     auto rng = createRandomGenerator<std::mt19937>();
 }
 
+TEST_CASE("Bag constructor doesn't accept Bag") {
+    // The variadic constructor has a requires clause that prevents passing a Bag
+    // as an argument. Without this constraint, Bag(bag) would call set(Bag&&),
+    // storing the entire Bag as an element inside itself. That would call another bag copy, which
+    // would recurse infinitely and overflow the stack.
+
+    slang::Bag bag1;
+    bag1.set(42);
+    bag1.set(std::string("hello"));
+
+    // This should not compile (prevented by requires clause):
+    // slang::Bag bag2(bag1);
+
+    // Verify that the normal constructor and copy work as expected
+    slang::Bag bag2(42, std::string("world"));
+    CHECK(bag2.get<int>() != nullptr);
+    CHECK(*bag2.get<int>() == 42);
+    CHECK(bag2.get<std::string>() != nullptr);
+    CHECK(*bag2.get<std::string>() == "world");
+
+    // Copy constructor instead of bag of bag of bag of ...
+    slang::Bag bag3 = bag2;
+    CHECK(bag3.get<int>() != nullptr);
+    CHECK(*bag3.get<int>() == 42);
+}
+
+#if defined(SLANG_USE_THREADS)
+
 TEST_CASE("TimeTrace tests") {
     TimeTrace::initialize();
 
@@ -45,9 +74,9 @@ TEST_CASE("TimeTrace tests") {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     };
 
-    ThreadPool pool;
+    BS::thread_pool pool;
     for (int i = 0; i < 20; i++) {
-        pool.pushTask([i, &frob] {
+        pool.detach_task([i, &frob] {
             if (i % 2 == 0) {
                 TimeTraceScope timeScope("Foo\"thing"sv, std::to_string(i));
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -59,8 +88,12 @@ TEST_CASE("TimeTrace tests") {
         });
     }
 
-    pool.waitForAll();
+    pool.wait();
 
     std::ostringstream sstr;
     TimeTrace::write(sstr);
+
+    TimeTrace::destroy();
 }
+
+#endif

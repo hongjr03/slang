@@ -30,7 +30,11 @@ void EvalContext::reset() {
 }
 
 ConstantValue* EvalContext::createLocal(const ValueSymbol* symbol, ConstantValue value) {
-    SLANG_ASSERT(!stack.empty());
+    if (stack.empty()) {
+        // This can happen outside of a function call due to things like pattern variables.
+        pushEmptyFrame();
+    }
+
     ConstantValue& result = stack.back().temporaries[symbol];
     if (!value) {
         result = symbol->getType().getDefaultValue();
@@ -108,6 +112,19 @@ bool EvalContext::step(SourceLocation loc) {
 
     addDiag(diag::ConstEvalExceededMaxSteps, loc);
     return false;
+}
+
+bool EvalContext::checkBitCount(uint64_t bits, SourceRange range) {
+    uint64_t limit = getCompilation().getOptions().maxConstantSize;
+    if (bits <= limit)
+        return true;
+
+    addDiag(diag::ConstEvalExceededMaxSize, range) << bits << limit;
+    return false;
+}
+
+bool EvalContext::checkMaxValue(const ConstantValue& val, SourceRange range) {
+    return checkBitCount(val.getBitstreamWidth(), range);
 }
 
 std::string EvalContext::dumpStack() const {

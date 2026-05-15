@@ -7,12 +7,16 @@
 //------------------------------------------------------------------------------
 
 #include "TidyConfigParser.h"
+#include "TidyConfigPrinter.h"
 #include "TidyFactory.h"
+#include "TidyKind.h"
 #include "fmt/color.h"
 #include "fmt/format.h"
+#include <algorithm>
 #include <filesystem>
 #include <unordered_set>
 
+#include "slang/analysis/AnalysisManager.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
 #include "slang/driver/Driver.h"
 #include "slang/util/VersionInfo.h"
@@ -43,6 +47,10 @@ int main(int argc, char** argv) {
     std::optional<std::string> tidyConfigFile;
     driver.cmdLine.add("--config-file", tidyConfigFile,
                        "Path to where the tidy config file is located");
+
+    std::optional<bool> dumpConfig;
+    driver.cmdLine.add("--dump-config", dumpConfig,
+                       "Dump the configuration options to stdout and exit");
 
     std::vector<std::string> skippedFiles;
     driver.cmdLine.add("--skip-file", skippedFiles, "Files to be skipped by slang-tidy");
@@ -75,9 +83,7 @@ int main(int argc, char** argv) {
     }
 
     if (showVersion) {
-        OS::print(fmt::format("slang-tidy version {}.{}.{}+{}\n", VersionInfo::getMajor(),
-                              VersionInfo::getMinor(), VersionInfo::getPatch(),
-                              VersionInfo::getHash()));
+        OS::print(fmt::format("slang-tidy version {}\n", VersionInfo::getVersionString()));
         return 0;
     }
 
@@ -87,25 +93,29 @@ int main(int argc, char** argv) {
         Registry::setSourceManager(&sm);
 
         // Get the ID and kind from the check code string
-        auto hypenPos = infoCode->find('-');
-        if (hypenPos == std::string::npos) {
+        auto hyphenPos = infoCode->find('-');
+        if (hyphenPos == std::string::npos || hyphenPos == 0) {
             OS::printE("Check code has not the correct format. Format should be ABCD-<id>\n");
             return 1;
         }
-        auto kindStr = infoCode->substr(0, hypenPos);
 
+        auto kindStr = infoCode->substr(0, hyphenPos);
         // Parse the ID and kind
         auto kind = tidyKindFromStr(kindStr);
-        auto id = stoull(infoCode->substr(hypenPos + 1));
-
         if (!kind) {
             OS::printE(fmt::format("Check kind {} does not exist\n", kindStr));
             return 1;
         }
 
+        auto id = strToUInt(infoCode->substr(hyphenPos + 1));
+        if (!id.has_value()) {
+            OS::printE("Check code has not the correct format. Format should be ABCD-<id>\n");
+            return 1;
+        }
+
         for (const auto& checkName : Registry::getRegisteredChecks()) {
             const auto check = Registry::create(checkName);
-            if (check->diagCode().getCode() == id && check->getKind() == kind) {
+            if (check->diagCode().getCode() == *id && check->getKind() == kind) {
                 OS::print(fmt::format(fmt::emphasis::bold, "[{}]\n", check->name()));
                 OS::print(fmt::format("{}", check->description()));
                 return 0;
@@ -129,11 +139,14 @@ int main(int argc, char** argv) {
                 first = false;
             else
                 OS::print("\n");
-            OS::print(fmt::format(fmt::emphasis::bold, "[{}]\n", check->name()));
+            OS::print(fmt::format(fmt::emphasis::bold, "[{}]\n\n", check->name()));
+            OS::print(fmt::format("Config key: {}-{}\n\n",
+                                  TidyConfigPrinter::toLower(toString(check->getKind())),
+                                  TidyConfigParser::unformatCheckName(check->name())));
             if (printDescriptions)
-                OS::print(fmt::format("{}", check->description()));
+                OS::print(fmt::format("{}\n", check->description()));
             else
-                OS::print(fmt::format("{}\n", check->shortDescription()));
+                OS::print(fmt::format("{}\n\n", check->shortDescription()));
         }
         return 0;
     }
@@ -157,6 +170,13 @@ int main(int argc, char** argv) {
         tidyConfig = TidyConfigParser(path.value()).getConfig();
     }
 
+    // Print the configuration file for the currently enabled checks.
+    if (dumpConfig) {
+        Registry::setConfig(tidyConfig);
+        OS::print(TidyConfigPrinter::dumpConfig(tidyConfig).str());
+        return 0;
+    }
+
     // Add skipped files provided by the cmd args
     tidyConfig.addSkipFile(skippedFiles);
 
@@ -166,17 +186,43 @@ int main(int argc, char** argv) {
     if (!driver.processOptions())
         return 1;
 
+    // Also add skipped files and paths to the diagnostic engine's ignore patterns
+    // so that warnings are suppressed for these locations
+    for (const auto& file : skippedFiles) {
+        // For skip-file, suppress warnings from the exact file
+        if (auto ec = driver.diagEngine.addIgnorePaths(file)) {
+            if (!superQuiet) {
+                OS::printE(fmt::format("Warning: Failed to add ignore path for '{}': {}\n", file,
+                                       ec.message()));
+            }
+        }
+    }
+
+    for (const auto& path : skippedPaths) {
+        // For skip-path, suppress warnings from files in the parent directory
+        auto parentDir = std::filesystem::path(path).parent_path().string();
+        if (!parentDir.empty()) {
+            if (auto ec = driver.diagEngine.addIgnorePaths(parentDir)) {
+                if (!superQuiet) {
+                    OS::printE(fmt::format("Warning: Failed to add ignore path for '{}': {}\n",
+                                           parentDir, ec.message()));
+                }
+            }
+        }
+    }
+
     std::unique_ptr<ast::Compilation> compilation;
+    std::unique_ptr<analysis::AnalysisManager> analysisManager;
     bool compilationOk;
     SLANG_TRY {
         compilationOk = driver.parseAllSources();
         compilation = driver.createCompilation();
-        compilationOk &= driver.reportCompilation(*compilation, true);
+        driver.reportCompilation(*compilation, true);
+        analysisManager = driver.runAnalysis(*compilation);
+        compilationOk &= driver.reportDiagnostics(true);
     }
     SLANG_CATCH(const std::exception& e) {
-#if __cpp_exceptions
-        OS::printE(fmt::format("internal compiler error: {}\n", e.what()));
-#endif
+        SLANG_REPORT_EXCEPTION(e, "internal compiler error: {}\n");
         return 1;
     }
 
@@ -193,8 +239,10 @@ int main(int argc, char** argv) {
     int retCode = 0;
 
     // Check all enabled checks
+    auto& tdc = *driver.textDiagClient;
     for (const auto& checkName : Registry::getEnabledChecks()) {
-        driver.diagClient->clear();
+        tdc.clear();
+        driver.diagEngine.clearIncludeStack();
 
         const auto check = Registry::create(checkName);
 
@@ -204,20 +252,30 @@ int main(int argc, char** argv) {
         driver.diagEngine.setMessage(check->diagCode(), check->diagMessage());
         driver.diagEngine.setSeverity(check->diagCode(), check->diagSeverity());
 
-        auto checkOk = check->check(compilation->getRoot());
+        auto checkOk = check->check(compilation->getRoot(), *analysisManager);
         if (!checkOk) {
-            retCode = 1;
 
             if (!quiet) {
-                if (check->diagSeverity() == DiagnosticSeverity::Warning) {
-                    OS::print(fmt::emphasis::bold | fmt::fg(driver.diagClient->getSeverityColor(
-                                                        DiagnosticSeverity::Warning)),
+                if (check->diagSeverity() == DiagnosticSeverity::Ignored) {
+                    // Skip.
+                }
+                else if (check->diagSeverity() == DiagnosticSeverity::Note) {
+                    OS::print(fmt::emphasis::bold |
+                                  fmt::fg(tdc.getSeverityColor(DiagnosticSeverity::Note)),
+                              " NOTE\n");
+                }
+                else if (check->diagSeverity() == DiagnosticSeverity::Warning) {
+                    OS::print(fmt::emphasis::bold |
+                                  fmt::fg(tdc.getSeverityColor(DiagnosticSeverity::Warning)),
                               " WARN\n");
                 }
-                else if (check->diagSeverity() == DiagnosticSeverity::Error) {
-                    OS::print(fmt::emphasis::bold | fmt::fg(driver.diagClient->getSeverityColor(
-                                                        DiagnosticSeverity::Error)),
+                else if (check->diagSeverity() == DiagnosticSeverity::Error ||
+                         check->diagSeverity() == DiagnosticSeverity::Fatal) {
+                    OS::print(fmt::emphasis::bold |
+                                  fmt::fg(tdc.getSeverityColor(DiagnosticSeverity::Error)),
                               " FAIL\n");
+                    // Any errors are propagated to the return code.
+                    retCode = 1;
                 }
                 else {
                     SLANG_UNREACHABLE;
@@ -228,7 +286,7 @@ int main(int argc, char** argv) {
                 for (const auto& diag : check->getDiagnostics()) {
                     driver.diagEngine.issue(diag);
                 }
-                OS::print(fmt::format("{}\n", driver.diagClient->getString()));
+                OS::print(fmt::format("{}\n", tdc.getString()));
             }
         }
         else {

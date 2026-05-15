@@ -7,6 +7,8 @@
 //------------------------------------------------------------------------------
 #include "slang/ast/types/AllTypes.h"
 
+#include <fmt/format.h>
+
 #include "slang/ast/ASTContext.h"
 #include "slang/ast/ASTSerializer.h"
 #include "slang/ast/Compilation.h"
@@ -40,8 +42,8 @@ bitwidth_t getWidth(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return 8;
         case PredefinedIntegerType::Integer: return 32;
         case PredefinedIntegerType::Time: return 64;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 bool getSigned(PredefinedIntegerType::Kind kind) {
@@ -52,8 +54,8 @@ bool getSigned(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return true;
         case PredefinedIntegerType::Integer: return true;
         case PredefinedIntegerType::Time: return false;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 bool getFourState(PredefinedIntegerType::Kind kind) {
@@ -64,8 +66,8 @@ bool getFourState(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return false;
         case PredefinedIntegerType::Integer: return true;
         case PredefinedIntegerType::Time: return true;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(PredefinedIntegerType::Kind kind) {
@@ -76,8 +78,8 @@ std::string_view getName(PredefinedIntegerType::Kind kind) {
         case PredefinedIntegerType::Byte: return "byte"sv;
         case PredefinedIntegerType::Integer: return "integer"sv;
         case PredefinedIntegerType::Time: return "time"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(ScalarType::Kind kind) {
@@ -85,8 +87,8 @@ std::string_view getName(ScalarType::Kind kind) {
         case ScalarType::Bit: return "bit"sv;
         case ScalarType::Logic: return "logic"sv;
         case ScalarType::Reg: return "reg"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view getName(FloatingType::Kind kind) {
@@ -94,8 +96,8 @@ std::string_view getName(FloatingType::Kind kind) {
         case FloatingType::Real: return "real"sv;
         case FloatingType::ShortReal: return "shortreal"sv;
         case FloatingType::RealTime: return "realtime"sv;
-        default: SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 // clang-format on
 
@@ -105,7 +107,7 @@ const Type& createPackedDims(const ASTContext& context, const Type* type,
     for (size_t i = 0; i < count; i++) {
         auto& dimSyntax = *dimensions[count - i - 1];
         auto dim = context.evalPackedDimension(dimSyntax);
-        type = &PackedArrayType::fromSyntax(*context.scope, *type, dim, dimSyntax);
+        type = &PackedArrayType::fromSyntax(context, *type, dim, dimSyntax);
     }
 
     return *type;
@@ -191,7 +193,7 @@ const Type& IntegralType::fromSyntax(Compilation& compilation, SyntaxKind intege
     size_t count = dims.size();
     for (size_t i = 0; i < count; i++) {
         auto& pair = dims[count - i - 1];
-        result = &PackedArrayType::fromSyntax(*context.scope, *result, pair.first, *pair.second);
+        result = &PackedArrayType::fromSyntax(context, *result, pair.first, *pair.second);
     }
 
     return *result;
@@ -247,6 +249,10 @@ ConstantValue FloatingType::getDefaultValueImpl() const {
     return real_t(0.0);
 }
 
+void ScalarType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("isSigned", isSigned);
+}
+
 EnumType::EnumType(Compilation& compilation, SourceLocation loc, const Type& baseType_,
                    const ASTContext& context) :
     IntegralType(SymbolKind::EnumType, "", loc, baseType_.getBitWidth(), baseType_.isSigned(),
@@ -294,14 +300,15 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
         bitWidth = cb->getBitWidth();
     }
     else {
-        base = &comp.getType(*syntax.baseType, context);
+        auto& bts = *syntax.baseType;
+        base = &comp.getType(bts, context);
         cb = &base->getCanonicalType();
         if (!cb->isError()) {
             // Error if the named type is invalid for an enum base type. Other invalid types
             // will have been diagnosed already by the parser.
-            if (!cb->isSimpleBitVector() && syntax.baseType->kind == SyntaxKind::NamedType) {
-                context.addDiag(diag::InvalidEnumBase, syntax.baseType->getFirstToken().location())
-                    << *base;
+            if (!cb->isSimpleBitVector() &&
+                (bts.kind == SyntaxKind::NamedType || IntegerTypeSyntax::isKind(bts.kind))) {
+                context.addDiag(diag::InvalidEnumBase, bts.sourceRange()) << *base;
                 cb = &comp.getErrorType();
             }
             else {
@@ -309,10 +316,31 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
                 SLANG_ASSERT(bitWidth);
             }
         }
+        else {
+            // There are many reasons that the base type could be an error, most of which
+            // will have already been diagnosed. We only need to check for the case where
+            // the base type is referring to this same enum definition via a forward decl,
+            // which is a circular reference.
+            if (base->kind == SymbolKind::TypeAlias && base->getSyntax() == syntax.parent) {
+                auto& diag = context.addDiag(diag::EnumCircularBaseType,
+                                             syntax.baseType->sourceRange());
+                diag << base->name;
+
+                auto& alias = base->as<TypeAliasType>();
+                if (auto fwd = alias.getFirstForwardDecl())
+                    diag.addNote(diag::NoteReferencedHere, fwd->location);
+            }
+        }
     }
 
     SVInt allOnes(bitWidth, 0, cb->isSigned());
     allOnes.setAllOnes();
+
+    // The maximum value that can be incremented without overflow depends on signedness.
+    // For unsigned types this is all-ones (e.g. 0xFF); for signed types it is the
+    // largest positive value (e.g. 0x7F), since incrementing it wraps to the most
+    // negative value.
+    SVInt maxVal = cb->isSigned() ? allOnes.lshr(1) : allOnes;
 
     SVInt one(bitWidth, 1, cb->isSigned());
     ConstantValue previous;
@@ -376,12 +404,12 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
         }
 
         ev.getValue();
-        if (!initExpr->constant)
+        if (!initExpr->getConstant())
             return;
 
         // An enumerated name with x or z assignments assigned to an enum with no explicit data type
         // or an explicit 2-state declaration shall be a syntax error.
-        auto& value = initExpr->constant->integer();
+        auto& value = initExpr->getConstant()->integer();
         if (!base->isFourState() && value.hasUnknown()) {
             context.addDiag(diag::EnumValueUnknownBits, previousRange) << value << *base;
             return;
@@ -431,7 +459,7 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
                 previous = nullptr;
                 return;
             }
-            else if (prev == allOnes) {
+            else if (prev == maxVal) {
                 auto& diag = context.addDiag(diag::EnumValueOverflow, loc);
                 diag << prev << *base << previousRange;
                 previous = nullptr;
@@ -448,8 +476,18 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
         previousRange = range;
     };
 
+    const uint32_t maxEnumValues = comp.getOptions().maxEnumValues;
+    uint32_t enumValueCount = 0;
+
     for (auto member : syntax.members) {
         if (member->dimensions.empty()) {
+            if (enumValueCount >= maxEnumValues) {
+                auto& diag = context.addDiag(diag::EnumValueCountExceeded, member->sourceRange());
+                diag << enumValueCount + 1 << maxEnumValues;
+                break;
+            }
+            ++enumValueCount;
+
             auto& ev = EnumValueSymbol::fromSyntax(comp, *member, *resultType, std::nullopt);
             enumType->addMember(ev);
             insertCB(ev);
@@ -479,6 +517,16 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
             // Enum ranges must be integer literals.
             checkEnumRange(context, *member->dimensions[0]);
 
+            // Check that this range won't exceed the member count limit.
+            auto rangeWidth = dim.range.width();
+            if (rangeWidth > maxEnumValues - enumValueCount) {
+                auto& diag = context.addDiag(diag::EnumValueCountExceeded,
+                                             member->dimensions[0]->sourceRange());
+                diag << enumValueCount + rangeWidth << maxEnumValues;
+                continue;
+            }
+            enumValueCount += rangeWidth;
+
             // Set up the first element using the initializer. All other elements (if there are any)
             // don't get the initializer.
             int32_t index = dim.range.left;
@@ -493,7 +541,7 @@ const Type& EnumType::fromSyntax(Compilation& comp, const EnumTypeSyntax& syntax
                     inferValue(ev, member->sourceRange());
             }
 
-            bool down = dim.range.isLittleEndian();
+            bool down = dim.range.isDescending();
             while (index != dim.range.right) {
                 index = down ? index - 1 : index + 1;
 
@@ -556,6 +604,10 @@ const Type& EnumType::findDefinition(Compilation& comp, const EnumTypeSyntax& sy
     }
 
     return comp.getErrorType();
+}
+
+void EnumType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("baseType", baseType);
 }
 
 EnumValueSymbol::EnumValueSymbol(std::string_view name, SourceLocation loc) :
@@ -626,25 +678,25 @@ PackedArrayType::PackedArrayType(const Type& elementType, ConstantRange range,
     elementType(elementType), range(range) {
 }
 
-const Type& PackedArrayType::fromSyntax(const Scope& scope, const Type& elementType,
+const Type& PackedArrayType::fromSyntax(const ASTContext& context, const Type& elementType,
                                         const EvaluatedDimension& dimension,
                                         const SyntaxNode& syntax) {
-    auto& comp = scope.getCompilation();
+    auto& comp = context.getCompilation();
     if (elementType.isError())
         return elementType;
 
     if (!elementType.isIntegral()) {
         if (elementType.getCanonicalType().kind == SymbolKind::DPIOpenArrayType)
-            scope.addDiag(diag::MultiplePackedOpenArrays, syntax.sourceRange());
+            context.addDiag(diag::MultiplePackedOpenArrays, syntax.sourceRange());
         else
-            scope.addDiag(diag::PackedArrayNotIntegral, syntax.sourceRange()) << elementType;
+            context.addDiag(diag::PackedArrayNotIntegral, syntax.sourceRange()) << elementType;
         return comp.getErrorType();
     }
 
     if (!dimension.isRange()) {
         if (dimension.kind == DimensionKind::DPIOpenArray) {
             if (elementType.isPackedArray()) {
-                scope.addDiag(diag::MultiplePackedOpenArrays, syntax.sourceRange());
+                context.addDiag(diag::MultiplePackedOpenArrays, syntax.sourceRange());
                 return comp.getErrorType();
             }
 
@@ -655,28 +707,33 @@ const Type& PackedArrayType::fromSyntax(const Scope& scope, const Type& elementT
         return comp.getErrorType();
     }
 
-    return fromDim(scope, elementType, dimension.range, syntax);
+    return fromDim(comp, context, elementType, dimension.range, syntax);
 }
 
-const Type& PackedArrayType::fromDim(const Scope& scope, const Type& elementType, ConstantRange dim,
+const Type& PackedArrayType::fromDim(BumpAllocator& alloc, const ASTContext& context,
+                                     const Type& elementType, ConstantRange dim,
                                      DeferredSourceRange sourceRange) {
     if (elementType.isError())
         return elementType;
 
-    auto& comp = scope.getCompilation();
     auto width = checkedMulU32(elementType.getBitWidth(), dim.width());
     if (!width || width > (uint32_t)SVInt::MAX_BITS) {
         uint64_t fullWidth = uint64_t(elementType.getBitWidth()) * dim.width();
-        scope.addDiag(diag::PackedTypeTooLarge, sourceRange.get())
+        context.addDiag(diag::PackedTypeTooLarge, sourceRange.get())
             << fullWidth << (uint32_t)SVInt::MAX_BITS;
-        return comp.getErrorType();
+        return ErrorType::Instance;
     }
 
-    auto result = comp.emplace<PackedArrayType>(elementType, dim, bitwidth_t(*width));
+    auto result = alloc.emplace<PackedArrayType>(elementType, dim, bitwidth_t(*width));
     if (auto syntax = sourceRange.syntax())
         result->setSyntax(*syntax);
 
     return *result;
+}
+
+void PackedArrayType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
+    serializer.write("range", fmt::format("[{}:{}]", range.left, range.right));
 }
 
 FixedSizeUnpackedArrayType::FixedSizeUnpackedArrayType(const Type& elementType, ConstantRange range,
@@ -686,35 +743,35 @@ FixedSizeUnpackedArrayType::FixedSizeUnpackedArrayType(const Type& elementType, 
     range(range), selectableWidth(selectableWidth), bitstreamWidth(bitstreamWidth) {
 }
 
-const Type& FixedSizeUnpackedArrayType::fromDims(const Scope& scope, const Type& elementType,
+const Type& FixedSizeUnpackedArrayType::fromDims(BumpAllocator& alloc, const ASTContext& context,
+                                                 const Type& elementType,
                                                  std::span<const ConstantRange> dimensions,
                                                  DeferredSourceRange sourceRange) {
     const Type* result = &elementType;
     size_t count = dimensions.size();
     for (size_t i = 0; i < count; i++)
-        result = &fromDim(scope, *result, dimensions[count - i - 1], sourceRange);
+        result = &fromDim(alloc, context, *result, dimensions[count - i - 1], sourceRange);
 
     return *result;
 }
 
-const Type& FixedSizeUnpackedArrayType::fromDim(const Scope& scope, const Type& elementType,
-                                                ConstantRange dim,
+const Type& FixedSizeUnpackedArrayType::fromDim(BumpAllocator& alloc, const ASTContext& context,
+                                                const Type& elementType, ConstantRange dim,
                                                 DeferredSourceRange sourceRange) {
     if (elementType.isError())
         return elementType;
 
-    auto& comp = scope.getCompilation();
     auto selectableWidth = checkedMulU64(elementType.getSelectableWidth(), dim.width());
     auto bitstreamWidth = checkedMulU64(elementType.getBitstreamWidth(), dim.width());
 
     if (!selectableWidth || selectableWidth > MaxBitWidth || !bitstreamWidth ||
         bitstreamWidth > MaxBitWidth) {
-        scope.addDiag(diag::ObjectTooLarge, sourceRange.get());
-        return comp.getErrorType();
+        context.addDiag(diag::ObjectTooLarge, sourceRange.get());
+        return ErrorType::Instance;
     }
 
-    auto result = comp.emplace<FixedSizeUnpackedArrayType>(elementType, dim, *selectableWidth,
-                                                           *bitstreamWidth);
+    auto result = alloc.emplace<FixedSizeUnpackedArrayType>(elementType, dim, *selectableWidth,
+                                                            *bitstreamWidth);
     if (auto syntax = sourceRange.syntax())
         result->setSyntax(*syntax);
 
@@ -725,12 +782,21 @@ ConstantValue FixedSizeUnpackedArrayType::getDefaultValueImpl() const {
     return std::vector<ConstantValue>(range.width(), elementType.getDefaultValue());
 }
 
+void FixedSizeUnpackedArrayType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
+    serializer.write("range", fmt::format("[{}:{}]", range.left, range.right));
+}
+
 DynamicArrayType::DynamicArrayType(const Type& elementType) :
     Type(SymbolKind::DynamicArrayType, "", SourceLocation()), elementType(elementType) {
 }
 
 ConstantValue DynamicArrayType::getDefaultValueImpl() const {
     return std::vector<ConstantValue>();
+}
+
+void DynamicArrayType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
 }
 
 DPIOpenArrayType::DPIOpenArrayType(const Type& elementType, bool isPacked) :
@@ -742,6 +808,11 @@ ConstantValue DPIOpenArrayType::getDefaultValueImpl() const {
     return nullptr;
 }
 
+void DPIOpenArrayType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
+    serializer.write("isPacked", isPacked);
+}
+
 AssociativeArrayType::AssociativeArrayType(const Type& elementType, const Type* indexType) :
     Type(SymbolKind::AssociativeArrayType, "", SourceLocation()), elementType(elementType),
     indexType(indexType) {
@@ -749,6 +820,12 @@ AssociativeArrayType::AssociativeArrayType(const Type& elementType, const Type* 
 
 ConstantValue AssociativeArrayType::getDefaultValueImpl() const {
     return AssociativeArray();
+}
+
+void AssociativeArrayType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
+    if (indexType)
+        serializer.write("indexType", *indexType);
 }
 
 QueueType::QueueType(const Type& elementType, uint32_t maxBound) :
@@ -760,6 +837,11 @@ ConstantValue QueueType::getDefaultValueImpl() const {
     SVQueue result;
     result.maxBound = maxBound;
     return result;
+}
+
+void QueueType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("elementType", elementType);
+    serializer.write("maxBound", maxBound);
 }
 
 PackedStructType::PackedStructType(Compilation& compilation, bool isSigned, SourceLocation loc,
@@ -787,8 +869,8 @@ const Type& PackedStructType::fromSyntax(Compilation& comp, const StructUnionTyp
 
     SmallVector<FieldSymbol*> members;
     for (auto member : syntax.members) {
-        if (member->previewNode)
-            structType->addMembers(*member->previewNode);
+        if (auto preview = member->previewNode())
+            structType->addMembers(*preview);
 
         const Type& type = comp.getType(*member->type, context);
         structType->isFourState |= type.isFourState();
@@ -880,8 +962,8 @@ const Type& UnpackedStructType::fromSyntax(const ASTContext& context,
     uint64_t bitstreamWidth = 0;
     SmallVector<const FieldSymbol*> fields;
     for (auto member : syntax.members) {
-        if (member->previewNode)
-            result->addMembers(*member->previewNode);
+        if (auto preview = member->previewNode())
+            result->addMembers(*preview);
 
         RandMode randMode = RandMode::None;
         switch (member->randomQualifier.kind) {
@@ -958,8 +1040,8 @@ const Type& PackedUnionType::fromSyntax(Compilation& comp, const StructUnionType
     ASTContext context(*unionType, LookupLocation::max, parentContext.flags);
 
     for (auto member : syntax.members) {
-        if (member->previewNode)
-            unionType->addMembers(*member->previewNode);
+        if (auto preview = member->previewNode())
+            unionType->addMembers(*preview);
 
         const Type& type = comp.getType(*member->type, context);
         unionType->isFourState |= type.isFourState();
@@ -1026,6 +1108,11 @@ const Type& PackedUnionType::fromSyntax(Compilation& comp, const StructUnionType
     return createPackedDims(context, unionType, syntax.dimensions);
 }
 
+void PackedUnionType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("isTagged", isTagged);
+    serializer.write("isSoft", isSoft);
+}
+
 UnpackedUnionType::UnpackedUnionType(Compilation& compilation, bool isTagged, SourceLocation loc,
                                      const ASTContext& context) :
     Type(SymbolKind::UnpackedUnionType, "", loc), Scope(compilation, this),
@@ -1062,8 +1149,8 @@ const Type& UnpackedUnionType::fromSyntax(const ASTContext& context,
 
     SmallVector<const FieldSymbol*> fields;
     for (auto member : syntax.members) {
-        if (member->previewNode)
-            result->addMembers(*member->previewNode);
+        if (auto preview = member->previewNode())
+            result->addMembers(*preview);
 
         for (auto decl : member->declarators) {
             auto field = comp.emplace<FieldSymbol>(decl->name.valueText(), decl->name.location(),
@@ -1104,12 +1191,16 @@ const Type& UnpackedUnionType::fromSyntax(const ASTContext& context,
     return *result;
 }
 
+void UnpackedUnionType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("isTagged", isTagged);
+}
+
 ConstantValue NullType::getDefaultValueImpl() const {
-    return ConstantValue::NullPlaceholder{};
+    return NullConstant;
 }
 
 ConstantValue CHandleType::getDefaultValueImpl() const {
-    return ConstantValue::NullPlaceholder{};
+    return NullConstant;
 }
 
 ConstantValue StringType::getDefaultValueImpl() const {
@@ -1117,7 +1208,7 @@ ConstantValue StringType::getDefaultValueImpl() const {
 }
 
 ConstantValue EventType::getDefaultValueImpl() const {
-    return ConstantValue::NullPlaceholder{};
+    return NullConstant;
 }
 
 const Type& VirtualInterfaceType::fromSyntax(const ASTContext& context,
@@ -1164,7 +1255,11 @@ const Type& VirtualInterfaceType::fromSyntax(const ASTContext& context,
 }
 
 ConstantValue VirtualInterfaceType::getDefaultValueImpl() const {
-    return ConstantValue::NullPlaceholder{};
+    return NullConstant;
+}
+
+void VirtualInterfaceType::serializeTo(ASTSerializer& serializer) const {
+    serializer.write("target", toString());
 }
 
 ForwardingTypedefSymbol& ForwardingTypedefSymbol::fromSyntax(

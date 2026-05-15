@@ -181,6 +181,22 @@ endfunction : new
     CHECK_DIAGNOSTICS_EMPTY;
 }
 
+TEST_CASE("Extern/Pure implicit function parsing") {
+    auto& text = R"(
+module memMod();
+    class C;
+        extern static function f();
+    endclass
+
+    function C::f();
+    endfunction
+endmodule
+)";
+
+    parseCompilationUnit(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
 TEST_CASE("Property declarations") {
     auto& text = R"(
 property p3;
@@ -272,9 +288,11 @@ endmodule : m1;
 
     parseCompilationUnit(text);
 
-    REQUIRE(diagnostics.size() == 2);
-    CHECK(diagnostics[0].code == diag::ImplicitNotAllowed);
-    CHECK(diagnostics[1].code == diag::ExpectedDeclarator);
+    REQUIRE(diagnostics.size() == 4);
+    CHECK(diagnostics[0].code == diag::ExpectedToken);
+    CHECK(diagnostics[1].code == diag::ExpectedToken);
+    CHECK(diagnostics[2].code == diag::UnexpectedEndDelim);
+    CHECK(diagnostics[3].code == diag::ExpectedDeclarator);
 }
 
 TEST_CASE("Errors for directives inside design elements") {
@@ -497,6 +515,49 @@ endclass
     REQUIRE(diagnostics.size() == 2);
     CHECK(diagnostics[0].code == diag::InvalidSuperNew);
     CHECK(diagnostics[1].code == diag::InvalidSuperNew);
+}
+
+TEST_CASE("super.new inside begin/end block -- valid") {
+    auto& text = R"(
+class A;
+    function new;
+    endfunction
+endclass
+
+class B extends A;
+    function new;
+        begin
+            super.new();
+        end
+    endfunction
+endclass
+)";
+
+    parseCompilationUnit(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("super.new inside begin/end block -- not first statement") {
+    auto& text = R"(
+class A;
+    function new;
+    endfunction
+endclass
+
+class B extends A;
+    function new;
+        begin
+            $display("Test");
+            super.new();
+        end
+    endfunction
+endclass
+)";
+
+    parseCompilationUnit(text);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::InvalidSuperNew);
 }
 
 TEST_CASE("Bind directive parsing") {
@@ -1164,6 +1225,28 @@ library rtlLib /a/b/c, f/...*?/asdf*.v,
     CHECK_DIAGNOSTICS_EMPTY;
 }
 
+TEST_CASE("Library map path with glob wildcard containing /*") {
+    // Paths like $ROOT/*/subdir/*.v contain /* which must not be treated as
+    // a block comment start by the lexer.
+    auto tree = SyntaxTree::fromLibraryMapText(
+        R"(library STUB $IP_ROOT/*/stub/*.v, $PRJ/top/stubs/*.v;)", getSourceManager());
+
+    REQUIRE(tree);
+
+    diagnostics = tree->diagnostics();
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    auto& libMap = tree->root().as<LibraryMapSyntax>();
+    REQUIRE(libMap.members.size() == 1);
+    auto& libDecl = libMap.members[0]->as<LibraryDeclarationSyntax>();
+    CHECK(libDecl.name.valueText() == "STUB");
+    REQUIRE(libDecl.filePaths.size() == 2);
+    CHECK(libDecl.filePaths[0]->path.valueText().find("$IP_ROOT/*/stub/*.v") !=
+          std::string_view::npos);
+    CHECK(libDecl.filePaths[1]->path.valueText().find("$PRJ/top/stubs/*.v") !=
+          std::string_view::npos);
+}
+
 TEST_CASE("Genblock parsing regress") {
     auto& text = R"(
 module m;
@@ -1529,5 +1612,135 @@ task:
 )";
 
     parseCompilationUnit(text, LanguageVersion::v1800_2023);
+    REQUIRE(diagnostics.size() == 1);
+}
+
+TEST_CASE("Nested attributes are not allowed") {
+    auto& text = R"(
+(* a1  , a2 = - (* a3 = 2  *) null *) module mod;
+endmodule
+)";
+
+    parseCompilationUnit(text);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::AttributesNotAllowed);
+}
+
+TEST_CASE("Struct type missing brace error recovery") {
+    auto& text = R"(
+module m;
+    struct { logic [3:0][1:0] a;
+    assign i = a[3:1][0];
+endmodule
+)";
+
+    parseCompilationUnit(text);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::ExpectedToken);
+}
+
+TEST_CASE("isEquivalentTo wrong result regress") {
+    auto& text1 = R"(
+module m;
+    int i = 1;
+endmodule
+)";
+    auto& node1 = parseCompilationUnit(text1);
+
+    auto& text2 = R"(
+module n;
+    int i = 1;
+endmodule
+)";
+    auto& node2 = parseCompilationUnit(text2);
+
+    CHECK(!node1.isEquivalentTo(node2));
+}
+
+TEST_CASE("Parameters with implicit types must use keyword") {
+    auto& text = R"(
+module test1 #([7:0] A = 1);
+  initial begin
+    $display("FAILED");
+  end
+endmodule
+
+module test2 #(signed A = 1);
+  initial begin
+    $display("FAILED");
+  end
+endmodule
+
+module test3 #(parameter real A = 1.0, signed B = 2);
+  initial begin
+    $display("FAILED");
+  end
+endmodule
+)";
+
+    parseCompilationUnit(text);
+
     REQUIRE(diagnostics.size() == 3);
+    CHECK(diagnostics[0].code == diag::ImplicitParamTypeKeyword);
+    CHECK(diagnostics[1].code == diag::ImplicitParamTypeKeyword);
+    CHECK(diagnostics[2].code == diag::ImplicitParamTypeKeyword);
+}
+
+TEST_CASE("Trailing comma in ANSI port list") {
+    auto& text = "module foo(input wire a, input wire b,); endmodule";
+    const auto& module = parseModule(text);
+
+    REQUIRE(module.kind == SyntaxKind::ModuleDeclaration);
+    CHECK(module.header->ports->kind == SyntaxKind::AnsiPortList);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::MisplacedTrailingSeparator);
+}
+
+TEST_CASE("No trailing comma in ANSI port list still works") {
+    auto& text = "module foo(input wire a, input wire b); endmodule";
+    const auto& module = parseModule(text);
+
+    REQUIRE(module.kind == SyntaxKind::ModuleDeclaration);
+    CHECK(module.header->ports->kind == SyntaxKind::AnsiPortList);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Regress for malformed diag with empty duplicate function specifiers") {
+    auto& text = R"(
+function:o:
+)";
+
+    parseCompilationUnit(text, LanguageVersion::v1800_2023);
+    REQUIRE(diagnostics.size() == 2);
+}
+
+TEST_CASE("Typo keyword in parseMember - 'alwasy' close to 'always'") {
+    // 'alwasy' should trigger TypoKeyword in parseMember
+    auto& text = R"(
+module m;
+    alwasy @(posedge clk) begin end
+endmodule
+)";
+    parseCompilationUnit(text);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::TypoKeyword);
+}
+
+TEST_CASE("Typo keyword in expected location") {
+    // 'alwasy' should trigger TypoKeyword in parseMember
+    auto& text = R"(
+module m;
+    property p;
+        1;
+    endpropety
+endmodule
+)";
+    parseCompilationUnit(text);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::TypoKeyword);
 }

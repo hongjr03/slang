@@ -10,6 +10,7 @@
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
+#include "slang/ast/types/TypePrinter.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/text/CharInfo.h"
 #include "slang/text/FormatBuffer.h"
@@ -181,15 +182,25 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
                   std::is_base_of_v<AssertionExpr, T> || std::is_base_of_v<BinsSelectExpr, T> ||
                   std::is_base_of_v<Pattern, T>) {
         writer.startObject();
-        if (elem.syntax && includeSourceInfo) {
-            if (auto sm = compilation.getSourceManager()) {
-                auto sr = elem.syntax->sourceRange();
-                write("source_file_start", sm->getFileName(sr.start()));
-                write("source_file_end", sm->getFileName(sr.end()));
-                write("source_line_start", sm->getLineNumber(sr.start()));
-                write("source_line_end", sm->getLineNumber(sr.end()));
-                write("source_column_start", sm->getColumnNumber(sr.start()));
-                write("source_column_end", sm->getColumnNumber(sr.end()));
+        if (auto sm = compilation.getSourceManager(); sm && includeSourceInfo) {
+            SourceRange range;
+            if constexpr (requires { elem.sourceRange; }) {
+                range = elem.sourceRange;
+            }
+            else if (elem.syntax) {
+                range = elem.syntax->sourceRange();
+            }
+
+            if (range.start() && range.end() && range.start() != SourceLocation::NoLocation &&
+                range.end() != SourceLocation::NoLocation) {
+                auto start = sm->getFullyExpandedLoc(range.start());
+                auto end = sm->getFullyExpandedLoc(range.end());
+                write("source_file_start", sm->getFileName(start));
+                write("source_file_end", sm->getFileName(end));
+                write("source_line_start", sm->getLineNumber(start));
+                write("source_line_end", sm->getLineNumber(end));
+                write("source_column_start", sm->getColumnNumber(start));
+                write("source_column_end", sm->getColumnNumber(end));
             }
         }
     }
@@ -208,10 +219,15 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
             elem.serializeTo(*this);
         }
 
-        ASTContext ctx(compilation.getRoot(), LookupLocation::max);
-        ConstantValue constant = ctx.tryEval(elem);
-        if (constant)
-            write("constant", constant);
+        if (tryConstantFold) {
+            ASTContext ctx(compilation.getRoot(), LookupLocation::max);
+            ConstantValue constant = ctx.tryEval(elem);
+            if (constant)
+                write("constant", constant);
+        }
+        else if (elem.getConstant()) {
+            write("constant", *elem.getConstant());
+        }
 
         writer.endObject();
     }
@@ -243,16 +259,62 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
         }
         writer.endObject();
     }
-    else if constexpr (std::is_base_of_v<Type, T> && !std::is_same_v<TypeAliasType, T> &&
-                       !std::is_same_v<ClassType, T> && !std::is_same_v<CovergroupType, T>) {
-        writer.writeValue(elem.toString());
-    }
     else {
         if constexpr (std::is_base_of_v<Type, T>) {
-            if (!inMembersArray) {
-                writer.writeValue(elem.toString());
+            auto printType = [&] {
+                TypePrinter printer;
+                printer.options.skipTypeDefs = true;
+                if (includeAddrs) {
+                    printer.options.typedefsAsLinks = true;
+                    printer.options.enumsAsLinks = true;
+                    printer.options.classesAsLinks = true;
+                }
+
+                printer.append(elem);
+                return printer.toString();
+            };
+
+            // If we're not including detailed type info, we can just write the type name,
+            // unless this a type alias, class, or covergroup. Otherwise we will fall through
+            // and serialize full detailed type info.
+            if (!detailedTypeInfo &&
+                (!inMembersArray ||
+                 (!std::is_same_v<TypeAliasType, T> && !std::is_same_v<ClassType, T> &&
+                  !std::is_same_v<CovergroupType, T> && !std::is_same_v<EnumType, T>))) {
+                writer.writeValue(printType());
                 return;
             }
+
+            // Even when printing detailed type info, if we're not in a members array prefer
+            // to print links to typedefs, enums, classes, and covergroups to avoid
+            // re-serializing the same type many times over.
+            if (!inMembersArray && includeAddrs &&
+                (std::is_same_v<TypeAliasType, T> || std::is_same_v<EnumType, T> ||
+                 std::is_same_v<ClassType, T> || std::is_same_v<CovergroupType, T>)) {
+                writer.writeValue(printType());
+                return;
+            }
+
+            // Avoid infinite loops with recursive types.
+            if (!visiting.insert(&elem).second) {
+                writer.writeValue(printType());
+                return;
+            }
+        }
+
+        // Skip uninstantiated blocks and instances.
+        if constexpr (std::is_same_v<InstanceSymbol, T> ||
+                      std::is_same_v<CheckerInstanceSymbol, T>) {
+            if (elem.body.flags.has(InstanceFlags::Uninstantiated))
+                return;
+        }
+        else if constexpr (std::is_same_v<GenerateBlockArraySymbol, T>) {
+            if (!elem.valid)
+                return;
+        }
+        else if constexpr (std::is_same_v<GenerateBlockSymbol, T>) {
+            if (elem.isUninstantiated)
+                return;
         }
 
         // Ignore built-in methods on class types.
@@ -261,10 +323,25 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
                 return;
         }
 
+        if (elem.kind == SymbolKind::TransparentMember) {
+            // Ignore transparent members, except in one particular case. The first time
+            // we see a member of an enum type we should print it since all other references
+            // to the enum will print links instead.
+            if (auto ev = elem.template as<TransparentMemberSymbol>()
+                              .wrapped.template as_if<EnumValueSymbol>();
+                ev && includeAddrs && inMembersArray) {
+
+                auto& enumType = ev->getType();
+                if (printedEnums.insert(&enumType).second)
+                    serialize(enumType, /* inMembersArray */ true);
+            }
+            return;
+        }
+
         writer.startObject();
         write("name", elem.name);
         write("kind", toString(elem.kind));
-        if (includeSourceInfo) {
+        if (includeSourceInfo && elem.location && elem.location != SourceLocation::NoLocation) {
             if (auto sm = compilation.getSourceManager()) {
                 write("source_file", sm->getFileName(elem.location));
                 write("source_line", sm->getLineNumber(elem.location));
@@ -284,7 +361,8 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
         }
 
         if constexpr (std::is_base_of_v<ValueSymbol, T>) {
-            write("type", elem.getType());
+            if (elem.kind != SymbolKind::EnumValue)
+                write("type", elem.getType());
 
             if (auto init = elem.getInitializer())
                 write("initializer", *init);
@@ -295,6 +373,15 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
                 startArray("members");
                 for (auto& member : elem.members())
                     serialize(member, /* inMembersArray */ true);
+
+                auto& ddm = compilation.getDefaultDisableMap();
+                if (auto it = ddm.find(&elem); it != ddm.end()) {
+                    writer.startObject();
+                    write("kind", "defaultDisable"sv);
+                    write("expr", *it->second);
+                    writer.endObject();
+                }
+
                 endArray();
             }
         }
@@ -304,6 +391,10 @@ void ASTSerializer::visit(const T& elem, bool inMembersArray) {
         }
 
         writer.endObject();
+
+        if constexpr (std::is_base_of_v<Type, T>) {
+            visiting.erase(&elem);
+        }
     }
 }
 

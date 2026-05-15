@@ -11,22 +11,13 @@
 
 namespace slang::ast {
 
-// clang-format off
-#define CK(x) \
-    x(Implicit) \
-    x(Propagated) \
-    x(StreamingConcat) \
-    x(Explicit) \
-    x(BitstreamCast)
-// clang-format on
-SLANG_ENUM(ConversionKind, CK)
-#undef CK
-
 /// Represents a type conversion expression (implicit or explicit).
-class SLANG_EXPORT ConversionExpression : public Expression {
+class SLANG_EXPORT ConversionExpression final : public Expression {
 public:
     /// The kind of conversion.
-    const ConversionKind conversionKind;
+    ConversionKind conversionKind;
+
+    bool isConstCast = false;
 
     ConversionExpression(const Type& type, ConversionKind conversionKind, Expression& operand,
                          SourceRange sourceRange) :
@@ -45,6 +36,7 @@ public:
     ConstantValue evalImpl(EvalContext& context) const;
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const ConversionExpression& rhs) const;
 
     ConstantValue applyTo(EvalContext& context, ConstantValue&& value) const;
 
@@ -65,6 +57,11 @@ public:
                                  SourceRange sourceRange, ConstantValue&& value,
                                  ConversionKind conversionKind, const Expression* expr = nullptr,
                                  SourceRange implicitOpRange = {});
+
+    static void checkImplicitConversions(const ASTContext& context, const Type& from,
+                                         const Type& to, const Expression& expr,
+                                         const Expression* parentExpr, SourceRange opRange,
+                                         ConversionKind conversionKind);
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::Conversion; }
 

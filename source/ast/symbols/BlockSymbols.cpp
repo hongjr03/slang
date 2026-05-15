@@ -11,6 +11,7 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/Expression.h"
+#include "slang/ast/Symbol.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/statements/LoopStatements.h"
 #include "slang/ast/statements/MiscStatements.h"
@@ -37,8 +38,12 @@ const Statement& StatementBlockSymbol::getStatement(const ASTContext& parentCont
             return *stmt;
 
         auto syntax = getSyntax();
-        if (!syntax || syntax->kind == SyntaxKind::RsRule) {
-            stmt = &BlockStatement::makeEmpty(parentContext.getCompilation());
+        if (!syntax || syntax->kind == SyntaxKind::RsRule ||
+            syntax->kind == SyntaxKind::ConditionalPattern) {
+
+            auto& bs = BlockStatement::makeEmpty(parentContext.getCompilation());
+            bs.blockSymbol = this;
+            stmt = &bs;
         }
         else {
             ASTContext context = parentContext;
@@ -123,8 +128,8 @@ StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
     auto& comp = scope.getCompilation();
     const VariableSymbol* lastVar = nullptr;
     for (auto init : syntax.initializers) {
-        if (init->previewNode)
-            result->addMembers(*init->previewNode);
+        if (auto preview = init->previewNode())
+            result->addMembers(*preview);
 
         auto& var = VariableSymbol::fromSyntax(comp, init->as<ForVariableDeclarationSyntax>(),
                                                lastVar);
@@ -152,14 +157,83 @@ StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
 }
 
 StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
+                                                       const ConditionalStatementSyntax& syntax) {
+    // Each matches clause gets its own block with its own variables.
+    auto& comp = scope.getCompilation();
+    StatementBlockSymbol* first = nullptr;
+    StatementBlockSymbol* curr = nullptr;
+
+    for (auto cond : syntax.predicate->conditions) {
+        if (cond->matchesClause) {
+            auto block = comp.emplace<StatementBlockSymbol>(
+                comp, ""sv, cond->matchesClause->getFirstToken().location(),
+                StatementBlockKind::Sequential, VariableLifetime::Automatic);
+
+            // Each block needs elaboration to collect pattern variables.
+            block->setNeedElaboration();
+            block->setSyntax(*cond);
+
+            if (!first) {
+                first = curr = block;
+            }
+            else {
+                curr->addMember(*block);
+                curr = block;
+            }
+        }
+    }
+
+    // The most nested block gets the actual statement items. If it's already a sequential
+    // block we can just use that, otherwise we need to fabricate one.
+    StatementBlockSymbol* block;
+    if (syntax.statement->kind == SyntaxKind::SequentialBlockStatement ||
+        syntax.statement->kind == SyntaxKind::ParallelBlockStatement) {
+
+        block = &StatementBlockSymbol::fromSyntax(scope,
+                                                  syntax.statement->as<BlockStatementSyntax>());
+    }
+    else {
+        block = comp.emplace<StatementBlockSymbol>(comp, ""sv,
+                                                   syntax.statement->getFirstToken().location(),
+                                                   StatementBlockKind::Sequential,
+                                                   VariableLifetime::Automatic);
+        block->setSyntax(*syntax.statement);
+        block->setAttributes(scope, syntax.attributes);
+        block->blocks = Statement::createAndAddBlockItems(*block, *syntax.statement,
+                                                          /* labelHandled */ false);
+    }
+
+    SLANG_ASSERT(curr && first);
+    curr->addMember(*block);
+
+    return *first;
+}
+
+StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
+                                                       const PatternCaseItemSyntax& syntax) {
+    auto& comp = scope.getCompilation();
+    auto result = comp.emplace<StatementBlockSymbol>(comp, ""sv, syntax.getFirstToken().location(),
+                                                     StatementBlockKind::Sequential,
+                                                     VariableLifetime::Automatic);
+    result->setSyntax(syntax);
+    result->blocks = Statement::createAndAddBlockItems(*result, *syntax.statement,
+                                                       /* labelHandled */ false);
+
+    // This block needs elaboration to collect pattern variables.
+    result->setNeedElaboration();
+
+    return *result;
+}
+
+StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
                                                        const RandSequenceStatementSyntax& syntax) {
     auto [name, loc] = getLabel(syntax, syntax.randsequence.location());
     auto result = createBlock(scope, syntax, name, loc, StatementBlockKind::Sequential,
                               VariableLifetime::Automatic);
 
     for (auto prod : syntax.productions) {
-        if (prod->previewNode)
-            result->addMembers(*prod->previewNode);
+        if (auto preview = prod->previewNode())
+            result->addMembers(*preview);
 
         if (prod->name.valueText().empty())
             continue;
@@ -181,8 +255,8 @@ StatementBlockSymbol& StatementBlockSymbol::fromSyntax(const Scope& scope,
     result->setNeedElaboration();
 
     for (auto prod : syntax.prods) {
-        if (prod->previewNode)
-            result->addMembers(*prod->previewNode);
+        if (auto preview = prod->previewNode())
+            result->addMembers(*preview);
 
         if (prod->kind == SyntaxKind::RsCodeBlock) {
             result->addMember(
@@ -224,6 +298,14 @@ void StatementBlockSymbol::elaborateVariables(function_ref<void(const Symbol&)> 
     if (!syntax)
         return;
 
+    auto createInvalid = [&] {
+        auto& comp = getCompilation();
+        auto& result = *comp.emplace<BlockStatement>(InvalidStatement::Instance, blockKind,
+                                                     SourceRange());
+        result.blockSymbol = this;
+        return comp.emplace<InvalidStatement>(&result);
+    };
+
     if (syntax->kind == SyntaxKind::RsRule) {
         // Create variables to hold results from all non-void productions
         // invoked by this rule.
@@ -240,13 +322,40 @@ void StatementBlockSymbol::elaborateVariables(function_ref<void(const Symbol&)> 
                                                  context, dims)) {
             // If building loop dims failed we don't want to later proceed with trying to
             // bind the statement again, so just set to invalid here.
-            stmt = &InvalidStatement::Instance;
+            stmt = createInvalid();
         }
 
         for (auto& dim : dims) {
             if (dim.loopVar)
                 insertCB(*dim.loopVar);
         }
+    }
+    else if (syntax->kind == SyntaxKind::ConditionalPattern) {
+        ASTContext context(*this, LookupLocation::max);
+
+        auto& cond = syntax->as<ConditionalPatternSyntax>();
+        SLANG_ASSERT(cond.matchesClause);
+
+        SmallVector<const PatternVarSymbol*> vars;
+        if (!Pattern::createPatternVars(context, *cond.matchesClause->pattern, *cond.expr, vars))
+            stmt = createInvalid();
+
+        for (auto var : vars)
+            insertCB(*var);
+    }
+    else if (syntax->kind == SyntaxKind::PatternCaseItem) {
+        ASTContext context(*this, LookupLocation::max);
+        SLANG_ASSERT(syntax->parent);
+        auto& caseSyntax = syntax->parent->as<CaseStatementSyntax>();
+
+        SmallVector<const PatternVarSymbol*> vars;
+        if (!Pattern::createPatternVars(context, *syntax->as<PatternCaseItemSyntax>().pattern,
+                                        *caseSyntax.expr, vars)) {
+            stmt = createInvalid();
+        }
+
+        for (auto var : vars)
+            insertCB(*var);
     }
 }
 
@@ -276,6 +385,11 @@ const Statement& ProceduralBlockSymbol::getBody() const {
         stmtCtx.blocks = blocks;
 
         stmt = &Statement::bind(*stmtSyntax, context, stmtCtx);
+
+        // If statement creation fails we may leave some blocks behind; clear them out
+        // so that we don't get spurious asserts about it.
+        if (stmt->bad())
+            stmtCtx.blocks = {};
     }
     return *stmt;
 }
@@ -361,7 +475,9 @@ static void createCondGenBlock(Compilation& compilation, const SyntaxNode& synta
                                const ASTContext& context, uint32_t constructIndex,
                                bool isUninstantiated,
                                const SyntaxList<AttributeInstanceSyntax>& attributes,
-                               SmallVectorBase<GenerateBlockSymbol*>& results) {
+                               SmallVectorBase<GenerateBlockSymbol*>& results,
+                               GenerateBranchKind branchKind, const Expression* conditionExpr,
+                               std::span<const Expression* const> caseItemExprs) {
     // [27.5] If a generate block in a conditional generate construct consists of only one item
     // that is itself a conditional generate construct and if that item is not surrounded by
     // begin-end keywords, then this generate block is not treated as a separate scope. The
@@ -381,11 +497,20 @@ static void createCondGenBlock(Compilation& compilation, const SyntaxNode& synta
     }
 
     auto [name, loc] = getGenerateBlockName(syntax);
+    if (name.empty()) {
+        auto range = syntax.kind == SyntaxKind::GenerateBlock
+                         ? syntax.as<GenerateBlockSyntax>().begin.range()
+                         : syntax.sourceRange();
+        context.addDiag(diag::UnnamedGenerate, range);
+    }
 
     auto block = compilation.emplace<GenerateBlockSymbol>(compilation, name, loc, constructIndex,
                                                           isUninstantiated);
     block->setSyntax(syntax);
     block->setAttributes(*context.scope, attributes);
+    block->branchKind = branchKind;
+    block->conditionExpression = conditionExpr;
+    block->caseItemExpressions = caseItemExprs;
     results.push_back(block);
 
     addBlockMembers(*block, syntax);
@@ -402,10 +527,12 @@ void GenerateBlockSymbol::fromSyntax(Compilation& compilation, const IfGenerateS
         selector = cv.isTrue();
 
     createCondGenBlock(compilation, *syntax.block, context, constructIndex,
-                       !selector.has_value() || !selector.value(), syntax.attributes, results);
+                       !selector.has_value() || !selector.value(), syntax.attributes, results,
+                       GenerateBranchKind::IfTrue, &cond, {});
     if (syntax.elseClause) {
         createCondGenBlock(compilation, *syntax.elseClause->clause, context, constructIndex,
-                           !selector.has_value() || selector.value(), syntax.attributes, results);
+                           !selector.has_value() || selector.value(), syntax.attributes, results,
+                           GenerateBranchKind::IfFalse, &cond, {});
     }
 }
 
@@ -462,13 +589,19 @@ void GenerateBlockSymbol::fromSyntax(Compilation& compilation, const CaseGenerat
         if (item->kind != SyntaxKind::StandardCaseItem)
             continue;
 
-        // Check each case expression to see if it matches the condition value.
+        // Check each case expression to see if it matches the condition value,
+        // and collect the bound item expressions so they can be preserved on
+        // the resulting block.
         bool currentFound = false;
         SourceRange currentMatchRange;
         auto& sci = item->as<StandardCaseItemSyntax>();
+
+        SmallVector<const Expression*> itemExprs;
+        itemExprs.reserve(sci.expressions.size());
         for (size_t i = 0; i < sci.expressions.size(); i++) {
             // Have to keep incrementing the iterator here so that we stay in sync.
             auto expr = *boundIt++;
+            itemExprs.push_back(expr);
             ConstantValue val = context.eval(*expr);
 
             bool match = val && val == condVal;
@@ -481,12 +614,15 @@ void GenerateBlockSymbol::fromSyntax(Compilation& compilation, const CaseGenerat
             }
         }
 
+        auto itemExprSpan = itemExprs.copy(compilation);
+
         if (currentFound && !found) {
             // This is the first match for this entire case generate.
             found = true;
             matchRange = currentMatchRange;
             createCondGenBlock(compilation, *sci.clause, context, constructIndex, isUninstantiated,
-                               syntax.attributes, results);
+                               syntax.attributes, results, GenerateBranchKind::CaseItem, condExpr,
+                               itemExprSpan);
         }
         else {
             // If we previously found a block, this block also matched, which we should warn about.
@@ -499,14 +635,16 @@ void GenerateBlockSymbol::fromSyntax(Compilation& compilation, const CaseGenerat
 
             // This block is not taken, so create it as uninstantiated.
             createCondGenBlock(compilation, *sci.clause, context, constructIndex, true,
-                               syntax.attributes, results);
+                               syntax.attributes, results, GenerateBranchKind::CaseItem, condExpr,
+                               itemExprSpan);
         }
     }
 
     if (defBlock) {
         // Only instantiated if no other blocks were instantiated.
         createCondGenBlock(compilation, *defBlock, context, constructIndex,
-                           isUninstantiated || found, syntax.attributes, results);
+                           isUninstantiated || found, syntax.attributes, results,
+                           GenerateBranchKind::CaseDefault, condExpr, {});
     }
     else if (!found) {
         auto& diag = context.addDiag(diag::CaseGenerateNoBlock, condExpr->sourceRange);
@@ -536,7 +674,13 @@ static std::string createGenBlkName(uint32_t constructIndex, const Scope& parent
     std::string base = "genblk";
     std::string index = std::to_string(constructIndex);
     std::string current = base + index;
-    while (parent.find(current)) {
+    while (auto symbol = parent.find(current)) {
+        // Sibling generate from if or case statement and not actually a name collision
+        if (symbol->kind == SymbolKind::GenerateBlock &&
+            symbol->as<GenerateBlockSymbol>().isUnnamed) {
+            return current;
+        }
+
         base += '0';
         current = base + index;
     }
@@ -557,6 +701,15 @@ std::string GenerateBlockSymbol::getExternalName() const {
 void GenerateBlockSymbol::serializeTo(ASTSerializer& serializer) const {
     serializer.write("constructIndex", constructIndex);
     serializer.write("isUninstantiated", isUninstantiated);
+    serializer.write("branchKind", toString(branchKind));
+    if (auto cond = getConditionExpression())
+        serializer.write("conditionExpression", *cond);
+    if (!caseItemExpressions.empty()) {
+        serializer.startArray("caseItemExpressions");
+        for (auto expr : caseItemExpressions)
+            serializer.serialize(*expr);
+        serializer.endArray();
+    }
 }
 
 static uint64_t getGenerateLoopCount(const Scope& parent) {
@@ -581,14 +734,13 @@ static uint64_t getGenerateLoopCount(const Scope& parent) {
     return count ? count : 1;
 }
 
-GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& compilation,
+GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& comp,
                                                                const LoopGenerateSyntax& syntax,
                                                                SymbolIndex scopeIndex,
                                                                const ASTContext& context,
                                                                uint32_t constructIndex) {
     auto [name, loc] = getGenerateBlockName(*syntax.block);
-    auto result = compilation.emplace<GenerateBlockArraySymbol>(compilation, name, loc,
-                                                                constructIndex);
+    auto result = comp.emplace<GenerateBlockArraySymbol>(comp, name, loc, constructIndex);
     result->setSyntax(syntax);
     result->setAttributes(*context.scope, syntax.attributes);
 
@@ -596,14 +748,24 @@ GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& comp
     if (genvar.isMissing())
         return *result;
 
+    if (name.empty()) {
+        auto range = syntax.block->kind == SyntaxKind::GenerateBlock
+                         ? syntax.block->as<GenerateBlockSyntax>().begin.range()
+                         : syntax.keyword.range();
+        context.addDiag(diag::UnnamedGenerate, range);
+    }
+
+    auto genvarSyntax = comp.emplace<IdentifierNameSyntax>(genvar);
+
     // Walk up the tree a bit to see if we're nested inside another generate loop.
     // If we are, we'll include that parent's array size in our decision about
     // wether we've looped too many times within one generate block.
     const uint64_t baseCount = getGenerateLoopCount(*context.scope);
-    const uint64_t loopLimit = compilation.getOptions().maxGenerateSteps;
+    const uint64_t loopLimit = comp.getOptions().maxGenerateSteps;
 
     // If the loop initializer has a `genvar` keyword, we can use the name directly
     // Otherwise we need to do a lookup to make sure we have the actual genvar somewhere.
+    const Symbol* genvarSym = nullptr;
     if (!syntax.genvar) {
         auto symbol = Lookup::unqualifiedAt(*context.scope, genvar.valueText(),
                                             context.getLocation(), genvar.range());
@@ -617,26 +779,36 @@ GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& comp
             return *result;
         }
 
-        compilation.noteReference(*symbol);
+        comp.noteReference(*symbol);
+        genvarSym = symbol;
+    }
+    else {
+        // Fabricate a genvar symbol to live in this array since it was declared inline.
+        auto genvarSymbol = comp.emplace<GenvarSymbol>(genvar.valueText(), genvar.location());
+        genvarSymbol->setSyntax(*genvarSyntax);
+        result->addMember(*genvarSymbol);
+        genvarSym = genvarSymbol;
     }
 
     SmallVector<const GenerateBlockSymbol*> entries;
     auto createBlock = [&, blockLoc = loc](ConstantValue value, bool isUninstantiated) {
         // Spec: each generate block gets their own scope, with an implicit
         // localparam of the same name as the genvar.
-        auto block = compilation.emplace<GenerateBlockSymbol>(compilation, "", blockLoc,
-                                                              (uint32_t)entries.size(),
-                                                              isUninstantiated);
-        auto implicitParam = compilation.emplace<ParameterSymbol>(
-            genvar.valueText(), genvar.location(), true /* isLocal */, false /* isPort */);
+        auto block = comp.emplace<GenerateBlockSymbol>(comp, "", blockLoc, (uint32_t)entries.size(),
+                                                       isUninstantiated);
+        auto implicitParam = comp.emplace<ParameterSymbol>(genvar.valueText(), genvar.location(),
+                                                           true /* isLocal */, false /* isPort */);
+        implicitParam->setSyntax(*genvarSyntax);
+        comp.noteReference(*implicitParam);
 
         block->addMember(*implicitParam);
         block->setSyntax(*syntax.block);
+        block->branchKind = GenerateBranchKind::LoopIteration;
 
         addBlockMembers(*block, *syntax.block);
 
-        implicitParam->setType(compilation.getIntegerType());
-        implicitParam->setValue(compilation, std::move(value), /* needsCoercion */ false);
+        implicitParam->setType(comp.getIntegerType());
+        implicitParam->setValue(comp, std::move(value), /* needsCoercion */ false);
         implicitParam->setIsFromGenvar(true);
 
         block->arrayIndex = &implicitParam->getValue().integer();
@@ -644,29 +816,38 @@ GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& comp
     };
 
     // Bind the initialization expression.
-    auto& initial = Expression::bindRValue(compilation.getIntegerType(), *syntax.initialExpr,
+    auto& initial = Expression::bindRValue(comp.getIntegerType(), *syntax.initialExpr,
                                            syntax.equals.range(), context);
+    result->initialExpression = &initial;
     ConstantValue initialVal = context.eval(initial);
     if (!initialVal)
         return *result;
 
     // Fabricate a local variable that will serve as the loop iteration variable.
-    auto& iterScope = *compilation.emplace<StatementBlockSymbol>(compilation, "", loc,
-                                                                 StatementBlockKind::Sequential,
-                                                                 VariableLifetime::Automatic);
-    auto& local = *compilation.emplace<VariableSymbol>(genvar.valueText(), genvar.location(),
-                                                       VariableLifetime::Automatic);
-    local.setType(compilation.getIntegerType());
+    auto& iterScope = *comp.emplace<StatementBlockSymbol>(comp, "", loc,
+                                                          StatementBlockKind::Sequential,
+                                                          VariableLifetime::Automatic);
+    auto& local = *comp.emplace<VariableSymbol>(genvar.valueText(), genvar.location(),
+                                                VariableLifetime::Automatic);
+    local.setType(comp.getIntegerType());
     local.flags |= VariableFlags::CompilerGenerated;
 
     iterScope.setTemporaryParent(*context.scope, scopeIndex);
     iterScope.addMember(local);
+
+    if (genvarSym) {
+        if (auto sx = genvarSym->getSyntax())
+            local.setSyntax(*sx);
+    }
+    result->loopVariable = &local;
 
     // Bind the stop and iteration expressions so we can reuse them on each iteration.
     ASTContext iterContext(iterScope, LookupLocation::max);
     auto& stopExpr = Expression::bind(*syntax.stopExpr, iterContext);
     auto& iterExpr = Expression::bind(*syntax.iterationExpr, iterContext,
                                       ASTFlags::AssignmentAllowed);
+    result->stopExpression = &stopExpr;
+    result->iterExpression = &iterExpr;
     if (stopExpr.bad() || iterExpr.bad())
         return *result;
 
@@ -730,7 +911,7 @@ GenerateBlockArraySymbol& GenerateBlockArraySymbol::fromSyntax(Compilation& comp
             createBlock(index, isUninstantiated);
     }
 
-    result->entries = entries.copy(compilation);
+    result->entries = entries.copy(comp);
     if (entries.empty()) {
         createBlock(SVInt(32, 0, true), true);
     }
@@ -754,6 +935,14 @@ std::string GenerateBlockArraySymbol::getExternalName() const {
 
 void GenerateBlockArraySymbol::serializeTo(ASTSerializer& serializer) const {
     serializer.write("constructIndex", constructIndex);
+    if (initialExpression)
+        serializer.write("initialExpression", *initialExpression);
+    if (stopExpression)
+        serializer.write("stopExpression", *stopExpression);
+    if (iterExpression)
+        serializer.write("iterExpression", *iterExpression);
+    if (loopVariable)
+        serializer.writeLink("loopVariable", *loopVariable);
 }
 
 } // namespace slang::ast

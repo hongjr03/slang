@@ -53,6 +53,10 @@ public:
     explicit EvalContext(const ASTContext& astCtx, bitmask<EvalFlags> flags = {}) :
         astCtx(astCtx), flags(flags) {}
 
+    /// Constructs a new EvalContext instance.
+    explicit EvalContext(const Symbol& symbol, bitmask<EvalFlags> flags = {}) :
+        astCtx(ASTContext(*symbol.getParentScope(), LookupLocation::after(symbol))), flags(flags) {}
+
     /// Gets the compilation associated with the context.
     Compilation& getCompilation() const { return astCtx.getCompilation(); }
 
@@ -96,6 +100,15 @@ public:
     /// the number of statements executed so far to detect if we've been evaluating
     /// a single constant function for too long.
     [[nodiscard]] bool step(SourceLocation loc);
+
+    /// Checks whether a computed bit count exceeds the configured constant value size limit.
+    /// If the limit is exceeded, a diagnostic is issued and false is returned.
+    /// Use this before allocating a large value to prevent out-of-memory crashes.
+    [[nodiscard]] bool checkBitCount(uint64_t bits, SourceRange range);
+
+    /// Checks whether the given constant value exceeds the configured maximum size limit.
+    /// If the limit is exceeded, a diagnostic is issued and false is returned.
+    [[nodiscard]] bool checkMaxValue(const ConstantValue& val, SourceRange range);
 
     /// Returns true if the context is currently within a function call, and false if
     /// this is a top-level expression.

@@ -10,6 +10,7 @@
 #include "slang/parsing/Parser.h"
 #include "slang/parsing/ParserMetadata.h"
 #include "slang/parsing/Preprocessor.h"
+#include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceManager.h"
 #include "slang/util/TimeTrace.h"
 
@@ -30,6 +31,8 @@ SyntaxTree::SyntaxTree(SyntaxNode* root, SourceManager& sourceManager, BumpAlloc
         }
         if (!metadata->eofToken)
             metadata->eofToken = parent->getMetadata().eofToken.deepClone(this->alloc);
+
+        sourceBufferIds = parent->sourceBufferIds;
     }
 }
 
@@ -41,7 +44,7 @@ SyntaxTree::TreeOrError SyntaxTree::fromFile(std::string_view path) {
 
 SyntaxTree::TreeOrError SyntaxTree::fromFile(std::string_view path, SourceManager& sourceManager,
                                              const Bag& options) {
-    auto buffer = sourceManager.readSource(path, /* library */ nullptr);
+    auto buffer = sourceManager.readSource(path);
     if (!buffer)
         return nonstd::make_unexpected(std::pair{buffer.error(), path});
     return create(sourceManager, std::span(&buffer.value(), 1), options, {}, false);
@@ -55,7 +58,7 @@ SyntaxTree::TreeOrError SyntaxTree::fromFiles(std::span<const std::string_view> 
                                               SourceManager& sourceManager, const Bag& options) {
     SmallVector<SourceBuffer, 4> buffers(paths.size(), UninitializedTag());
     for (auto path : paths) {
-        auto buffer = sourceManager.readSource(path, /* library */ nullptr);
+        auto buffer = sourceManager.readSource(path);
         if (!buffer)
             return nonstd::make_unexpected(std::pair{buffer.error(), path});
 
@@ -123,10 +126,13 @@ SourceManager& SyntaxTree::getDefaultSourceManager() {
 
 SyntaxTree::SyntaxTree(SyntaxNode* root, const SourceLibrary* library, SourceManager& sourceManager,
                        BumpAllocator&& alloc, Diagnostics&& diagnostics, ParserMetadata&& metadata,
-                       std::vector<const DefineDirectiveSyntax*>&& macros, Bag options) :
+                       std::vector<const DefineDirectiveSyntax*>&& macros,
+                       std::vector<parsing::IncludeMetadata>&& includes,
+                       std::vector<BufferID>&& sourceBufferIds, Bag options) :
     rootNode(root), library(library), sourceMan(sourceManager), alloc(std::move(alloc)),
     diagnosticsBuffer(std::move(diagnostics)), options_(std::move(options)),
-    metadata(std::make_unique<ParserMetadata>(std::move(metadata))), macros(std::move(macros)) {
+    metadata(std::make_unique<ParserMetadata>(std::move(metadata))), macros(std::move(macros)),
+    includes(std::move(includes)), sourceBufferIds(std::move(sourceBufferIds)) {
 }
 
 std::shared_ptr<SyntaxTree> SyntaxTree::create(SourceManager& sourceManager,
@@ -159,6 +165,10 @@ std::shared_ptr<SyntaxTree> SyntaxTree::create(SourceManager& sourceManager,
         library = it->library;
     }
 
+    const auto ppOpts = options.get<PreprocessorOptions>();
+    if (ppOpts && ppOpts->bufferChangeCB)
+        ppOpts->bufferChangeCB(sources.front().id, false, false);
+
     Parser parser(preprocessor, options);
 
     SyntaxNode* root;
@@ -170,15 +180,21 @@ std::shared_ptr<SyntaxTree> SyntaxTree::create(SourceManager& sourceManager,
             return create(sourceManager, sources, options, inheritedMacros, false);
     }
 
+    std::vector<BufferID> bufferIds;
+    bufferIds.reserve(sources.size());
+    for (const auto& source : sources)
+        bufferIds.push_back(source.id);
+
     return std::shared_ptr<SyntaxTree>(
         new SyntaxTree(root, library, sourceManager, std::move(alloc), std::move(diagnostics),
-                       parser.getMetadata(), preprocessor.getDefinedMacros(), options));
+                       parser.getMetadata(), preprocessor.getDefinedMacros(),
+                       preprocessor.getIncludeDirectives(), std::move(bufferIds), options));
 }
 
 std::shared_ptr<SyntaxTree> SyntaxTree::fromLibraryMapFile(std::string_view path,
                                                            SourceManager& sourceManager,
                                                            const Bag& options) {
-    auto buffer = sourceManager.readSource(path, /* library */ nullptr);
+    auto buffer = sourceManager.readSource(path);
     if (!buffer)
         return nullptr;
 
@@ -203,6 +219,8 @@ std::shared_ptr<SyntaxTree> SyntaxTree::fromLibraryMapText(std::string_view text
 std::shared_ptr<SyntaxTree> SyntaxTree::fromLibraryMapBuffer(const SourceBuffer& buffer,
                                                              SourceManager& sourceManager,
                                                              const Bag& options) {
+    sourceManager.setBufferKind(buffer.id, SourceManager::BufferKind::LibraryMap);
+
     BumpAllocator alloc;
     Diagnostics diagnostics;
     Preprocessor preprocessor(sourceManager, alloc, diagnostics, options);
@@ -211,9 +229,39 @@ std::shared_ptr<SyntaxTree> SyntaxTree::fromLibraryMapBuffer(const SourceBuffer&
     Parser parser(preprocessor, options);
     auto& root = parser.parseLibraryMap();
 
+    std::vector<BufferID> bufferIds = {buffer.id};
+
     return std::shared_ptr<SyntaxTree>(
         new SyntaxTree(&root, nullptr, sourceManager, std::move(alloc), std::move(diagnostics),
-                       parser.getMetadata(), preprocessor.getDefinedMacros(), options));
+                       parser.getMetadata(), preprocessor.getDefinedMacros(),
+                       preprocessor.getIncludeDirectives(), std::move(bufferIds), options));
+}
+
+bool SyntaxTree::validate() const {
+    auto text = SyntaxPrinter(sourceManager())
+                    .setIncludeDirectives(true)
+                    .setExpandIncludes(true)
+                    .setExpandMacros(true)
+                    .print(*this)
+                    .str();
+
+    SourceManager tempManager;
+    auto buf = tempManager.assignText(text);
+
+    BumpAllocator tempAlloc;
+    Diagnostics tempDiags;
+    Preprocessor preprocessor(tempManager, tempAlloc, tempDiags, options_);
+    preprocessor.pushSource(buf);
+
+    Parser parser(preprocessor, options_);
+
+    SyntaxNode* newRoot;
+    if (rootNode->kind == SyntaxKind::CompilationUnit)
+        newRoot = &parser.parseCompilationUnit();
+    else
+        newRoot = &parser.parseGuess();
+
+    return newRoot->isEquivalentTo(*rootNode);
 }
 
 } // namespace slang::syntax

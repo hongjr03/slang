@@ -16,9 +16,9 @@ TEST_CASE("Read source") {
     SourceManager manager;
     std::string testPath = getTestInclude();
 
-    CHECK(!manager.readSource("X:\\nonsense.txt", /* library */ nullptr));
+    CHECK(!manager.readSource("X:\\nonsense.txt"));
 
-    auto file = manager.readSource(testPath, /* library */ nullptr);
+    auto file = manager.readSource(testPath);
     REQUIRE(file);
     CHECK(file->data.length() > 0);
 }
@@ -127,7 +127,7 @@ static void globAndCheck(const fs::path& basePath, std::string_view pattern, Glo
 TEST_CASE("File globbing") {
     auto testDir = findTestDir();
     globAndCheck(testDir, "*st?.sv", GlobMode::Files, GlobRank::WildcardName, {},
-                 {"test2.sv", "test3.sv", "test4.sv", "test5.sv", "test6.sv"});
+                 {"test2.sv", "test3.sv", "test4.sv", "test5.sv", "test6.sv", "test7.sv"});
     globAndCheck(testDir, "system", GlobMode::Files, GlobRank::ExactPath,
                  make_error_code(std::errc::is_a_directory), {});
     globAndCheck(testDir, "system/", GlobMode::Files, GlobRank::Directory, {},
@@ -135,7 +135,8 @@ TEST_CASE("File globbing") {
     globAndCheck(testDir, ".../f*.svh", GlobMode::Files, GlobRank::WildcardName, {},
                  {"file.svh", "file_defn.svh", "file_uses_defn.svh"});
     globAndCheck(testDir, "*ste*/", GlobMode::Files, GlobRank::Directory, {},
-                 {"file.svh", "macro.svh", "nested_local.svh", "system.svh", "system.map"});
+                 {"file.svh", "macro.svh", "nested_local.svh", "system.svh", "system.map",
+                  "incdir_shadow.svh"});
     globAndCheck(testDir, testDir + "/library/pkg.sv", GlobMode::Files, GlobRank::ExactPath, {},
                  {"pkg.sv"});
     globAndCheck(testDir, testDir + "/li?ra?y/pkg.sv", GlobMode::Files, GlobRank::SimpleName, {},
@@ -156,7 +157,7 @@ TEST_CASE("Directory globbing") {
     globAndCheck(testDir, "system", GlobMode::Directories, GlobRank::ExactPath, {}, {"system"});
     globAndCheck(testDir, "system/", GlobMode::Directories, GlobRank::ExactPath, {}, {"system"});
     globAndCheck(testDir, ".../", GlobMode::Directories, GlobRank::Directory, {},
-                 {"library", "nested", "system", "data", "libtest"});
+                 {"library", "nested", "system", "data", "libtest", "dirprefix", "dir_a"});
     globAndCheck(testDir, testDir + "/library/pkg.sv", GlobMode::Directories, GlobRank::ExactPath,
                  make_error_code(std::errc::not_a_directory), {});
 }
@@ -181,4 +182,46 @@ TEST_CASE("In-memory glob matching") {
     CHECK(!svGlobMatches("foo/bar/baz.txt", "foo/bar/*.dat"));
     CHECK(!svGlobMatches("foo/bar/baz.txt", "foo/...bat.txt"));
     CHECK(svGlobMatches("foo/bar/baz.txt", "...baz.txt"));
+    CHECK(svGlobMatches("../../foo/bar/baz.txt", "...bar/..."));
+    CHECK(svGlobMatches("../../foo/bar/baz.txt", ".../bar/..."));
+}
+
+TEST_CASE("Display column with UTF-8") {
+    SourceManager manager;
+
+    // Test with UTF-8 characters: "H©llo" (© is 2 bytes, 1 column width)
+    std::string utf8Text = "H\xC2\xA9llo";
+    auto buffer = manager.assignText("test.sv", utf8Text);
+    REQUIRE(buffer);
+
+    // Test locations in the UTF-8 text
+    SourceLocation loc1(buffer.id, 0); // 'H' at byte 0
+    CHECK(manager.getDisplayColumnNumber(loc1) == 1);
+
+    SourceLocation loc2(buffer.id, 1); // '©' at byte 1 (starts 2-byte sequence)
+    CHECK(manager.getDisplayColumnNumber(loc2) == 2);
+
+    SourceLocation loc3(buffer.id, 3); // First 'l' at byte 3 (after 2-byte ©)
+    // Since © takes 2 bytes but 1 display column, this should be at display column 3, not 4
+    CHECK(manager.getDisplayColumnNumber(loc3) == 3);
+}
+
+TEST_CASE("Display column with tabs") {
+    SourceManager manager;
+
+    // Test with tab character: "a\tb"
+    std::string tabText = "a\tb";
+    auto buffer = manager.assignText("test.sv", tabText);
+    REQUIRE(buffer);
+
+    // Test specific locations
+    SourceLocation loc1(buffer.id, 0); // 'a' at byte 0
+    CHECK(manager.getDisplayColumnNumber(loc1) == 1);
+
+    SourceLocation loc2(buffer.id, 1); // '\t' at byte 1
+    CHECK(manager.getDisplayColumnNumber(loc2) == 2);
+
+    SourceLocation loc3(buffer.id, 2); // 'b' at byte 2 (after tab)
+    // Tab at position 2 expands to next 8-boundary, which is column 9
+    CHECK(manager.getDisplayColumnNumber(loc3) == 9);
 }

@@ -7,6 +7,7 @@
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
+#include "slang/ast/types/AllTypes.h"
 #include "slang/ast/types/Type.h"
 
 SVInt testParameter(const std::string& text, uint32_t index = 0) {
@@ -82,14 +83,14 @@ interface width_checker #(parameter min_cks = 1, parameter max_cks = 1)
         if ($isunbounded(max_cks)) begin
             property width;
                 @(posedge clk)
-                    (reset_n && $rose(expr)) |-> (expr [*min_cks]);
+                    (reset_n && $rose(expr)) |-> (expr[0] [*min_cks]);
             endproperty
             a2: assert property (width);
         end
         else begin
             property width;
                 @(posedge clk)
-                    (reset_n && $rose(expr)) |-> (expr[*min_cks:max_cks])
+                    (reset_n && $rose(expr)) |-> (expr[0][*min_cks:max_cks])
                         ##1 (!expr);
             endproperty
             a2: assert property (width);
@@ -111,7 +112,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::WarningTask);
 }
@@ -132,6 +133,10 @@ endmodule
 
 TEST_CASE("Type parameters 2") {
     auto tree = SyntaxTree::fromText(R"(
+package p;
+parameter type x_t = logic[3:0];
+parameter type y_t = logic[3:0];
+endpackage
 module m #(parameter type foo_t, foo_t foo = 1) ();
     if (foo) begin
         parameter type asdf = shortint, basdf = logic;
@@ -146,6 +151,26 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
+
+    auto sym = compilation.getRoot().lookupName("top.m1.foo_t");
+    auto& typeAlias = sym->as<ast::TypeAliasType>();
+    CHECK(typeAlias.targetType.getType().getSyntax() == nullptr);
+    CHECK(typeAlias.targetType.getTypeSyntax() == nullptr);
+    CHECK(typeAlias.targetType.getInitializerSyntax() == nullptr);
+    CHECK(typeAlias.getFirstForwardDecl() == nullptr);
+
+    sym = compilation.getRoot().lookupName("p::x_t");
+    REQUIRE(sym);
+    CHECK(sym->kind == SymbolKind::TypeAlias);
+    CHECK(sym->getSyntax());
+
+    sym = compilation.getRoot().lookupName("p::y_t");
+    REQUIRE(sym);
+    CHECK(sym->kind == SymbolKind::TypeAlias);
+    CHECK(sym->getSyntax());
+
+    REQUIRE(typeAlias.getSyntax() != nullptr);
+    CHECK(typeAlias.getSyntax()->kind == SyntaxKind::TypeAssignment);
 }
 
 TEST_CASE("Type parameters 3") {
@@ -190,7 +215,7 @@ endmodule
 TEST_CASE("Type parameters -- bad replacement") {
     auto tree = SyntaxTree::fromText(R"(
 module m #(parameter type foo_t, foo_t foo = 1) ();
-    if (foo) begin
+    if (foo) begin : blk
         parameter type asdf = shortint, basdf = logic;
     end
 endmodule
@@ -230,7 +255,7 @@ endmodule
 TEST_CASE("Type parameters unset -- bad") {
     auto tree = SyntaxTree::fromText(R"(
 module m #(parameter type foo_t, foo_t foo = 1) ();
-    if (foo) begin
+    if (foo) begin : blk
         parameter type asdf = shortint, basdf = logic;
     end
 endmodule
@@ -627,7 +652,7 @@ endmodule
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 5);
     CHECK(diags[0].code == diag::RecursiveDefinition);
-    CHECK(diags[1].code == diag::RecursiveDefinition);
+    CHECK(diags[1].code == diag::ConstEvalParamCycle);
     CHECK(diags[2].code == diag::ConstEvalParamCycle);
     CHECK(diags[3].code == diag::ConstEvalIdUsedInCEBeforeDecl);
     CHECK(diags[4].code == diag::ConstEvalFunctionIdentifiersMustBeLocal);
@@ -707,25 +732,57 @@ endmodule
 
 TEST_CASE("Options to override top-level params") {
     auto tree = SyntaxTree::fromText(R"(
-module m #(parameter int foo, string bar, real baz);
-    localparam int j = foo + int'(bar == "asdf" ? baz : 0);
+package p;
+    typedef enum { A = 8, B = 9 } et;
+endpackage
+
+module m #(parameter int foo, string bar, real baz, p::et e);
+    localparam int j = foo + int'(bar == "asdf" ? baz : 0) + int'(e);
 endmodule
 )");
 
-    CompilationOptions coptions;
-    coptions.paramOverrides.push_back("foo=3");
-    coptions.paramOverrides.push_back("bar=\"asdf\"");
-    coptions.paramOverrides.push_back("baz=1.6");
-
-    Bag options;
-    options.set(coptions);
+    CompilationOptions options;
+    options.paramOverrides.push_back("foo=3");
+    options.paramOverrides.push_back("bar=\"asdf\"");
+    options.paramOverrides.push_back("baz=1.6");
+    options.paramOverrides.push_back("e=p::B");
 
     Compilation compilation(options);
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
 
     auto& j = compilation.getRoot().lookupName<ParameterSymbol>("m.j");
-    CHECK(j.getValue().integer() == 5);
+    CHECK(j.getValue().integer() == 14);
+}
+
+TEST_CASE("Options to override hierarchical params") {
+    auto tree = SyntaxTree::fromText(R"(
+package p;
+    typedef enum { A = 8, B = 9 } et;
+endpackage
+
+module n;
+    m m1();
+    m #(3, "asdf", 1.6, p::A) m2();
+endmodule
+
+module m #(parameter int foo, string bar, real baz, p::et e);
+    localparam int j = foo + int'(bar == "asdf" ? baz : 0) + int'(e);
+endmodule
+)");
+
+    CompilationOptions options;
+    options.paramOverrides.push_back("n.m1.foo=3");
+    options.paramOverrides.push_back("n.m1.bar=\"asdf\"");
+    options.paramOverrides.push_back("n.m1.baz=1.6");
+    options.paramOverrides.push_back("n.m1.e=p::B");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& j = compilation.getRoot().lookupName<ParameterSymbol>("n.m1.j");
+    CHECK(j.getValue().integer() == 14);
 }
 
 TEST_CASE("Invalid param override option handling") {
@@ -736,10 +793,11 @@ endmodule
 )");
 
     CompilationOptions coptions;
+    // No '=' at all -- should reject immediately.
     coptions.paramOverrides.push_back("foo");
+    // Empty value -- should reject immediately.
     coptions.paramOverrides.push_back("bar=");
-    coptions.paramOverrides.push_back("bar=lkj");
-    coptions.paramOverrides.push_back("baz=\"asdf\"");
+    // Hierarchical path to a non-existent parameter.
     coptions.paramOverrides.push_back("m.baz=\"asdf\"");
 
     Bag options;
@@ -749,10 +807,48 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    for (size_t i = 0; i < diags.size(); i++) {
-        CHECK(diags[i].code == diag::InvalidParamOverrideOpt);
-    }
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::CouldNotResolveHierarchicalPath);
+    CHECK(diags[1].code == diag::InvalidParamOverrideOpt);
+    CHECK(diags[2].code == diag::InvalidParamOverrideOpt);
+}
+
+TEST_CASE("Param override with assignment pattern") {
+    auto tree = SyntaxTree::fromText(R"(
+typedef struct packed { int x; int y; } point_t;
+
+module m #(parameter point_t pt = '{0, 0});
+    localparam int sum = pt.x + pt.y;
+endmodule
+)");
+
+    CompilationOptions options;
+    options.paramOverrides.push_back("pt='{3, 4}");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& sum = compilation.getRoot().lookupName<ParameterSymbol>("m.sum");
+    CHECK(sum.getValue().integer() == 7);
+}
+
+TEST_CASE("Param override with unpacked array concat") {
+    auto tree = SyntaxTree::fromText(R"(
+module m #(parameter int arr[3] = '{0, 0, 0});
+    localparam int total = arr[0] + arr[1] + arr[2];
+endmodule
+)");
+
+    CompilationOptions options;
+    options.paramOverrides.push_back("arr={1, 2, 3}");
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& total = compilation.getRoot().lookupName<ParameterSymbol>("m.total");
+    CHECK(total.getValue().integer() == 6);
 }
 
 TEST_CASE("Empty params for uninstantiated modules") {
@@ -887,7 +983,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::DefParamTargetChange);
 }
@@ -913,7 +1009,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::DefparamBadHierarchy);
 }
@@ -937,7 +1033,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::DefparamBadHierarchy);
 }
@@ -968,7 +1064,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::DefparamBadHierarchy);
 }
@@ -1055,7 +1151,7 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
-    auto& diags = compilation.getAllDiagnostics();
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::DuplicateDefparam);
 }
@@ -1114,7 +1210,7 @@ TEST_CASE("Param overrides within generates, arrays") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
     parameter int foo = 0;
-    if (foo == 12) begin
+    if (foo == 12) begin : blk
         $info("Hello");
     end
 endmodule
@@ -1265,4 +1361,214 @@ endmodule
             fmt::format("m2.{}[{}].m.p", name, i));
         CHECK(p.getValue().integer() == i + 1);
     }
+}
+
+TEST_CASE("Defparams with instance caching") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    n n1();
+    n n2();
+
+    defparam n2.o1.p = 2;
+endmodule
+
+module n;
+    o o1();
+endmodule
+
+module o;
+    parameter int p = 1;
+    if (p == 2) begin : blk
+        $info("Hello");
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
+}
+
+TEST_CASE("Defparams targeting interface used in port with instance caching") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I;
+    J j();
+endinterface
+
+interface J;
+    parameter int p = 1;
+endinterface
+
+module m;
+    I i1();
+    I i2();
+
+    n n1(i1);
+    n n2(i2);
+
+    defparam i2.j.p = 2;
+endmodule
+
+module n(I i);
+    if (i.j.p == 2) begin : blk
+        $info("Hello");
+    end
+endmodule
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::AllowHierarchicalConst;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
+}
+
+TEST_CASE("Multiple type parameters in declaration list regress") {
+    auto tree = SyntaxTree::fromText(R"(
+bit failed = 1'b0;
+
+`define check(expr, val) \
+  if (expr != val) begin \
+    failed = 1'b1; \
+  end
+
+module M1 #(
+  parameter type T1
+);
+  T1 x;
+
+  initial begin
+    `check($bits(x), $bits(integer))
+    `check($bits(T1), $bits(integer))
+  end
+
+endmodule
+
+module M2 #(
+  type T1
+);
+  T1 x;
+
+  initial begin
+    `check($bits(x), $bits(integer))
+    `check($bits(T1), $bits(integer))
+  end
+
+endmodule
+
+module M3 #(
+  parameter type T1, T2
+);
+  T1 x;
+  T2 y = 1.23;
+
+  initial begin
+    `check($bits(x), $bits(integer))
+    `check($bits(T1), $bits(integer))
+    `check(y, 1.23)
+  end
+
+endmodule
+
+module M4 #(
+  type T1, T2
+);
+  T1 x;
+  T2 y = 1.23;
+
+  initial begin
+    `check($bits(x), $bits(integer))
+    `check($bits(T1), $bits(integer))
+    `check(y, 1.23)
+  end
+
+endmodule
+
+module test;
+
+  M1 #(
+    .T1 (integer)
+  ) i_m1 ();
+
+  M2 #(
+    .T1 (integer)
+  ) i_m2 ();
+
+  M3 #(
+    .T1 (integer),
+    .T2 (real)
+  ) i_m3();
+
+  M4 #(
+    .T1 (integer),
+    .T2 (real)
+  ) i_m4 ();
+
+  initial begin
+    #1
+    if (!failed) begin
+      $display("PASSED");
+    end
+  end
+
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Declared initializer eval regress -- GH #1472") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function automatic int f6;
+        int i6 = &f6();
+    endfunction
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("defparam OOM regress") {
+    auto tree = SyntaxTree::fromText(R"(
+defparam;I d
+interface I
+I I I d(
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    compilation.getAllDiagnostics();
+}
+
+TEST_CASE("$info with defparam modified args") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    defparam n.p = '{1, 2};
+endmodule
+
+module n;
+    parameter int p[2] = '{0, 0};
+
+    $info("%p", p);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::InfoTask);
 }

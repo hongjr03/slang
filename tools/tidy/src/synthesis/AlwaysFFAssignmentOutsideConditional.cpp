@@ -6,13 +6,16 @@
 #include "TidyFactory.h"
 #include "fmt/color.h"
 
+#include "slang/analysis/AnalysisManager.h"
+#include "slang/analysis/ValueDriver.h"
 #include "slang/syntax/AllSyntax.h"
 
 using namespace slang;
 using namespace slang::ast;
+using namespace slang::analysis;
 
 namespace always_ff_assignment_outside_conditional {
-struct AlwaysFFVisitor : public ASTVisitor<AlwaysFFVisitor, true, true> {
+struct AlwaysFFVisitor : public ASTVisitor<AlwaysFFVisitor, VisitFlags::AllCanonical> {
     explicit AlwaysFFVisitor(const std::string_view name, const std::string_view resetName) :
         name(name), resetName(resetName) {};
 
@@ -53,18 +56,22 @@ private:
     std::optional<SourceLocation> errorLocation;
 };
 
-struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, true, true> {
-    explicit MainVisitor(Diagnostics& diagnostics) : TidyVisitor(diagnostics) {}
+struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, VisitFlags::AllCanonical> {
+    const AnalysisManager& analysisManager;
+
+    MainVisitor(Diagnostics& diagnostics, const AnalysisManager& analysisManager) :
+        TidyVisitor(diagnostics), analysisManager(analysisManager) {}
 
     void handle(const VariableSymbol& symbol) {
         NEEDS_SKIP_SYMBOL(symbol)
-        if (symbol.drivers().empty())
+
+        auto drivers = analysisManager.getDrivers(symbol);
+        if (drivers.empty())
             return;
 
-        auto firstDriver = *symbol.drivers().begin();
-        if (firstDriver && firstDriver->isInAlwaysFFBlock()) {
+        if (drivers[0] && drivers[0]->source == DriverSource::AlwaysFF) {
             AlwaysFFVisitor visitor(symbol.name, config.getCheckConfigs().resetName);
-            firstDriver->containingSymbol->visit(visitor);
+            drivers[0]->containingSymbol->visit(visitor);
             if (visitor.hasError()) {
                 diags.add(diag::RegisterNotAssignedOnReset,
                           visitor.getErrorLocation().value_or(symbol.location))
@@ -79,15 +86,17 @@ using namespace always_ff_assignment_outside_conditional;
 
 class AlwaysFFAssignmentOutsideConditional : public TidyCheck {
 public:
-    explicit AlwaysFFAssignmentOutsideConditional(TidyKind kind) : TidyCheck(kind) {}
+    explicit AlwaysFFAssignmentOutsideConditional(
+        TidyKind kind, std::optional<slang::DiagnosticSeverity> severity) :
+        TidyCheck(kind, severity) {}
 
-    bool check(const RootSymbol& root) override {
-        MainVisitor visitor(diagnostics);
+    bool check(const RootSymbol& root, const AnalysisManager& analysisManager) override {
+        MainVisitor visitor(diagnostics, analysisManager);
         root.visit(visitor);
         return diagnostics.empty();
     }
 
-    DiagCode diagCode() const override { return diag::RegisterNotAssignedOnReset; }
+    DiagCode diagCode() const override { return diag::AlwaysFFAssignmentOutsideConditional; }
 
     std::string diagString() const override {
         return "register '{}' has an assignment outside a conditional block with reset. Consider "
@@ -95,7 +104,7 @@ public:
                "inside the conditional block";
     }
 
-    DiagnosticSeverity diagSeverity() const override { return DiagnosticSeverity::Warning; }
+    DiagnosticSeverity diagDefaultSeverity() const override { return DiagnosticSeverity::Warning; }
 
     std::string name() const override { return "AlwaysFFAssignmentOutsideConditional"; }
 

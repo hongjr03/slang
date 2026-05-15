@@ -3,6 +3,8 @@
 
 #include "Test.h"
 
+#include "slang/ast/ASTVisitor.h"
+#include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
@@ -416,31 +418,6 @@ endmodule
     CHECK(j.getValue().integer() == 3);
 }
 
-TEST_CASE("Modport multi-driven errors") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    int i;
-    modport m(output i);
-endinterface
-
-module m(I.m i);
-    assign i.i = 1;
-endmodule
-
-module top;
-    I i();
-    m m1(i), m2(i);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::MultipleContAssigns);
-}
-
 TEST_CASE("Uninstantiated virtual interface param regress GH #679") {
     auto tree = SyntaxTree::fromText(R"(
 interface I;
@@ -584,7 +561,7 @@ interface I #(parameter int q = 1);
 endinterface
 
 module m(I.m i);
-    if (i.q == 1) begin
+    if (i.q == 1) begin : blk
         int j = i.j;
     end
 endmodule
@@ -593,7 +570,7 @@ interface J #(parameter int r);
 endinterface
 
 module n(J j);
-    if (j.r == 1) begin
+    if (j.r == 1) begin : blk
         int j = asdf;
     end
 endmodule
@@ -606,30 +583,6 @@ endmodule
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::InvalidModportAccess);
     CHECK(diags[1].code == diag::ParamHasNoValue);
-}
-
-TEST_CASE("Interface array multi-driven error regress") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    int i;
-    modport m(output i);
-endinterface
-
-module mod(I.m arr[3]);
-    for (genvar i = 0; i < 3; i++) begin
-        always_comb arr[i].i = i;
-    end
-endmodule
-
-module top;
-    I i [3]();
-    mod m1(i);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
 }
 
 TEST_CASE("Interface-based typedef") {
@@ -740,6 +693,342 @@ module top();
 	bus iface[1:0]();
 	submodule inst(iface);
 endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Virtual interface declaration errors") {
+    auto tree = SyntaxTree::fromText(R"(
+localparam type requestType = byte;
+localparam type responseType = int;
+
+interface I;
+    wire r;
+    modport ii(input r);
+endinterface
+
+module testMod#(N=16);
+  wire clk, rst;
+  I i();
+
+  allIfc#(N) allInst(clk, rst, i, i.ii);
+
+  virtual allIfc#(N) allInst1;
+  sliceIfc sliceInst();
+  virtual sliceIfc sliceInst1;
+endmodule:testMod
+
+interface automatic allIfc#(N=1)(input clk, rst, I i, I.ii i1);
+  var requestType Requests[N];
+  var responseType Responses[N];
+
+  function requestType requestRead(int index);
+    return Requests[index];
+  endfunction
+
+  function void responseWrite(int index, responseType response);
+    Responses[index] <= response;
+  endfunction
+
+  modport clientMp(output Requests, input Responses,
+                   input clk, rst);
+  modport serverMp(input Requests, output Responses,
+                   import requestRead, responseWrite,
+                   input clk, rst);
+endinterface:allIfc
+
+interface automatic sliceIfc#(I=0)();
+  interface II();
+      logic reset;
+  endinterface
+
+  II ii();
+  wire reset = ii.reset;
+
+  I i();
+  allIfc allInst(.clk(0), .rst(0), .i(i), .i1(i.ii));
+
+  var requestType request;
+  var responseType response;
+
+  assign allInst.Requests[I] = request;
+  assign response = allInst.Responses[I];
+
+  function void requestWrite(requestType req);
+    request <= req;
+  endfunction
+
+  function responseType responseRead();
+    return response;
+  endfunction
+
+  wire clk = testMod.clk;  // invalid
+  wire rst = testMod.rst;  // invalid
+
+  modport clientMp(output request, input response,
+                   import requestWrite, responseRead,
+                   input clk, rst);
+endinterface:sliceIfc
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto diags = compilation.getAllDiagnostics().filter(DefaultIgnoreWarnings);
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::VirtualIfaceIfacePort);
+    CHECK(diags[1].code == diag::VirtualIfaceHierRef);
+}
+
+TEST_CASE("Extern and export methods with instance caching") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I;
+    extern task foo;
+    modport m(export foo);
+    modport n(import task foo);
+endinterface
+
+module m(I.m i);
+    task i.foo; endtask
+endmodule
+
+module n(I i);
+    o o1(i);
+endmodule
+
+module o(I i);
+    m m1(i);
+endmodule
+
+module top;
+    I i1();
+    n m1(i1), m2(i1);
+
+    I i2();
+    n m3(i2);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::DupInterfaceExternMethod);
+}
+
+TEST_CASE("Instance caching with iface port side effects and downward names") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I;
+    logic l;
+endinterface
+
+module m(I i);
+    assign i.l = 1;
+endmodule
+
+module o(I i);
+    m m1(i);
+    int a;
+endmodule
+
+module top;
+    I i [3]();
+    o o1(i[0]), o2(i[1]);
+
+    assign o2.a = 1;
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Self referential interface ports") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I(I i);
+endinterface
+
+module m;
+    I i(.i(m.i));
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Explicit modport expression issues") {
+    auto tree = SyntaxTree::fromText(R"(
+const int b = 1;
+
+interface J(wire clk);
+    clocking cb @(posedge clk);
+    endclocking
+
+    interface I(input int q);
+        int a;
+        modport m(input .i({a, q, b}));
+        modport n(input b, clocking cb);
+
+        struct { int i; } s;
+        modport o(input .q(s.i));
+    endinterface
+
+    I i(3);
+endinterface
+
+module m;
+    wire clk;
+    J j(clk);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::ModportMemberParent);
+    CHECK(diags[1].code == diag::ModportMemberParent);
+    CHECK(diags[2].code == diag::ModportMemberParent);
+}
+
+TEST_CASE("Interface containing virtual interface infinite loop regress") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I;
+    virtual I O;
+endinterface
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::VirtualInterfaceIfaceMember);
+}
+
+TEST_CASE("Interface containing virtual interface items in generate blocks") {
+    auto tree = SyntaxTree::fromText(R"(
+interface A;
+endinterface
+
+interface B;
+endinterface
+
+interface C #(bit P);
+    if (P) begin: PSET
+        virtual A intf;
+    end else begin: PUNSET
+        virtual B intf;
+    end
+endinterface
+
+module top;
+    C #(1) c();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::VirtualInterfaceIfaceMember);
+}
+
+TEST_CASE("Virtual interface member access AST") {
+    auto tree = SyntaxTree::fromText(R"(
+interface Iface;
+    logic data;
+endinterface
+
+module m;
+    Iface if1(), if2();
+    virtual Iface vif1 = if1, vif2 = if2;
+
+    initial begin
+        vif1.data = 1'b1;
+        vif2.data = 1'b0;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    // Collect all MemberAccessExpression nodes for virtual interface member accesses.
+    SmallVector<const MemberAccessExpression*> accesses;
+    compilation.getRoot().visit(makeVisitor([&](auto&, const MemberAccessExpression& expr) {
+        if (expr.value().type->isVirtualInterface())
+            accesses.push_back(&expr);
+    }));
+
+    // There should be exactly two accesses (vif1.data and vif2.data).
+    REQUIRE(accesses.size() == 2);
+    auto& a0 = *accesses[0];
+    auto& a1 = *accesses[1];
+
+    // Both accesses refer to the same interface member symbol (logic data).
+    CHECK(&a0.member == &a1.member);
+
+    // But the handle expressions must point to different virtual interface variables.
+    auto sym0 = a0.value().getSymbolReference();
+    auto sym1 = a1.value().getSymbolReference();
+    REQUIRE(sym0);
+    REQUIRE(sym1);
+    CHECK(sym0 != sym1);
+    CHECK(sym0->name == "vif1");
+    CHECK(sym1->name == "vif2");
+}
+
+TEST_CASE("Virtual interface consteval should fail") {
+    auto tree = SyntaxTree::fromText(R"(
+interface I;
+    int bar;
+endinterface
+
+function int foo;
+    virtual I i;
+    return i.bar;
+endfunction
+
+parameter p = foo();
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::ConstEvalVifType);
+}
+
+TEST_CASE("Virtual interface instance access regress -- GH #1765") {
+    auto tree = SyntaxTree::fromText(R"(
+interface A;
+endinterface
+
+interface B;
+    A a();
+endinterface
+
+class C;
+    virtual A intf1;
+    virtual B intf2;
+
+    function set_intf(virtual B b);
+        intf2 = b;
+        intf1 = b.a;
+    endfunction
+endclass
 )");
 
     Compilation compilation;

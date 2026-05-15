@@ -387,7 +387,7 @@ module m;
     int b,c;
     property p1;
         int x;
-        @(posedge clk)(a, x = b) ##1 (c, cg1.sample(a, x));
+        @(posedge clk)(a, x = b) ##1 (c > 0, cg1.sample(a, x));
     endproperty : p1
 
     c1: cover property (p1);
@@ -427,34 +427,6 @@ endmodule
     CHECK(diags[1].code == diag::CoverageSampleFormal);
     CHECK(diags[2].code == diag::ExpectedSampleKeyword);
     CHECK(diags[3].code == diag::ExpectedFunctionPortList);
-}
-
-TEST_CASE("Covergroup expression errors") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    int asdf;
-    wire signed [31:0] w;
-    covergroup cg1 (int a, ref int r);
-        coverpoint a {
-            bins b = {r, asdf, w, foo()};
-        }
-    endgroup
-
-    function int foo;
-        return asdf;
-    endfunction
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::CoverageExprVar);
-    CHECK(diags[1].code == diag::CoverageExprVar);
-    CHECK(diags[2].code == diag::CoverageExprVar);
-    CHECK(diags[3].code == diag::ConstEvalFunctionIdentifiersMustBeLocal);
 }
 
 TEST_CASE("Cover cross bins") {
@@ -752,4 +724,161 @@ endgroup
     CHECK(diags[3].code == diag::RealCoverpointWithExpr);
     CHECK(diags[4].code == diag::RealCoverpointTransBins);
     CHECK(diags[5].code == diag::RealCoverpointImplicit);
+}
+
+TEST_CASE("Covergroup formals are const") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function foo(output int unsigned o);
+    endfunction
+
+    logic [31:0] a, b;
+    covergroup cg(ref int unsigned cg_lim);
+        coverpoint foo(cg_lim);
+        coverpoint b;
+
+        aXb : cross a, b
+        {
+            function CrossQueueType myFunc1(int unsigned f_lim);
+                cg_lim = 1;
+                for (int unsigned i = 0; i < f_lim; ++i)
+                    myFunc1.push_back('{i,i});
+            endfunction
+
+            bins one = myFunc1(cg_lim);
+            bins two = myFunc2(cg_lim);
+
+            function CrossQueueType myFunc2(logic [31:0] f_lim);
+                for (logic [31:0] i = 0; i < f_lim; ++i)
+                    myFunc2.push_back('{2*i,2*i});
+            endfunction
+        }
+    endgroup
+
+    int unsigned i;
+    cg cg_inst = new(i);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::AssignmentToConstVar);
+    CHECK(diags[1].code == diag::AssignmentToConstVar);
+}
+
+TEST_CASE("Coverpoint non-constant bins expressions") {
+    auto tree = SyntaxTree::fromText(R"(
+class A;
+    int unsigned NUM;
+
+    int unsigned id;
+
+    bit en;
+
+endclass
+
+class B;
+    A a;
+    event trig;
+
+    covergroup cg (string name) @trig;
+        label: coverpoint a.id {
+            bins b1 [] = {[0:a.NUM]};
+            bins b2 = {a.NUM+1} iff(a.en);
+            ignore_bins ig = {a.NUM+1} iff(!a.en);
+        }
+    endgroup
+
+endclass
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Cover cross of crosses") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+
+class c;
+   bit [1:0] m1;
+   bit [1:0] m2;
+   bit [1:0] m3;
+
+  covergroup cg;
+    cp1 : coverpoint m1;
+    cx1 : cross cp1, m2;
+    cx2 : cross m3, cx1;
+  endgroup
+endclass
+
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Cover cross with dotted member access") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+
+struct packed {
+    logic [1:0] mpp;
+    logic [1:0] mode;
+} status;
+
+logic [3:0] a, b;
+
+covergroup cg @(posedge status.mpp[0]);
+    cross status.mpp, status.mode;
+    cross a[1:0], b[1:0];
+endgroup
+
+cg cg_inst = new;
+
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 4);
+    CHECK(diags[0].code == diag::NonstandardHierarchicalCross);
+    CHECK(diags[1].code == diag::NonstandardHierarchicalCross);
+    CHECK(diags[2].code == diag::CoverCrossSelectNotAllowed);
+    CHECK(diags[3].code == diag::CoverCrossSelectNotAllowed);
+}
+
+TEST_CASE("Cross identifier in binsof -- strict mode error") {
+    // LRM §19.6 Syntax 19-4: bins_expression only allows variable_identifier or
+    // cover_point_identifier[.bin_identifier]; a cross_identifier is not valid.
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic clk, a, b, c;
+    covergroup cg @(posedge clk);
+        cp_a : coverpoint a { bins zero = {0}; bins one = {1}; }
+        cp_b : coverpoint b { bins zero = {0}; bins one = {1}; }
+        cp_c : coverpoint c { bins zero = {0}; bins one = {1}; }
+        cp_a_cross_b : cross cp_a, cp_b;
+        cp_nested : cross cp_a_cross_b, cp_c {
+            bins with_c = binsof(cp_a_cross_b) && binsof(cp_c.one);
+        }
+    endgroup
+    cg cg_inst = new();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::CrossIdentInBinsof);
 }

@@ -245,6 +245,14 @@ TEST_CASE("SVInt to string (and back)") {
     CHECK("4'bzzzz"_si.toString(LiteralBase::Hex, false) == "z");
     CHECK("4'bzz1z"_si.toString(LiteralBase::Hex, false) == "Z");
 
+    // Uniform unknown abbreviation: all-X or all-Z values should use a single character
+    // in binary/octal/hex output rather than repeating the character N times.
+    CHECK(SVInt::createFillX(32, true).toString() == "32'sdx");
+    CHECK(SVInt::createFillX(32, false).toString() == "32'dx");
+    CHECK(SVInt::createFillZ(32, true).toString() == "32'sdz");
+    // Mixed unknowns are not abbreviated
+    CHECK("12'b101x101z1"_si.toString() == "12'b101x101z1");
+
     // Make sure leading x round trips correctly.
     auto str = "8'b0x"_si.toString(SVInt::MAX_BITS, true);
     CHECK(str == SVInt::fromString(str).toString());
@@ -399,6 +407,10 @@ TEST_CASE("Division") {
     CHECK("-50"_si % "-40"_si == -10);
     CHECK("-50"_si % "40"_si == -10);
     CHECK("-4'sd8"_si / "-4'sd7"_si == 1);
+
+    SVInt v6 = "4"_si / "2"_si;
+    CHECK(v6 == 2);
+    CHECK(v6.isSigned());
 
     SVInt v7 = "19823'd234098234098234098234"_si;
     CHECK("300'd0"_si / "10"_si == 0);

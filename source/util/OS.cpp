@@ -21,9 +21,18 @@
 #    ifndef STRICT
 #        define STRICT
 #    endif
-#    include <Windows.h>
+// clang-format off
 #    include <fcntl.h>
 #    include <io.h>
+#    include <process.h>
+#    include <windows.h>
+#    include <psapi.h> // MUST be included after windows.h, for some stupid reason.
+// clang-format on
+#elif !defined(__wasi__)
+#    include <fcntl.h>
+#    include <sys/resource.h>
+#    include <sys/stat.h>
+#    include <unistd.h>
 #else
 #    include <fcntl.h>
 #    include <sys/stat.h>
@@ -288,8 +297,13 @@ std::error_code OS::readFile(const fs::path& path, SmallVector<char>& buffer) {
 
 void OS::writeFile(const fs::path& path, std::string_view contents) {
     if (path == "-") {
-        std::cout.write(contents.data(), (std::streamsize)contents.size());
-        std::cout.flush();
+        if (capturingOutput) {
+            capturedStdout += contents;
+        }
+        else {
+            std::cout.write(contents.data(), (std::streamsize)contents.size());
+            std::cout.flush();
+        }
     }
     else {
         std::ofstream file(path);
@@ -373,6 +387,39 @@ std::string OS::parseEnvVar(const char*& ptr, const char* end) {
         // This is not a possible variable name so just return what we have.
         return "$"s + c;
     }
+}
+
+int OS::getpid() {
+#if defined(_WIN32)
+    return ::_getpid();
+#elif defined(__wasi__)
+    // WASI doesn't have a concept of process IDs
+    return 1;
+#else
+    return ::getpid();
+#endif
+}
+
+uint64_t OS::getPeakMemoryBytes() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS info;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof(info)))
+        return static_cast<uint64_t>(info.PeakWorkingSetSize);
+    return 0;
+#elif defined(__wasi__)
+    return 0;
+#elif defined(__APPLE__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+        return static_cast<uint64_t>(usage.ru_maxrss);
+    return 0;
+#else
+    // Linux and other POSIX systems: ru_maxrss is in kilobytes
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+        return static_cast<uint64_t>(usage.ru_maxrss) * 1024;
+    return 0;
+#endif
 }
 
 } // namespace slang

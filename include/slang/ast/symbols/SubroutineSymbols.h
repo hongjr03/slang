@@ -20,7 +20,7 @@ class StatementBlockSymbol;
 class VariableSymbol;
 
 /// Specifies various flags that can apply to subroutines.
-enum class SLANG_EXPORT MethodFlags : uint16_t {
+enum class SLANG_EXPORT MethodFlags {
     /// No specific flags specified.
     None = 0,
 
@@ -82,14 +82,17 @@ enum class SLANG_EXPORT MethodFlags : uint16_t {
 
     /// The method is marked 'final', which means it cannot be
     /// overridden in a derived class.
-    Final = 1 << 15
+    Final = 1 << 15,
+
+    /// The method is a special pre_randomize or post_randomize function.
+    PrePostRandomize = 1 << 16
 };
-SLANG_BITMASK(MethodFlags, Final)
+SLANG_BITMASK(MethodFlags, PrePostRandomize)
 
 class MethodPrototypeSymbol;
 
 /// Represents a subroutine (task or function).
-class SLANG_EXPORT SubroutineSymbol : public Symbol, public Scope {
+class SLANG_EXPORT SubroutineSymbol final : public Symbol, public Scope {
 public:
     using ArgList = std::span<const FormalArgumentSymbol* const>;
 
@@ -137,9 +140,9 @@ public:
 
     void serializeTo(ASTSerializer& serializer) const;
 
-    static SubroutineSymbol* fromSyntax(Compilation& compilation,
-                                        const syntax::FunctionDeclarationSyntax& syntax,
-                                        const Scope& parent, bool outOfBlock);
+    static std::pair<SubroutineSymbol*, bool> fromSyntax(
+        Compilation& compilation, const syntax::FunctionDeclarationSyntax& syntax,
+        const Scope& parent, bool outOfBlock);
 
     static SubroutineSymbol* fromSyntax(Compilation& compilation,
                                         const syntax::ClassMethodDeclarationSyntax& syntax,
@@ -160,11 +163,12 @@ public:
 
     static void inheritDefaultedArgList(Scope& scope, const Scope& parentScope,
                                         const syntax::SyntaxNode& syntax,
-                                        SmallVectorBase<const FormalArgumentSymbol*>& arguments);
+                                        SmallVectorBase<FormalArgumentSymbol*>& arguments);
 
-    static bitmask<MethodFlags> buildArguments(
-        Scope& scope, const Scope& parentScope, const syntax::FunctionPortListSyntax& syntax,
-        VariableLifetime defaultLifetime, SmallVectorBase<const FormalArgumentSymbol*>& arguments);
+    static bitmask<MethodFlags> buildArguments(Scope& scope, const Scope& parentScope,
+                                               const syntax::FunctionPortListSyntax& syntax,
+                                               VariableLifetime defaultLifetime,
+                                               SmallVectorBase<FormalArgumentSymbol*>& arguments);
 
     static void checkVirtualMethodMatch(const Scope& scope, const SubroutineSymbol& parentMethod,
                                         const SubroutineSymbol& derivedMethod,
@@ -187,7 +191,8 @@ private:
     mutable bool isConstructing = false;
 };
 
-class SLANG_EXPORT MethodPrototypeSymbol : public Symbol, public Scope {
+/// Represents a class method prototype.
+class SLANG_EXPORT MethodPrototypeSymbol final : public Symbol, public Scope {
 public:
     DeclaredType declaredReturnType;
     SubroutineKind subroutineKind;

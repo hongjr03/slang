@@ -17,7 +17,7 @@ namespace slang::ast {
 class Pattern;
 
 /// Represents a unary operator expression.
-class SLANG_EXPORT UnaryExpression : public Expression {
+class SLANG_EXPORT UnaryExpression final : public Expression {
 public:
     /// The operator.
     UnaryOperator op;
@@ -37,9 +37,11 @@ public:
     Expression& operand() { return *operand_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const UnaryExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -63,7 +65,7 @@ private:
 };
 
 /// Represents a binary operator expression.
-class SLANG_EXPORT BinaryExpression : public Expression {
+class SLANG_EXPORT BinaryExpression final : public Expression {
 private:
     Expression* left_;
     Expression* right_;
@@ -93,9 +95,11 @@ public:
     Expression& right() { return *right_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const BinaryExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -122,7 +126,7 @@ public:
 };
 
 /// Represents a conditional operator expression.
-class SLANG_EXPORT ConditionalExpression : public Expression {
+class SLANG_EXPORT ConditionalExpression final : public Expression {
 public:
     /// A condition.
     struct Condition {
@@ -158,9 +162,11 @@ public:
     Expression& right() { return *right_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const ConditionalExpression& rhs) const;
 
     /// If the condition for this expression is a known constant value,
     /// this method returns the side of the expression that will be selected
@@ -195,7 +201,7 @@ private:
 };
 
 /// Represents a set membership operator expression.
-class SLANG_EXPORT InsideExpression : public Expression {
+class SLANG_EXPORT InsideExpression final : public Expression {
 public:
     InsideExpression(const Type& type, const Expression& left,
                      std::span<const Expression* const> rangeList, SourceRange sourceRange) :
@@ -209,6 +215,7 @@ public:
     std::span<const Expression* const> rangeList() const { return rangeList_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const InsideExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -231,17 +238,21 @@ private:
 };
 
 /// Represents a concatenation expression.
-class SLANG_EXPORT ConcatenationExpression : public Expression {
+class SLANG_EXPORT ConcatenationExpression final : public Expression {
 public:
-    ConcatenationExpression(const Type& type, std::span<const Expression* const> operands,
+    ConcatenationExpression(const Type& type, std::span<Expression*> operands,
                             SourceRange sourceRange) :
         Expression(ExpressionKind::Concatenation, type, sourceRange), operands_(operands) {}
 
     /// @returns the list of operands in the concatenation
     std::span<const Expression* const> operands() const { return operands_; }
 
+    /// @returns the list of operands in the concatenation
+    std::span<Expression*> operands() { return operands_; }
+
     ConstantValue evalImpl(EvalContext& context) const;
     LValue evalLValueImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const ConcatenationExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -262,11 +273,11 @@ public:
     }
 
 private:
-    std::span<const Expression* const> operands_;
+    std::span<Expression*> operands_;
 };
 
 /// Represents a replication expression.
-class SLANG_EXPORT ReplicationExpression : public Expression {
+class SLANG_EXPORT ReplicationExpression final : public Expression {
 public:
     ReplicationExpression(const Type& type, const Expression& count, Expression& concat,
                           SourceRange sourceRange) :
@@ -283,6 +294,7 @@ public:
     Expression& concat() { return *concat_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const ReplicationExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -304,7 +316,7 @@ private:
 };
 
 /// Represents a streaming concatenation.
-class SLANG_EXPORT StreamingConcatenationExpression : public Expression {
+class SLANG_EXPORT StreamingConcatenationExpression final : public Expression {
 public:
     /// A single stream expression within the concatenation.
     struct StreamExpression {
@@ -317,6 +329,11 @@ public:
         /// If there is a @a withExpr and it has a constant value, this is
         /// the width of the selection.
         std::optional<bitwidth_t> constantWithWidth;
+
+        bool isEquivalentTo(const StreamExpression& rhs) const {
+            return operand->isEquivalentTo(*rhs.operand) && bool(withExpr) == bool(rhs.withExpr) &&
+                   (!withExpr || withExpr->isEquivalentTo(*rhs.withExpr));
+        }
     };
 
     StreamingConcatenationExpression(const Type& type, uint64_t sliceSize, uint64_t bitstreamWidth,
@@ -340,12 +357,14 @@ public:
     std::span<const StreamExpression> streams() const { return streams_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const StreamingConcatenationExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
     static Expression& fromSyntax(Compilation& compilation,
                                   const syntax::StreamingConcatenationExpressionSyntax& syntax,
-                                  const ASTContext& context);
+                                  const ASTContext& context,
+                                  const Type* assignmentTarget = nullptr);
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::Streaming; }
 
@@ -378,7 +397,7 @@ SLANG_ENUM(ValueRangeKind, VRK)
 ///
 /// @note This expression needs special handling in the various places that allow it,
 /// since it doesn't really have a type.
-class SLANG_EXPORT ValueRangeExpression : public Expression {
+class SLANG_EXPORT ValueRangeExpression final : public Expression {
 public:
     ValueRangeKind rangeKind;
 
@@ -394,7 +413,9 @@ public:
     Expression& right() { return *right_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
+    bool isEquivalentImpl(const ValueRangeExpression& rhs) const;
 
     ConstantValue checkInside(EvalContext& context, const ConstantValue& val) const;
 

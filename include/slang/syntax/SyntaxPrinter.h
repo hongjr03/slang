@@ -43,9 +43,35 @@ public:
     /// @return a reference to this object, to allow chaining additional method calls.
     SyntaxPrinter& print(const SyntaxNode& node);
 
+    /// Print the leading comments and trivia for the provided @a node.
+    /// This will attempt to grab the leading trivia that is intended to provide info for this
+    /// syntax node. This includes doc comments, but also other typical annotation styles. See
+    /// SyntaxPrinterTests.cpp for more detail.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& printLeadingComments(const SyntaxNode& node);
+
+    /// Print the provided @a node to the internal buffer, with the leading comments and trivia on
+    /// the primary node. See @a printLeadingComments for detail on what is considered a leading
+    /// comment.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& printWithLeadingComments(const SyntaxNode& node);
+
+    /// Print the provided @a node to the internal buffer, excluding any leading trivia.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& printExcludingLeadingComments(const SyntaxNode& node);
+
     /// Print the provided @a tree to the internal buffer.
     /// @return a reference to this object, to allow chaining additional method calls.
     SyntaxPrinter& print(const SyntaxTree& tree);
+
+    /// If no source manager is provided or if this flag is set, print tokens from any location.
+    /// Otherwise, filter out tokens based on other flags that control inclusion or exclusion of
+    /// preprocesser macros, includes, etc.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& setIncludeAllLocations(bool include) {
+        includeAllLocations = include;
+        return *this;
+    }
 
     /// Sets whether to include trivia when printing syntax.
     /// @return a reference to this object, to allow chaining additional method calls.
@@ -69,16 +95,25 @@ public:
     }
 
     /// Sets whether to include preprocessor directives when printing syntax.
+    /// For controlling expansion of macros and includes, use `setExpandIncludes` and
+    /// `setExpandMacros`.
     /// @return a reference to this object, to allow chaining additional method calls.
     SyntaxPrinter& setIncludeDirectives(bool include) {
         includeDirectives = include;
         return *this;
     }
 
-    /// Sets whether to include preprocessor-expanded tokens when printing syntax.
+    /// Sets whether to expand include directives when printing syntax.
     /// @return a reference to this object, to allow chaining additional method calls.
-    SyntaxPrinter& setIncludePreprocessed(bool include) {
-        includePreprocessed = include;
+    SyntaxPrinter& setExpandIncludes(bool expand) {
+        expandIncludes = expand;
+        return *this;
+    }
+
+    /// Sets whether to expand macro directives when printing syntax.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& setExpandMacros(bool expand) {
+        expandMacros = expand;
         return *this;
     }
 
@@ -86,6 +121,13 @@ public:
     /// @return a reference to this object, to allow chaining additional method calls.
     SyntaxPrinter& setIncludeComments(bool include) {
         includeComments = include;
+        return *this;
+    }
+
+    /// Sets whether to include source information when printing syntax.
+    /// @return a reference to this object, to allow chaining additional method calls.
+    SyntaxPrinter& setIncludeSource(bool include) {
+        includeSource = include;
         return *this;
     }
 
@@ -105,14 +147,21 @@ public:
     static std::string printFile(const SyntaxTree& tree);
 
 private:
+    bool shouldPrint(const SyntaxNode& syntax) const;
+    bool shouldPrint(SourceLocation loc) const;
+
     std::string buffer;
+    std::string_view currentFileName;
     const SourceManager* sourceManager = nullptr;
+    bool includeAllLocations = false;
     bool includeTrivia = true;
     bool includeMissing = false;
     bool includeSkipped = false;
     bool includeDirectives = false;
-    bool includePreprocessed = true;
+    bool expandIncludes = false;
+    bool expandMacros = false;
     bool includeComments = true;
+    bool includeSource = false;
     bool squashNewlines = true;
 };
 

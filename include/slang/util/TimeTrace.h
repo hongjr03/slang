@@ -27,10 +27,17 @@ public:
     /// Initializes time tracing support.
     static void initialize();
 
+    /// Turns off time tracing and destroys all resources for it.
+    static void destroy();
+
     /// Writes the results of time tracing to the given stream.
     /// The output is JSON, in Chrome "Trace Event" format, see
     /// https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview
     static void write(std::ostream& os);
+
+    /// Gets the duration logged for the given trace key,
+    /// or zero if such a key has not been traced.
+    static int64_t getDurationForKey(std::string_view name);
 
     /// Starts tracing a section.
     /// @param name the name of the section
@@ -56,21 +63,22 @@ private:
 /// When the object is constructed, it begins the trace section and when
 /// it is destroyed, it stops it. If the time profiler is not initialized
 /// the overhead is a single branch.
-class SLANG_EXPORT
-TimeTraceScope{public: TimeTraceScope(std::string_view name, std::string_view detail){
-    if (TimeTrace::isEnabled()) TimeTrace::beginTrace(name, detail);
-} // namespace slang
+class SLANG_EXPORT TimeTraceScope {
+public:
+    TimeTraceScope(std::string_view name, std::string_view detail) {
+        if (TimeTrace::isEnabled())
+            TimeTrace::beginTrace(name, detail);
+    }
 
-TimeTraceScope(std::string_view name, function_ref<std::string()> detail) {
-    if (TimeTrace::isEnabled())
-        TimeTrace::beginTrace(name, detail);
-}
+    TimeTraceScope(std::string_view name, function_ref<std::string()> detail) {
+        if (TimeTrace::isEnabled())
+            TimeTrace::beginTrace(name, detail);
+    }
 
-~TimeTraceScope() {
-    if (TimeTrace::isEnabled())
-        TimeTrace::endTrace();
-}
-}
-;
+    ~TimeTraceScope() {
+        if (TimeTrace::isEnabled())
+            TimeTrace::endTrace();
+    }
+};
 
 } // namespace slang

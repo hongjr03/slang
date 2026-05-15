@@ -3,6 +3,7 @@
 
 #include "Test.h"
 
+#include "slang/parsing/Lexer.h"
 #include "slang/parsing/Preprocessor.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxPrinter.h"
@@ -156,8 +157,9 @@ TEST_CASE("Embedded control characters in a broken UTF8 comment not affecting le
     options.maxErrors = 4;
 
     diagnostics.clear();
-    auto buffer = getSourceManager().assignText(text);
-    Lexer lexer(buffer, alloc, diagnostics, options);
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(text);
+    Lexer lexer(buffer, alloc, diagnostics, sm, options);
     Token token = lexer.lex();
 
     CHECK(token.kind == TokenKind::EndModuleKeyword);
@@ -286,6 +288,40 @@ TEST_CASE("Newlines (LF)") {
     CHECK_DIAGNOSTICS_EMPTY;
 }
 
+static void lexAllTokensNamed(std::string_view text) {
+    // Lex all tokens using a named buffer so that file-level warnings
+    // (e.g. newline-eof) are triggered, mimicking a real source file.
+    // Uses a unique path per call to avoid source manager conflicts.
+    diagnostics.clear();
+    static int counter = 0;
+    auto& sm = getSourceManager();
+    auto path = "newline-test-" + std::to_string(counter++) + ".sv";
+    auto buffer = sm.assignText(path, text);
+    Lexer lexer(buffer, alloc, diagnostics, sm);
+    Token token;
+    do {
+        token = lexer.lex();
+    } while (token.kind != TokenKind::EndOfFile);
+}
+
+TEST_CASE("Newline at EOF (present)") {
+    // Named buffers ending with LF, CR/LF, or CR should not warn.
+    lexAllTokensNamed("module m;\n");
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    lexAllTokensNamed("module m;\r\n");
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    lexAllTokensNamed("module m;\r");
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Newline at EOF (missing)") {
+    lexAllTokensNamed("module m;");
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::NewlineEOF);
+}
+
 TEST_CASE("Simple Identifiers") {
     auto& text = "abc";
     Token token = lexToken(text);
@@ -344,6 +380,14 @@ TEST_CASE("System Identifiers") {
     CHECK_DIAGNOSTICS_EMPTY;
 
     CHECK(token != token2);
+
+    auto& text3 = "$async$and$array";
+    Token token3 = lexToken(text3);
+    CHECK(token3.kind == TokenKind::SystemIdentifier);
+    CHECK(token3.toString() == text3);
+    CHECK(token3.valueText() == text3);
+    CHECK(token3.systemName() == KnownSystemName::AsyncAndArray);
+    CHECK_DIAGNOSTICS_EMPTY;
 }
 
 TEST_CASE("Invalid escapes") {
@@ -790,14 +834,15 @@ TEST_CASE("Too many errors") {
     options.maxErrors = 9;
 
     diagnostics.clear();
-    auto buffer = getSourceManager().assignText(std::string_view(buf.data(), buf.size()));
-    Lexer lexer(buffer, alloc, diagnostics, options);
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(std::string_view(buf.data(), buf.size()));
+    Lexer lexer(buffer, alloc, diagnostics, sm, options);
 
     for (size_t i = 0; i < buf.size() - 1; i++)
         CHECK(lexer.lex().kind == TokenKind::Unknown);
 
     CHECK(diagnostics.size() == buf.size() - 1);
-    CHECK(lexer.lex().kind == TokenKind::EndOfFile);
+    CHECK(lexer.lex().kind == TokenKind::Unknown);
     CHECK(diagnostics.back().code == diag::TooManyLexerErrors);
 }
 
@@ -1160,8 +1205,9 @@ void testDirectivePunctuation(TokenKind kind) {
     std::string_view text = LF::getTokenKindText(kind);
 
     diagnostics.clear();
-    auto buffer = getSourceManager().assignText(text);
-    Lexer lexer(buffer, alloc, diagnostics);
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(text);
+    Lexer lexer(buffer, alloc, diagnostics, sm);
 
     Token token = lexer.lex();
 
@@ -1281,37 +1327,48 @@ TEST_CASE("Hex escape corner case") {
 
 TEST_CASE("Compat translate_on/off pragmas") {
     LexerOptions options;
-    options.enableTranslateOnOffCompat = true;
+    options.commentHandlers["pragma"]["synthesis_off"] = {CommentHandler::TranslateOff,
+                                                          "synthesis_on"};
+    options.commentHandlers["synthesis"]["translate_off"] = {CommentHandler::TranslateOff,
+                                                             "translate_on"};
 
-    auto buffer = getSourceManager().assignText(R"(
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(R"(
 a
 // pragma synthesis_off
 b
 // pragma synthesis_on
 c
-// synthesis translate_off
+/* synthesis translate_off */
 d
 // synthesis translate_off
 e
-// synthesis translate_on
+/* synthesis translate_on */
 f
 )"sv);
+
     diagnostics.clear();
-    Lexer lexer(buffer, alloc, diagnostics, options);
-    CHECK(diagnostics.empty());
+    Lexer lexer(buffer, alloc, diagnostics, sm, options);
+
     for (auto& text : {"a"sv, "c"sv, "f"sv}) {
         Token tok = lexer.lex();
         REQUIRE(tok.kind == TokenKind::Identifier);
         CHECK(!tok.rawText().compare(text));
     }
+
     CHECK(lexer.lex().kind == TokenKind::EndOfFile);
+    CHECK(diagnostics.empty());
 }
 
 TEST_CASE("Compat translate_on/off pragmas unclosed") {
     LexerOptions options;
-    options.enableTranslateOnOffCompat = true;
+    options.commentHandlers["pragma"]["synthesis_off"] = {CommentHandler::TranslateOff,
+                                                          "synthesis_on"};
+    options.commentHandlers["synthesis"]["translate_off"] = {CommentHandler::TranslateOff,
+                                                             "translate_on"};
 
-    auto buffer = getSourceManager().assignText(R"(
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(R"(
 a
 // pragma synthesis_off
 b
@@ -1322,14 +1379,17 @@ d
 e
 f
 )"sv);
+
     diagnostics.clear();
-    Lexer lexer(buffer, alloc, diagnostics, options);
+    Lexer lexer(buffer, alloc, diagnostics, sm, options);
     for (auto& text : {"a"sv, "c"sv}) {
         Token tok = lexer.lex();
         REQUIRE(tok.kind == TokenKind::Identifier);
         CHECK(!tok.rawText().compare(text));
     }
+
     CHECK(lexer.lex().kind == TokenKind::EndOfFile);
+
     REQUIRE(diagnostics.size() == 1);
     CHECK(diagnostics[0].code == diag::UnclosedTranslateOff);
 }

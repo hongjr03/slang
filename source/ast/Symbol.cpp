@@ -11,8 +11,10 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/types/Type.h"
+#include "slang/ast/types/TypePrinter.h"
 #include "slang/text/CharInfo.h"
 #include "slang/text/FormatBuffer.h"
+#include "slang/util/SmallMap.h"
 
 namespace {
 
@@ -37,6 +39,8 @@ struct AsScopeVisitor {
 namespace slang::ast {
 
 using namespace syntax;
+
+const InvalidSymbol InvalidSymbol::Instance;
 
 const Scope* Symbol::getHierarchicalParent() const {
     if (kind == SymbolKind::InstanceBody) {
@@ -85,12 +89,18 @@ const DeclaredType* Symbol::getDeclaredType() const {
     }
 }
 
-static void getHierarchicalPathImpl(const Symbol& symbol, FormatBuffer& buffer) {
+static void getHierarchicalPathImpl(const Symbol& symbol, FormatBuffer& buffer,
+                                    SmallSet<const Symbol*, 4>& visited) {
     auto scope = symbol.getParentScope();
     auto current = &symbol;
     if (scope && symbol.kind == SymbolKind::InstanceBody) {
         current = symbol.as<InstanceBodySymbol>().parentInstance;
         SLANG_ASSERT(current);
+
+        if (!visited.emplace(current).second) {
+            buffer.append("<recursive>");
+            return;
+        }
 
         scope = current->getParentScope();
     }
@@ -105,7 +115,7 @@ static void getHierarchicalPathImpl(const Symbol& symbol, FormatBuffer& buffer) 
     if (scope) {
         auto& parent = scope->asSymbol();
         if (parent.kind != SymbolKind::Root && parent.kind != SymbolKind::CompilationUnit) {
-            getHierarchicalPathImpl(parent, buffer);
+            getHierarchicalPathImpl(parent, buffer, visited);
             if (parent.kind == SymbolKind::Package || parent.kind == SymbolKind::ClassType ||
                 parent.kind == SymbolKind::CovergroupType) {
                 separator = "::"sv;
@@ -150,7 +160,7 @@ static void getHierarchicalPathImpl(const Symbol& symbol, FormatBuffer& buffer) 
     }
     else if (current->kind == SymbolKind::GenerateBlock) {
         auto& block = current->as<GenerateBlockSymbol>();
-        if (auto index = block.arrayIndex) {
+        if (auto index = block.getArrayIndex()) {
             buffer.append("[");
             buffer.append(index->toString(LiteralBase::Decimal, false));
             buffer.append("]");
@@ -167,23 +177,33 @@ static void getHierarchicalPathImpl(const Symbol& symbol, FormatBuffer& buffer) 
             inst.getArrayDimensions(instanceDimVec);
 
             std::span<const ConstantRange> instanceDims = instanceDimVec;
-            std::span<const int32_t> arrayPath = inst.arrayPath;
+            std::span<const uint32_t> arrayPath = inst.arrayPath;
             SLANG_ASSERT(instanceDims.size() == arrayPath.size());
 
-            for (size_t i = 0; i < instanceDims.size(); i++) {
-                auto dim = instanceDims[i];
-                auto idx = dim.translateIndex(arrayPath[i]);
-                idx += dim.lower();
-
-                buffer.format("[{}]", idx);
-            }
+            for (size_t i = 0; i < instanceDims.size(); i++)
+                buffer.format("[{}]", int32_t(arrayPath[i]) + instanceDims[i].lower());
+        }
+    }
+    else if (current->kind == SymbolKind::ClassType) {
+        auto& classType = current->as<ClassType>();
+        if (classType.genericClass) {
+            TypePrinter printer;
+            printer.appendParameters(classType.genericParameters, false);
+            buffer.append(printer.toString());
         }
     }
 }
 
-void Symbol::getHierarchicalPath(std::string& result) const {
+std::string Symbol::getHierarchicalPath() const {
+    std::string buf;
+    appendHierarchicalPath(buf);
+    return buf;
+}
+
+void Symbol::appendHierarchicalPath(std::string& result) const {
     FormatBuffer buffer;
-    getHierarchicalPathImpl(*this, buffer);
+    SmallSet<const Symbol*, 4> visited;
+    getHierarchicalPathImpl(*this, buffer, visited);
     if (buffer.empty())
         buffer.append("$unit");
 
@@ -212,8 +232,10 @@ static void getLexicalPathImpl(const Symbol& symbol, std::string& buffer) {
         buffer.append(symbol.name);
 }
 
-void Symbol::getLexicalPath(std::string& buffer) const {
+std::string Symbol::getLexicalPath() const {
+    std::string buffer;
     getLexicalPathImpl(*this, buffer);
+    return buffer;
 }
 
 std::optional<bool> Symbol::isDeclaredBefore(const Symbol& target) const {

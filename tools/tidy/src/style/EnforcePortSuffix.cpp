@@ -12,7 +12,7 @@ using namespace slang;
 using namespace slang::ast;
 
 namespace enforce_port_suffix {
-struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, true, false> {
+struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, VisitFlags::StatementsCanonical> {
     explicit MainVisitor(Diagnostics& diagnostics) : TidyVisitor(diagnostics) {}
 
     void handle(const PortSymbol& port) {
@@ -39,7 +39,8 @@ struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, true, false> {
             matched |= port.name.ends_with(suffix);
         }
         if (!matched) {
-            auto& diag = diags.add(diag::EnforcePortSuffix, port.location) << port.name;
+            std::string_view portName = !port.name.empty() ? port.name : "<unnamed>";
+            auto& diag = diags.add(diag::EnforcePortSuffix, port.location) << portName;
             if (suffixes->size() == 1) {
                 diag << fmt::format("\"{}\"", suffixes->front());
             }
@@ -54,16 +55,18 @@ struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, true, false> {
 using namespace enforce_port_suffix;
 class EnforcePortSuffix : public TidyCheck {
 public:
-    [[maybe_unused]] explicit EnforcePortSuffix(TidyKind kind) : TidyCheck(kind) {}
+    [[maybe_unused]] explicit EnforcePortSuffix(TidyKind kind,
+                                                std::optional<slang::DiagnosticSeverity> severity) :
+        TidyCheck(kind, severity) {}
 
-    bool check(const ast::RootSymbol& root) override {
+    bool check(const ast::RootSymbol& root, const slang::analysis::AnalysisManager&) override {
         MainVisitor visitor(diagnostics);
         root.visit(visitor);
         return diagnostics.empty();
     }
 
     DiagCode diagCode() const override { return diag::EnforcePortSuffix; }
-    DiagnosticSeverity diagSeverity() const override { return DiagnosticSeverity::Warning; }
+    DiagnosticSeverity diagDefaultSeverity() const override { return DiagnosticSeverity::Warning; }
     std::string diagString() const override {
         return "port '{}' is not correctly suffixed with suffix: {}";
     }

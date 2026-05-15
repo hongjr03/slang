@@ -17,7 +17,7 @@ namespace slang::ast {
 class TimingControl;
 
 /// Represents an assignment expression.
-class SLANG_EXPORT AssignmentExpression : public Expression {
+class SLANG_EXPORT AssignmentExpression final : public Expression {
 public:
     /// An optional operator that applies to the assignment
     /// (i.e. a compound assignment expression).
@@ -59,6 +59,7 @@ public:
     Expression& right() { return *right_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const AssignmentExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -88,7 +89,7 @@ private:
 };
 
 /// Represents a new[] expression that creates a dynamic array.
-class SLANG_EXPORT NewArrayExpression : public Expression {
+class SLANG_EXPORT NewArrayExpression final : public Expression {
 public:
     NewArrayExpression(const Type& type, const Expression& sizeExpr, const Expression* initializer,
                        SourceRange sourceRange) :
@@ -102,6 +103,7 @@ public:
     const Expression* initExpr() const { return initializer_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const NewArrayExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -124,7 +126,7 @@ private:
 };
 
 /// Represents a `new` expression that creates a class instance.
-class SLANG_EXPORT NewClassExpression : public Expression {
+class SLANG_EXPORT NewClassExpression final : public Expression {
 public:
     /// Set to true if this is invoking a super class's constructor.
     bool isSuperClass = false;
@@ -138,6 +140,7 @@ public:
     const Expression* constructorCall() const { return constructorCall_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const NewClassExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -162,7 +165,7 @@ private:
 };
 
 /// Represents a `new` expression that creates a covergroup instance.
-class SLANG_EXPORT NewCovergroupExpression : public Expression {
+class SLANG_EXPORT NewCovergroupExpression final : public Expression {
 public:
     /// A list of arguments to the new expression.
     std::span<const Expression* const> arguments;
@@ -172,6 +175,7 @@ public:
         Expression(ExpressionKind::NewCovergroup, type, sourceRange), arguments(arguments) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const NewCovergroupExpression& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -195,6 +199,7 @@ public:
     std::span<const Expression* const> elements() const { return elements_; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const AssignmentPatternExpressionBase& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -215,7 +220,8 @@ private:
 };
 
 /// Represents a simple assignment pattern expression.
-class SLANG_EXPORT SimpleAssignmentPatternExpression : public AssignmentPatternExpressionBase {
+class SLANG_EXPORT SimpleAssignmentPatternExpression final
+    : public AssignmentPatternExpressionBase {
 public:
     /// True if this assignment pattern is an lvalue, and false otherwise.
     bool isLValue;
@@ -253,7 +259,8 @@ public:
 };
 
 /// Represents a structured assignment pattern expression.
-class SLANG_EXPORT StructuredAssignmentPatternExpression : public AssignmentPatternExpressionBase {
+class SLANG_EXPORT StructuredAssignmentPatternExpression final
+    : public AssignmentPatternExpressionBase {
 public:
     /// A setter for a specific type member.
     struct MemberSetter {
@@ -349,7 +356,8 @@ public:
 };
 
 /// Represents a replicated assignment pattern expression.
-class SLANG_EXPORT ReplicatedAssignmentPatternExpression : public AssignmentPatternExpressionBase {
+class SLANG_EXPORT ReplicatedAssignmentPatternExpression final
+    : public AssignmentPatternExpressionBase {
 public:
     ReplicatedAssignmentPatternExpression(const Type& type, const Expression& count,
                                           std::span<const Expression* const> elements,
@@ -390,10 +398,6 @@ public:
     }
 
 private:
-    static const Expression& bindReplCount(Compilation& comp,
-                                           const syntax::ExpressionSyntax& syntax,
-                                           const ASTContext& context, size_t& count);
-
     const Expression* count_;
 };
 

@@ -13,8 +13,10 @@
 #include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/symbols/AttributeSymbol.h"
 #include "slang/ast/symbols/BlockSymbols.h"
+#include "slang/ast/symbols/CheckerSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
-#include "slang/ast/symbols/SubroutineSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
+#include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/Type.h"
 #include "slang/diagnostics/DeclarationsDiags.h"
@@ -28,43 +30,26 @@ namespace slang::ast {
 
 using namespace syntax;
 
-DriverKind ASTContext::getDriverKind() const {
-    if (flags.has(ASTFlags::ProceduralAssign))
-        return DriverKind::Procedural;
-    if (flags.has(ASTFlags::ProceduralForceRelease))
-        return DriverKind::Other;
-    if (flags.has(ASTFlags::NonProcedural))
-        return DriverKind::Continuous;
-    return DriverKind::Procedural;
-}
-
 const InstanceSymbolBase* ASTContext::getInstance() const {
-    if (instanceOrProc && instanceOrProc->kind != SymbolKind::ProceduralBlock)
-        return (const InstanceSymbolBase*)instanceOrProc;
+    if (symbolCtx && symbolCtx->kind != SymbolKind::ProceduralBlock) {
+        switch (symbolCtx->kind) {
+            case SymbolKind::Port:
+            case SymbolKind::MultiPort:
+            case SymbolKind::InterfacePort: {
+                auto ps = symbolCtx->getParentScope();
+                SLANG_ASSERT(ps);
+                return ps->asSymbol().as<InstanceBodySymbol>().parentInstance;
+            }
+            default:
+                return (const InstanceSymbolBase*)symbolCtx;
+        }
+    }
     return nullptr;
 }
 
 const ProceduralBlockSymbol* ASTContext::getProceduralBlock() const {
-    if (instanceOrProc && instanceOrProc->kind == SymbolKind::ProceduralBlock)
-        return &instanceOrProc->as<ProceduralBlockSymbol>();
-    return nullptr;
-}
-
-const SubroutineSymbol* ASTContext::getContainingSubroutine() const {
-    if (instanceOrProc)
-        return nullptr;
-
-    auto curr = scope.get();
-    do {
-        auto& sym = curr->asSymbol();
-        if (sym.kind == SymbolKind::Subroutine)
-            return &sym.as<SubroutineSymbol>();
-        if (sym.kind != SymbolKind::StatementBlock)
-            break;
-
-        curr = sym.getParentScope();
-    } while (curr);
-
+    if (symbolCtx && symbolCtx->kind == SymbolKind::ProceduralBlock)
+        return &symbolCtx->as<ProceduralBlockSymbol>();
     return nullptr;
 }
 
@@ -77,13 +62,18 @@ bool ASTContext::inAlwaysCombLatch() const {
 }
 
 void ASTContext::setInstance(const InstanceSymbolBase& inst) {
-    SLANG_ASSERT(!instanceOrProc);
-    instanceOrProc = &inst;
+    SLANG_ASSERT(!symbolCtx);
+    symbolCtx = &inst;
 }
 
 void ASTContext::setProceduralBlock(const ProceduralBlockSymbol& block) {
-    SLANG_ASSERT(!instanceOrProc);
-    instanceOrProc = &block;
+    SLANG_ASSERT(!symbolCtx);
+    symbolCtx = &block;
+}
+
+void ASTContext::setPort(const Symbol& port) {
+    SLANG_ASSERT(!symbolCtx);
+    symbolCtx = &port;
 }
 
 const Symbol* ASTContext::tryFillAssertionDetails() {
@@ -125,47 +115,44 @@ void ASTContext::setAttributes(const Expression& expr,
     if (syntax.empty())
         return;
 
-    if (flags.has(ASTFlags::NoAttributes)) {
-        if (!expr.bad())
-            addDiag(diag::AttributesNotAllowed, expr.sourceRange);
-        return;
-    }
-
     getCompilation().setAttributes(expr,
                                    AttributeSymbol::fromSyntax(syntax, *scope, getLocation()));
 }
 
-void ASTContext::addDriver(const ValueSymbol& symbol, const Expression& longestStaticPrefix,
-                           bitmask<AssignFlags> assignFlags) const {
-    if (flags.has(ASTFlags::NotADriver) || scope->isUninstantiated())
-        return;
+template<typename TLoc>
+Diagnostic& ASTContext::addDiagImpl(DiagCode code, TLoc loc) const {
+    if (assertionInstance) {
+        // If we're in an assertion instance we need to walk up the
+        // instantiation chain to find the real scope, otherwise we
+        // might miss cases where we are in an uninstantiated scope.
+        auto curCtx = this;
+        while (curCtx->assertionInstance && curCtx->assertionInstance->prevContext &&
+               curCtx->assertionInstance->symbol &&
+               curCtx->assertionInstance->symbol->kind != SymbolKind::Checker) {
+            curCtx = curCtx->assertionInstance->prevContext;
+        }
 
-    symbol.addDriver(getDriverKind(), longestStaticPrefix, getContainingSymbol(), assignFlags);
-}
+        auto& diag = curCtx->scope->addDiag(code, loc);
+        addAssertionBacktrace(diag);
+        return diag;
+    }
 
-const Symbol& ASTContext::getContainingSymbol() const {
-    const Symbol* containingSym = getProceduralBlock();
-    if (!containingSym)
-        containingSym = getContainingSubroutine();
+    auto& diag = scope->addDiag(code, loc);
 
-    if (!containingSym)
-        containingSym = &scope->asSymbol();
+    if (flags.has(ASTFlags::WildcardPortConn)) {
+        SLANG_ASSERT(symbolCtx);
+        diag.addNote(diag::NoteForPortConn, symbolCtx->location) << symbolCtx->name;
+    }
 
-    return *containingSym;
+    return diag;
 }
 
 Diagnostic& ASTContext::addDiag(DiagCode code, SourceLocation location) const {
-    auto& diag = scope->addDiag(code, location);
-    if (assertionInstance)
-        addAssertionBacktrace(diag);
-    return diag;
+    return addDiagImpl(code, location);
 }
 
 Diagnostic& ASTContext::addDiag(DiagCode code, SourceRange sourceRange) const {
-    auto& diag = scope->addDiag(code, sourceRange);
-    if (assertionInstance)
-        addAssertionBacktrace(diag);
-    return diag;
+    return addDiagImpl(code, sourceRange);
 }
 
 bool ASTContext::requireIntegral(const Expression& expr) const {
@@ -421,6 +408,39 @@ const ExpressionSyntax* ASTContext::requireSimpleExpr(const PropertyExprSyntax& 
     return nullptr;
 }
 
+void ASTContext::noteReference(const ValueSymbol& symbol, bool isDottedAccess) const {
+    if (auto syntax = symbol.getSyntax(); syntax && !flags.has(ASTFlags::NoReference)) {
+        bool isLValue = flags.has(ASTFlags::LValue);
+        if (isDottedAccess) {
+            auto& type = symbol.getType();
+            if (type.isObjectHandleType())
+                isLValue = false;
+        }
+
+        auto& comp = getCompilation();
+        comp.noteReference(*syntax, isLValue);
+
+        if (isLValue && flags.has(ASTFlags::LAndRValue))
+            comp.noteReference(*syntax, /* isLValue */ false);
+
+        // Modport ports are aliases for interface members; references to the
+        // facade also count as references to the connected value(s).
+        if (auto mpp = symbol.as_if<ModportPortSymbol>()) {
+            if (auto internal = mpp->internalSymbol) {
+                if (auto value = internal->as_if<ValueSymbol>())
+                    noteReference(*value, /* isDottedAccess */ false);
+            }
+            else if (mpp->explicitConnection) {
+                mpp->explicitConnection->visitSymbolReferences(
+                    [&](const Expression&, const Symbol& s) {
+                        if (auto value = s.as_if<ValueSymbol>())
+                            noteReference(*value, /* isDottedAccess */ false);
+                    });
+            }
+        }
+    }
+}
+
 RandMode ASTContext::getRandMode(const Symbol& symbol) const {
     RandMode mode = symbol.getRandMode();
     if (mode != RandMode::None)
@@ -499,18 +519,23 @@ void ASTContext::evalRangeDimension(const SelectorSyntax& syntax, bool isPacked,
 
                 result.kind = DimensionKind::AbbreviatedRange;
                 result.range = {0, *value - 1};
+                result.leftExpr = &expr;
             }
             break;
         }
         case SyntaxKind::SimpleRangeSelect: {
             auto& rangeSyntax = syntax.as<RangeSelectSyntax>();
-            auto left = evalInteger(*rangeSyntax.left);
-            auto right = evalInteger(*rangeSyntax.right);
+            auto& leftExpr = Expression::bind(*rangeSyntax.left, *this);
+            auto& rightExpr = Expression::bind(*rangeSyntax.right, *this);
+            auto left = evalInteger(leftExpr);
+            auto right = evalInteger(rightExpr);
             if (!left || !right)
                 return;
 
             result.kind = DimensionKind::Range;
             result.range = {*left, *right};
+            result.leftExpr = &leftExpr;
+            result.rightExpr = &rightExpr;
             break;
         }
         default:
@@ -543,7 +568,7 @@ ASTContext ASTContext::resetFlags(bitmask<ASTFlags> addedFlags) const {
     static constexpr bitmask<ASTFlags> NonSticky =
         ASTFlags::InsideConcatenation | ASTFlags::AllowDataType | ASTFlags::AssignmentAllowed |
         ASTFlags::StreamingAllowed | ASTFlags::TopLevelStatement | ASTFlags::AllowUnboundedLiteral |
-        ASTFlags::AllowTypeReferences | ASTFlags::AllowClockingBlock | ASTFlags::NotADriver |
+        ASTFlags::AllowTypeReferences | ASTFlags::AllowClockingBlock |
         ASTFlags::AssertionDefaultArg;
 
     ASTContext result(*this);

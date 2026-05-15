@@ -20,6 +20,7 @@
 #include "slang/ast/types/AllTypes.h"
 #include "slang/diagnostics/ConstEvalDiags.h"
 #include "slang/diagnostics/ExpressionsDiags.h"
+#include "slang/diagnostics/LookupDiags.h"
 #include "slang/diagnostics/TypesDiags.h"
 #include "slang/numeric/MathUtils.h"
 #include "slang/parsing/LexerFacts.h"
@@ -205,9 +206,7 @@ bool Expression::bindMembershipExpressions(const ASTContext& context, TokenKind 
         else
             selfDetermined(context, expr);
 
-        if (expr->bad())
-            return false;
-
+        SLANG_ASSERT(!expr->bad());
         results[index++] = expr;
     }
 
@@ -241,8 +240,8 @@ Expression& UnaryExpression::fromSyntax(Compilation& compilation,
             result->type = type;
             break;
         case SyntaxKind::UnaryLogicalNotExpression:
-            // Supported for both integral and real types. Result is a single bit.
-            good = type->isNumeric();
+            // Supported for all boolean convertible types. Result is a single bit.
+            good = type->isBooleanConvertible();
             result->type = type->isFourState() ? &compilation.getLogicType()
                                                : &compilation.getBitType();
             selfDetermined(context, result->operand_);
@@ -280,6 +279,9 @@ Expression& UnaryExpression::fromSyntax(Compilation& compilation,
             if (!operand.requireLValue(context, syntax.operatorToken.location())) {
                 return badExpr(compilation, result);
             }
+
+            if (good && type->isIntegral() && type->getBitWidth() == 1)
+                context.addDiag(diag::IncDecBit, syntax.operatorToken.range());
 
             break;
         default:
@@ -325,12 +327,15 @@ Expression& UnaryExpression::fromSyntax(Compilation& compilation,
         return badExpr(compilation, result);
     }
 
+    if (type->isIntegral() && type->getBitWidth() == 1)
+        context.addDiag(diag::IncDecBit, syntax.operatorToken.range());
+
     context.setAttributes(*result, syntax.attributes);
     return *result;
 }
 
 bool UnaryExpression::propagateType(const ASTContext& context, const Type& newType,
-                                    SourceRange propRange) {
+                                    SourceRange propRange, ConversionKind) {
     switch (op) {
         case UnaryOperator::Plus:
         case UnaryOperator::Minus:
@@ -379,13 +384,14 @@ Expression::EffectiveSign UnaryExpression::getEffectiveSignImpl(bool isForConver
     }
 }
 
+bool UnaryExpression::isEquivalentImpl(const UnaryExpression& rhs) const {
+    return op == rhs.op && operand().isEquivalentTo(rhs.operand());
+}
+
 ConstantValue UnaryExpression::evalImpl(EvalContext& context) const {
     // Handle operations that require an lvalue up front.
     if (OpInfo::isLValue(op)) {
         LValue lvalue = operand().evalLValue(context);
-        if (!lvalue)
-            return nullptr;
-
         ConstantValue cv = lvalue.load();
         if (!cv)
             return nullptr;
@@ -403,7 +409,7 @@ ConstantValue UnaryExpression::evalImpl(EvalContext& context) const {
                 OP(Postincrement, v + 1);
                 OP(Postdecrement, v - 1);
                 default:
-                    break;
+                    SLANG_UNREACHABLE;
             }
 #undef OP
         }
@@ -420,7 +426,7 @@ ConstantValue UnaryExpression::evalImpl(EvalContext& context) const {
                 OP(Postincrement, v + 1);
                 OP(Postdecrement, v - 1);
                 default:
-                    break;
+                    SLANG_UNREACHABLE;
             }
 #undef OP
         }
@@ -437,7 +443,7 @@ ConstantValue UnaryExpression::evalImpl(EvalContext& context) const {
                 OP(Postincrement, v + 1);
                 OP(Postdecrement, v - 1);
                 default:
-                    break;
+                    SLANG_UNREACHABLE;
             }
 #undef OP
         }
@@ -489,6 +495,9 @@ ConstantValue UnaryExpression::evalImpl(EvalContext& context) const {
             default:
                 break;
         }
+    }
+    else if (op == UnaryOperator::LogicalNot) {
+        return SVInt(cv.isFalse());
     }
 
 #undef OP
@@ -743,9 +752,24 @@ Expression& BinaryExpression::fromComponents(Expression& lhs, Expression& rhs, B
         return &compilation.getBitType();
     };
 
-    bool good;
+    bool good = false;
     switch (op) {
         case BinaryOperator::Add:
+            // Allow string concatenation with + only if at least one operand is
+            // actually of string type and not a string literal. This is a non-standard extension.
+            if ((lt->isString() || rt->isString()) && bothStrings) {
+                good = true;
+                result->type = &compilation.getStringType();
+                context.addDiag(diag::NonstandardStringConcat, opRange);
+
+                // If there is a literal involved, make sure it's converted to string.
+                contextDetermined(context, result->left_, result, compilation.getStringType(),
+                                  opRange);
+                contextDetermined(context, result->right_, result, compilation.getStringType(),
+                                  opRange);
+                break;
+            }
+            [[fallthrough]];
         case BinaryOperator::Subtract:
         case BinaryOperator::Multiply:
             good = bothNumeric;
@@ -919,8 +943,6 @@ Expression& BinaryExpression::fromComponents(Expression& lhs, Expression& rhs, B
                 }
             }
             break;
-        default:
-            SLANG_UNREACHABLE;
     }
 
     if (!good) {
@@ -932,6 +954,19 @@ Expression& BinaryExpression::fromComponents(Expression& lhs, Expression& rhs, B
     }
 
     analyzePrecedence(context, lhs, rhs, op, opRange);
+
+    // Warn when a divisor is a compile-time constant zero.
+    if ((op == BinaryOperator::Divide || op == BinaryOperator::Mod) &&
+        !context.inUnevaluatedBranch()) {
+        auto cv = context.tryEval(*result->right_);
+        if (cv.isInteger() && !cv.integer().hasUnknown() && bool(cv.integer() == 0)) {
+            context.addDiag(diag::DivisionByZero, result->right_->sourceRange);
+        }
+        else if ((cv.isReal() && cv.real() == 0.0) ||
+                 (cv.isShortReal() && cv.shortReal() == 0.0f)) {
+            context.addDiag(diag::DivisionByZero, result->right_->sourceRange);
+        }
+    }
 
     auto& clt = lt->getCanonicalType();
     auto& crt = rt->getCanonicalType();
@@ -1105,6 +1140,10 @@ void BinaryExpression::analyzeOpTypes(const Type& clt, const Type& crt, const Ty
         // Ignore operations between strings and string literals.
         return;
     }
+    else if (clt.isUnpackedArray() && crt.isUnpackedArray() && clt.isEquivalent(crt)) {
+        // Allow unpacked array bounds to differ as long as width is the same.
+        return;
+    }
 
     auto& diag = context.addDiag(code, opRange);
     if (extraDiagArg)
@@ -1114,7 +1153,7 @@ void BinaryExpression::analyzeOpTypes(const Type& clt, const Type& crt, const Ty
 }
 
 bool BinaryExpression::propagateType(const ASTContext& context, const Type& newType,
-                                     SourceRange propRange) {
+                                     SourceRange propRange, ConversionKind) {
     switch (op) {
         case BinaryOperator::Add:
         case BinaryOperator::Subtract:
@@ -1145,17 +1184,55 @@ bool BinaryExpression::propagateType(const ASTContext& context, const Type& newT
         case BinaryOperator::LogicalEquivalence:
             // Type is already set (always 1 bit) and operands are already folded.
             return false;
-        case BinaryOperator::LogicalShiftLeft:
-        case BinaryOperator::LogicalShiftRight:
-        case BinaryOperator::ArithmeticShiftLeft:
-        case BinaryOperator::ArithmeticShiftRight:
         case BinaryOperator::Power:
             // Only the left hand side gets propagated; the rhs is self determined.
             type = &newType;
             contextDetermined(context, left_, this, newType, propRange);
-            if (op == BinaryOperator::ArithmeticShiftRight && !type->isSigned())
-                context.addDiag(diag::UnsignedArithShift, left_->sourceRange) << *type;
             return true;
+        case BinaryOperator::LogicalShiftLeft:
+        case BinaryOperator::LogicalShiftRight:
+        case BinaryOperator::ArithmeticShiftLeft:
+        case BinaryOperator::ArithmeticShiftRight: {
+            // Only the left hand side gets propagated; the rhs is self determined.
+            type = &newType;
+            contextDetermined(context, left_, this, newType, propRange);
+
+            if (op == BinaryOperator::ArithmeticShiftRight && !type->isSigned()) {
+                context.addDiag(diag::UnsignedArithShift, left_->sourceRange) << *type;
+            }
+            else if (op == BinaryOperator::LogicalShiftRight && type->isSigned()) {
+                // Warn when a logical right shift is applied to a signed operand, since
+                // it shifts in zeros rather than the sign bit. Suppress the warning when
+                // the operand is a known non-negative constant, because in that case
+                // logical and arithmetic shifts produce the same result.
+                auto cv = context.tryEval(*left_);
+                if (!cv || !cv.isInteger() || cv.integer().isNegative())
+                    context.addDiag(diag::SignedLogicalShift, left_->sourceRange) << *type;
+            }
+
+            // Warn when the shift amount is a known constant that is negative or
+            // overflows the width of the left-hand operand.
+            if (!context.inUnevaluatedBranch()) {
+                auto cv = context.tryEval(*right_);
+                if (cv && cv.isInteger()) {
+                    const auto& shiftAmt = cv.integer();
+                    if (!shiftAmt.hasUnknown()) {
+                        if (shiftAmt.isSigned() && shiftAmt.isNegative()) {
+                            context.addDiag(diag::ShiftCountNegative, right_->sourceRange) << cv;
+                        }
+                        else {
+                            bitwidth_t lhsWidth = type->getBitWidth();
+                            auto shiftVal = shiftAmt.as<uint64_t>();
+                            if (!shiftVal || *shiftVal >= lhsWidth) {
+                                context.addDiag(diag::ShiftCountOverflow, right_->sourceRange)
+                                    << cv << lhsWidth;
+                            }
+                        }
+                    }
+                }
+            }
+            return true;
+        }
     }
     SLANG_UNREACHABLE;
 }
@@ -1235,6 +1312,10 @@ Expression::EffectiveSign BinaryExpression::getEffectiveSignImpl(bool isForConve
     SLANG_UNREACHABLE;
 }
 
+bool BinaryExpression::isEquivalentImpl(const BinaryExpression& rhs) const {
+    return op == rhs.op && left().isEquivalentTo(rhs.left()) && right().isEquivalentTo(rhs.right());
+}
+
 ConstantValue BinaryExpression::evalImpl(EvalContext& context) const {
     if (left().kind == ExpressionKind::TypeReference &&
         right().kind == ExpressionKind::TypeReference) {
@@ -1285,6 +1366,37 @@ void BinaryExpression::serializeTo(ASTSerializer& serializer) const {
     serializer.write("right", right());
 }
 
+static const Pattern* createPattern(Compilation& comp, ASTContext& context,
+                                    const PatternSyntax& syntax, const Type& targetType) {
+
+    SmallVector<const PatternVarSymbol*> vars;
+    if (!Pattern::createPatternVars(context, syntax, targetType, vars))
+        return comp.emplace<InvalidPattern>(nullptr);
+
+    SmallMap<std::string_view, const Symbol*, 4> varMap;
+    for (auto var : vars) {
+        if (!var->name.empty()) {
+            auto [it, inserted] = varMap.emplace(var->name, var);
+            if (!inserted) {
+                auto& diag = context.addDiag(diag::Redefinition, var->location);
+                diag << var->name;
+                diag.addNote(diag::NoteDeclarationHere, it->second->location);
+                continue;
+            }
+
+            // We just created this pattern var so the const_cast is safe.
+            const_cast<PatternVarSymbol*>(var)->nextTemp = std::exchange(context.firstTempVar, var);
+
+            // We need to force resolution here because the pattern variable doesn't
+            // live in a scope and so later attempts at touching it could cause normal
+            // resolution logic to fail.
+            var->getDeclaredType()->forceResolveAt(context);
+        }
+    }
+
+    return &Pattern::bind(context, syntax, targetType);
+}
+
 Expression& ConditionalExpression::fromSyntax(Compilation& comp,
                                               const ConditionalExpressionSyntax& syntax,
                                               const ASTContext& context,
@@ -1302,13 +1414,12 @@ Expression& ConditionalExpression::fromSyntax(Compilation& comp,
 
         const Pattern* pattern = nullptr;
         if (condSyntax->matchesClause) {
-            Pattern::VarMap patternVarMap;
-            pattern = &Pattern::bind(*condSyntax->matchesClause->pattern, *cond.type, patternVarMap,
-                                     trueContext);
+            pattern = createPattern(comp, trueContext, *condSyntax->matchesClause->pattern,
+                                    *cond.type);
+            bad |= pattern->bad();
 
             // We don't consider the condition to be const if there's a pattern.
             isConst = false;
-            bad |= pattern->bad();
         }
         else {
             isFourState |= cond.type->isFourState();
@@ -1342,6 +1453,12 @@ Expression& ConditionalExpression::fromSyntax(Compilation& comp,
         context.flags.has(ASTFlags::AllowUnboundedLiteralArithmetic)) {
         leftFlags |= ASTFlags::AllowUnboundedLiteral;
         rightFlags |= ASTFlags::AllowUnboundedLiteral;
+    }
+
+    // Pass through the flag allowing streaming operators as branches.
+    if (context.flags.has(ASTFlags::StreamingAllowed)) {
+        leftFlags |= ASTFlags::StreamingAllowed;
+        rightFlags |= ASTFlags::StreamingAllowed;
     }
 
     auto& left = create(comp, *syntax.left, trueContext, leftFlags, assignmentTarget);
@@ -1431,8 +1548,8 @@ Expression& ConditionalExpression::fromSyntax(Compilation& comp,
 }
 
 bool ConditionalExpression::propagateType(const ASTContext& context, const Type& newType,
-                                          SourceRange opRange) {
-    // The predicate is self determined so no need to handle it here.
+                                          SourceRange opRange, ConversionKind conversionKind) {
+    const bool parentTypeEquiv = type->isEquivalent(newType);
     type = &newType;
 
     bitmask<ASTFlags> leftFlags = ASTFlags::None;
@@ -1444,8 +1561,36 @@ bool ConditionalExpression::propagateType(const ASTContext& context, const Type&
             leftFlags = ASTFlags::UnevaluatedBranch;
     }
 
-    contextDetermined(context.resetFlags(leftFlags), left_, this, newType, opRange);
-    contextDetermined(context.resetFlags(rightFlags), right_, this, newType, opRange);
+    auto handleBranch = [&](Expression*& expr, bitmask<ASTFlags> flags,
+                            std::optional<bitwidth_t> otherEffectiveWidth) {
+        // This is a propagated conversion but we'd like to see width-expand
+        // warnings anyway so we'll manually do the check conversion check here.
+        if (!flags.has(ASTFlags::UnevaluatedBranch) &&
+            conversionKind <= ConversionKind::Propagated) {
+            // If the parent type was already equivalent to what's being propagated,
+            // then the only conversions we might be doing are "self induced", in the
+            // sense that one branch is propagating its type to the other side.
+            // We want to avoid warning in those cases where we have a literal
+            // expression with a smaller effective type, like for example:
+            //   bit a, b, c;
+            //   c = a ? b : 0; // 32-bit literal 0 shouldn't cause a warning
+            if (!parentTypeEquiv || !newType.isNumeric() || !expr->type->isNumeric() ||
+                !otherEffectiveWidth || expr->type->getBitWidth() < otherEffectiveWidth) {
+                ConversionExpression::checkImplicitConversions(context, *expr->type, newType, *expr,
+                                                               this, opRange,
+                                                               ConversionKind::Implicit);
+            }
+        }
+
+        contextDetermined(context.resetFlags(flags), expr, this, newType, opRange);
+    };
+
+    auto leftEffectiveWidth = left().getEffectiveWidth();
+    auto rightEffectiveWidth = right().getEffectiveWidth();
+    handleBranch(left_, leftFlags, rightEffectiveWidth);
+    handleBranch(right_, rightFlags, leftEffectiveWidth);
+
+    // The predicate is self determined so no need to handle it here.
     return true;
 }
 
@@ -1460,6 +1605,16 @@ Expression::EffectiveSign ConditionalExpression::getEffectiveSignImpl(bool isFor
         return branch->getEffectiveSign(isForConversion);
     return conjunction(left().getEffectiveSign(isForConversion),
                        right().getEffectiveSign(isForConversion));
+}
+
+bool ConditionalExpression::isEquivalentImpl(const ConditionalExpression& rhs) const {
+    return left().isEquivalentTo(rhs.left()) && right().isEquivalentTo(rhs.right()) &&
+           std::ranges::equal(conditions, rhs.conditions,
+                              [](const Condition& a, const Condition& b) {
+                                  return a.expr->isEquivalentTo(*b.expr) &&
+                                         bool(a.pattern) == bool(b.pattern) &&
+                                         (!a.pattern || a.pattern->isEquivalentTo(*b.pattern));
+                              });
 }
 
 ConstantValue ConditionalExpression::evalImpl(EvalContext& context) const {
@@ -1569,6 +1724,21 @@ Expression& InsideExpression::fromSyntax(Compilation& compilation,
     if (bad)
         return badExpr(compilation, result);
 
+    // Warn about `!x inside {y, z}` where they probably meant `!(x inside {y, z})`
+    auto& lhs = boundSpan[0]->unwrapImplicitConversions();
+    if (lhs.kind == ExpressionKind::UnaryOp && !lhs.isParenthesized() &&
+        lhs.as<UnaryExpression>().op == UnaryOperator::LogicalNot) {
+
+        auto& unary = lhs.as<UnaryExpression>();
+        auto kindStr = "'inside' expression"sv;
+        auto& diag = context.addDiag(diag::LogicalNotParentheses, unary.opRange);
+        diag << kindStr << syntax.inside.range();
+
+        SourceRange range(unary.operand().sourceRange.start(), result->sourceRange.end());
+        diag.addNote(diag::NoteLogicalNotFix, range) << kindStr;
+        diag.addNote(diag::NoteLogicalNotSilence, lhs.sourceRange);
+    }
+
     return *result;
 }
 
@@ -1629,6 +1799,14 @@ ConstantValue InsideExpression::evalImpl(EvalContext& context) const {
     return SVInt(anyUnknown ? logic_t::x : logic_t(0));
 }
 
+bool InsideExpression::isEquivalentImpl(const InsideExpression& rhs) const {
+    return left().isEquivalentTo(rhs.left()) &&
+           std::ranges::equal(rangeList(), rhs.rangeList(),
+                              [](const Expression* a, const Expression* b) {
+                                  return a->isEquivalentTo(*b);
+                              });
+}
+
 void InsideExpression::serializeTo(ASTSerializer& serializer) const {
     serializer.write("left", left());
 
@@ -1640,7 +1818,7 @@ void InsideExpression::serializeTo(ASTSerializer& serializer) const {
     }
 }
 
-Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
+Expression& ConcatenationExpression::fromSyntax(Compilation& comp,
                                                 const ConcatenationExpressionSyntax& syntax,
                                                 const ASTContext& context,
                                                 const Type* assignmentTarget) {
@@ -1649,7 +1827,7 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
     if (assignmentTarget && assignmentTarget->isUnpackedArray()) {
         if (assignmentTarget->isAssociativeArray()) {
             context.addDiag(diag::UnpackedConcatAssociative, syntax.sourceRange());
-            return badExpr(compilation, nullptr);
+            return badExpr(comp, nullptr);
         }
 
         bool bad = false;
@@ -1667,15 +1845,25 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
                                           /* isInterfacePort */ false);
             }
 
-            if (!arg)
-                arg = &create(compilation, *argSyntax, context);
+            if (!arg) {
+                // As a non-standard extension, assignment patterns may appear as
+                // elements of an unpacked array concatenation. Pass the element type so that
+                // bindAssignmentPattern can resolve the pattern's target type from context.
+                if (argSyntax->kind == SyntaxKind::AssignmentPatternExpression &&
+                    comp.hasFlag(CompilationFlags::AllowArrayConcatAssignPattern)) {
+                    arg = &create(comp, *argSyntax, context, ASTFlags::None, &elemType);
+                }
+                else {
+                    arg = &create(comp, *argSyntax, context);
+                }
+            }
 
             if (arg->bad()) {
                 bad = true;
                 continue;
             }
 
-            if (arg->isImplicitlyAssignableTo(compilation, elemType)) {
+            if (arg->isImplicitlyAssignableTo(comp, elemType)) {
                 buffer.push_back(&convertAssignment(context, elemType, *arg, arg->sourceRange));
                 totalElems++;
                 continue;
@@ -1713,10 +1901,10 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
             bad = true;
         }
 
-        auto result = compilation.emplace<ConcatenationExpression>(type, buffer.ccopy(compilation),
-                                                                   syntax.sourceRange());
+        auto result = comp.emplace<ConcatenationExpression>(type, buffer.copy(comp),
+                                                            syntax.sourceRange());
         if (bad)
-            return badExpr(compilation, result);
+            return badExpr(comp, result);
 
         return *result;
     }
@@ -1734,9 +1922,9 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
         // an additional flag so that it knows it's ok to have that zero count.
         Expression* arg;
         if (argSyntax->kind == SyntaxKind::MultipleConcatenationExpression)
-            arg = &create(compilation, *argSyntax, context, ASTFlags::InsideConcatenation);
+            arg = &create(comp, *argSyntax, context, ASTFlags::InsideConcatenation);
         else
-            arg = &create(compilation, *argSyntax, context);
+            arg = &create(comp, *argSyntax, context);
         buffer.push_back(arg);
 
         if (arg->bad()) {
@@ -1786,15 +1974,13 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
                 if (expr->type->isString()) {
                     selfDetermined(context, expr);
                 }
-                else if (expr->isImplicitString()) {
-                    expr = &ConversionExpression::makeImplicit(context, compilation.getStringType(),
-                                                               ConversionKind::Implicit, *expr,
-                                                               nullptr, {});
-                }
                 else {
-                    errored = true;
-                    context.addDiag(diag::ConcatWithStringInt, expr->sourceRange);
-                    break;
+                    if (!expr->isImplicitString())
+                        context.addDiag(diag::ConcatWithStringInt, expr->sourceRange);
+
+                    expr = &ConversionExpression::makeImplicit(context, comp.getStringType(),
+                                                               ConversionKind::Explicit, *expr,
+                                                               nullptr, {});
                 }
                 buffer[i] = expr;
             }
@@ -1807,23 +1993,21 @@ Expression& ConcatenationExpression::fromSyntax(Compilation& compilation,
     }
 
     if (errored) {
-        return badExpr(compilation,
-                       compilation.emplace<ConcatenationExpression>(compilation.getErrorType(),
-                                                                    std::span<const Expression*>(),
-                                                                    syntax.sourceRange()));
+        return badExpr(comp, comp.emplace<ConcatenationExpression>(comp.getErrorType(),
+                                                                   std::span<Expression*>(),
+                                                                   syntax.sourceRange()));
     }
 
     const Type* type;
     if (anyStrings)
-        type = &compilation.getStringType();
+        type = &comp.getStringType();
     else
-        type = &compilation.getType(totalWidth, flags);
+        type = &comp.getType(totalWidth, flags);
 
-    return *compilation.emplace<ConcatenationExpression>(*type, buffer.ccopy(compilation),
-                                                         syntax.sourceRange());
+    return *comp.emplace<ConcatenationExpression>(*type, buffer.copy(comp), syntax.sourceRange());
 }
 
-Expression& ConcatenationExpression::fromEmpty(Compilation& compilation,
+Expression& ConcatenationExpression::fromEmpty(Compilation& comp,
                                                const EmptyQueueExpressionSyntax& syntax,
                                                const ASTContext& context,
                                                const Type* assignmentTarget) {
@@ -1831,23 +2015,22 @@ Expression& ConcatenationExpression::fromEmpty(Compilation& compilation,
     if (!assignmentTarget || !assignmentTarget->isUnpackedArray()) {
         if (!assignmentTarget || !assignmentTarget->isError())
             context.addDiag(diag::EmptyConcatNotAllowed, syntax.sourceRange());
-        return badExpr(compilation, nullptr);
+        return badExpr(comp, nullptr);
     }
 
     if (assignmentTarget->isAssociativeArray()) {
         context.addDiag(diag::UnpackedConcatAssociative, syntax.sourceRange());
-        return badExpr(compilation, nullptr);
+        return badExpr(comp, nullptr);
     }
 
     if (assignmentTarget->hasFixedRange()) {
         context.addDiag(diag::UnpackedConcatSize, syntax.sourceRange())
             << *assignmentTarget << assignmentTarget->getFixedRange().width() << 0;
-        return badExpr(compilation, nullptr);
+        return badExpr(comp, nullptr);
     }
 
-    return *compilation.emplace<ConcatenationExpression>(*assignmentTarget,
-                                                         std::span<const Expression* const>{},
-                                                         syntax.sourceRange());
+    return *comp.emplace<ConcatenationExpression>(*assignmentTarget, std::span<Expression*>{},
+                                                  syntax.sourceRange());
 }
 
 ConstantValue ConcatenationExpression::evalImpl(EvalContext& context) const {
@@ -1946,6 +2129,13 @@ LValue ConcatenationExpression::evalLValueImpl(EvalContext& context) const {
     }
 
     return LValue(std::move(lvals), LValue::Concat::Packed);
+}
+
+bool ConcatenationExpression::isEquivalentImpl(const ConcatenationExpression& rhs) const {
+    return std::ranges::equal(operands(), rhs.operands(),
+                              [](const Expression* a, const Expression* b) {
+                                  return a->isEquivalentTo(*b);
+                              });
 }
 
 void ConcatenationExpression::serializeTo(ASTSerializer& serializer) const {
@@ -2061,6 +2251,10 @@ ConstantValue ReplicationExpression::evalImpl(EvalContext& context) const {
     return v.integer().replicate(c.integer());
 }
 
+bool ReplicationExpression::isEquivalentImpl(const ReplicationExpression& rhs) const {
+    return count().isEquivalentTo(rhs.count()) && concat().isEquivalentTo(rhs.concat());
+}
+
 void ReplicationExpression::serializeTo(ASTSerializer& serializer) const {
     serializer.write("count", count());
     serializer.write("concat", concat());
@@ -2068,7 +2262,7 @@ void ReplicationExpression::serializeTo(ASTSerializer& serializer) const {
 
 Expression& StreamingConcatenationExpression::fromSyntax(
     Compilation& comp, const StreamingConcatenationExpressionSyntax& syntax,
-    const ASTContext& context) {
+    const ASTContext& context, const Type* assignmentTarget) {
 
     const bool isDestination = context.flags.has(ASTFlags::LValue);
     const bool isRightToLeft = syntax.operatorToken.kind == TokenKind::LeftShift;
@@ -2203,22 +2397,31 @@ Expression& StreamingConcatenationExpression::fromSyntax(
         buffer.push_back({&arg, withExpr, constantWithWidth});
     }
 
-    // So normally the type of a streaming concatenation is never inspected,
-    // since it can only be used in assignments and there is explicit handling
-    // of these expressions there. We use a void type for the result to represent
-    // this (also because otherwise what type can we use for e.g. non fixed-size
-    // streams). However, in VCS compat mode the error about requiring an assignment
-    // context can be silenced, so we need to come up with a real result type here,
-    // which we do by converting to a packed bit vector of bitstream width.
     auto& result = *comp.emplace<StreamingConcatenationExpression>(
         comp.getVoidType(), sliceSize, bitstreamWidth, buffer.ccopy(comp), syntax.sourceRange());
 
+    // In VCS compat mode the error about requiring an assignment context can be silenced,
+    // so we need a real target type. Use a packed bit vector of the bitstream width.
+    // Cap the width so we don't overflow; canBeSource below will error if target < source.
+    const Type* effectiveTarget = assignmentTarget;
     if (!context.flags.has(ASTFlags::StreamingAllowed)) {
-        // Cap the width so we don't overflow. The conversion will error for us
-        // since the target width will be less than the source width.
         auto width = std::min(bitstreamWidth, (uint64_t)SVInt::MAX_BITS);
-        auto& type = comp.getType(bitwidth_t(width), IntegralFlags::FourState);
-        return convertAssignment(context, type, result, result.sourceRange);
+        effectiveTarget = &comp.getType(bitwidth_t(width), IntegralFlags::FourState);
+    }
+
+    // When the assignment target type is known (and not void - which happens when LHS is also a
+    // streaming concat), validate widths and wrap in a StreamingConcat conversion so the expression
+    // carries the target type directly, avoiding void-type special casing elsewhere.
+    if (!isDestination && effectiveTarget && !effectiveTarget->isVoid() &&
+        !effectiveTarget->isError()) {
+        if (!Bitstream::canBeSource(*effectiveTarget, result, result.sourceRange, context)) {
+            return badResult();
+        }
+        Expression* conv = comp.emplace<ConversionExpression>(*effectiveTarget,
+                                                              ConversionKind::StreamingConcat,
+                                                              result, result.sourceRange);
+        selfDetermined(context, conv);
+        return *conv;
     }
 
     return result;
@@ -2252,6 +2455,15 @@ ConstantValue StreamingConcatenationExpression::evalImpl(EvalContext& context) c
         return Bitstream::reOrder(std::move(values), sliceSize);
 
     return values;
+}
+
+bool StreamingConcatenationExpression::isEquivalentImpl(
+    const StreamingConcatenationExpression& rhs) const {
+    return sliceSize == rhs.sliceSize &&
+           std::ranges::equal(streams(), rhs.streams(),
+                              [](const StreamExpression& a, const StreamExpression& b) {
+                                  return a.isEquivalentTo(b);
+                              });
 }
 
 void StreamingConcatenationExpression::serializeTo(ASTSerializer& serializer) const {
@@ -2352,7 +2564,7 @@ Expression& ValueRangeExpression::fromSyntax(Compilation& comp,
 }
 
 bool ValueRangeExpression::propagateType(const ASTContext& context, const Type& newType,
-                                         SourceRange opRange) {
+                                         SourceRange opRange, ConversionKind) {
     contextDetermined(context, left_, this, newType, opRange);
     if (rangeKind == ValueRangeKind::Simple)
         contextDetermined(context, right_, this, newType, opRange);
@@ -2362,6 +2574,11 @@ bool ValueRangeExpression::propagateType(const ASTContext& context, const Type& 
 ConstantValue ValueRangeExpression::evalImpl(EvalContext&) const {
     // Should never enter this expecting a real result.
     return nullptr;
+}
+
+bool ValueRangeExpression::isEquivalentImpl(const ValueRangeExpression& rhs) const {
+    return rangeKind == rhs.rangeKind && left().isEquivalentTo(rhs.left()) &&
+           right().isEquivalentTo(rhs.right());
 }
 
 ConstantValue ValueRangeExpression::checkInside(EvalContext& context,

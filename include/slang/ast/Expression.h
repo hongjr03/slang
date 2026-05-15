@@ -10,6 +10,8 @@
 #include "slang/ast/ASTContext.h"
 #include "slang/ast/LValue.h"
 #include "slang/ast/SemanticFacts.h"
+#include "slang/util/Function.h"
+#include "slang/util/SmallMap.h"
 
 namespace slang::ast {
 
@@ -17,6 +19,7 @@ class ASTSerializer;
 class EvalContext;
 class InstanceSymbolBase;
 class Type;
+class TypeProvider;
 class ValueSymbol;
 enum class VariableFlags : uint16_t;
 
@@ -66,9 +69,16 @@ enum class VariableFlags : uint16_t;
 SLANG_ENUM(ExpressionKind, EXPRESSION)
 #undef EXPRESSION
 
-#define RANGE(x) x(Simple) x(IndexedUp) x(IndexedDown)
-SLANG_ENUM(RangeSelectionKind, RANGE)
-#undef RANGE
+// clang-format off
+#define CK(x) \
+    x(Implicit) \
+    x(Propagated) \
+    x(StreamingConcat) \
+    x(Explicit) \
+    x(BitstreamCast)
+// clang-format on
+SLANG_ENUM(ConversionKind, CK)
+#undef CK
 // clang-format on
 
 /// The base class for all expressions in SystemVerilog.
@@ -81,11 +91,6 @@ public:
 
     /// The type of the expression.
     not_null<const Type*> type;
-
-    /// A pointer to a constant value if the expression has been evaluated.
-    /// The value may be empty to indicate that the expression is known to not be constant.
-    /// If the pointer is null, the expression hasn't been evaluated yet.
-    mutable const ConstantValue* constant = nullptr;
 
     /// The syntax used to create the expression, if any. An expression tree can
     /// be created manually in which case it may not have a syntax representation.
@@ -104,17 +109,19 @@ public:
     /// Binds the left hand side of an assignment-like expression from the given syntax nodes.
     /// @param lhs The syntax node representing the expression to bind
     /// @param rhs The type of the right hand side, for type checking
-    /// @param location The location of the assignment, for reporting diagnostics
     /// @param context The AST context under which binding is performed
     /// @param isInout true if the assignment is for an inout port
     static const Expression& bindLValue(const ExpressionSyntax& lhs, const Type& rhs,
-                                        SourceLocation location, const ASTContext& context,
-                                        bool isInout);
+                                        const ASTContext& context, bool isInout);
 
     /// Binds an lvalue that is not a typical assignment-like context. For example, the
     /// output argument of certain system tasks that accept almost any type.
     static const Expression& bindLValue(const ExpressionSyntax& syntax, const ASTContext& context,
                                         bitmask<AssignFlags> assignFlags = {});
+
+    /// Binds an assignment-like expression given an already created lhs.
+    static const Expression& bindLValue(Expression& lhs, const Type& rhs, const ASTContext& context,
+                                        bitmask<AssignFlags> assignFlags);
 
     /// Binds the right hand side of an assignment-like expression from the given syntax nodes.
     /// @param lhs The type of the left hand side, for type checking
@@ -128,8 +135,12 @@ public:
 
     /// Binds a connection to a ref argument from the given syntax nodes.
     static const Expression& bindRefArg(const Type& lhs, bitmask<VariableFlags> argFlags,
-                                        const ExpressionSyntax& rhs, SourceLocation location,
-                                        const ASTContext& context);
+                                        const ExpressionSyntax& rhs, const ASTContext& context);
+
+    /// Binds a connection to a ref argument from the given pre-created target expression.
+    static const Expression& bindRefArg(const Type& lhs, bitmask<VariableFlags> argFlags,
+                                        const Expression& rhs, const ASTContext& context,
+                                        bool allowPackedSelects);
 
     /// Binds an argument or port connection with the given direction.
     static const Expression& bindArgument(const Type& argType, ArgumentDirection direction,
@@ -140,8 +151,7 @@ public:
     /// Checks that the given expression is valid for the specified connection direction.
     /// @returns true if the connection is valid and false otherwise.
     static bool checkConnectionDirection(const Expression& expr, ArgumentDirection direction,
-                                         const ASTContext& context, SourceLocation loc,
-                                         bitmask<AssignFlags> flags = {});
+                                         const ASTContext& context, SourceLocation loc);
 
     /// Binds an initializer expression for an implicitly typed parameter.
     ///
@@ -218,13 +228,16 @@ public:
     /// @param lhsExpr If the conversion is for an output port, this is a pointer to
     ///                the left-hand side expression. The pointer will be reassigned if
     ///                array port slicing occurs.
-    /// @param assignFlags If @a lhsExpr is provided, this parameter must also be provided.
-    ///                    It will the @a AssignFlags::SlicedPort flag added to it if array
-    ///                    port slicing occurs.
     static Expression& convertAssignment(const ASTContext& context, const Type& type,
                                          Expression& expr, SourceRange assignmentRange,
-                                         Expression** lhsExpr = nullptr,
-                                         bitmask<AssignFlags>* assignFlags = nullptr);
+                                         Expression** lhsExpr = nullptr);
+
+    /// Builds a tree of select expressions to map down to the target flattened bit range.
+    ///
+    /// @note The expression must be of integral type and the flatRange must be in
+    ///       canonical (descending) format.
+    static Expression& buildPackedSelectTree(const TypeProvider& typeProvider, Expression& expr,
+                                             ConstantRange flatRange, const ASTContext& context);
 
     /// Indicates whether the expression is invalid.
     bool bad() const;
@@ -236,6 +249,11 @@ public:
     /// Indicates whether the expression is represented by an unsized integer value.
     /// For example, the integer literal "4" or the unbased unsized literal "'1";
     bool isUnsizedInteger() const;
+
+    /// Returns a pointer to a constant value if the expression has been evaluated.
+    /// The value may be empty to indicate that the expression is known to not be constant.
+    /// If the pointer is null, the expression hasn't been evaluated yet.
+    const ConstantValue* getConstant() const { return constant; }
 
     /// Evaluates the expression under the given evaluation context. Any errors that occur
     /// will be stored in the evaluation context instead of issued to the compilation.
@@ -252,24 +270,16 @@ public:
 
     /// Verifies that this expression is a valid lvalue and that each element
     /// of that lvalue can be assigned to. If it's not, appropriate diagnostics
-    /// will be issued. Information about the source expression driving the lvalue
-    /// will be registered with the various symbols involved.
+    /// will be issued.
     bool requireLValue(const ASTContext& context, SourceLocation location = {},
-                       bitmask<AssignFlags> flags = {},
-                       const Expression* longestStaticPrefix = nullptr) const;
-
-    /// If this expression is a valid lvalue, returns the part(s) of it that
-    /// constitutes the "longest static prefix" for purposes of determining
-    /// duplicate assignments / drivers to a portion of a value, for each
-    /// such lvalue (usually one unless there is an lvalue concatenation).
-    /// If there are no lvalues the vector will not have any entries added to it.
-    void getLongestStaticPrefixes(
-        SmallVector<std::pair<const ValueSymbol*, const Expression*>>& results,
-        EvalContext& evalContext, const Expression* longestStaticPrefix = nullptr) const;
+                       bitmask<AssignFlags> flags = {}) const;
 
     /// Returns true if this expression can be implicitly assigned to a value
     /// of the given type.
     bool isImplicitlyAssignableTo(Compilation& compilation, const Type& type) const;
+
+    /// Returns true if this expression is structurally equivalent to the other expression.
+    bool isEquivalentTo(const Expression& other) const;
 
     /// Traverses the expression tree and computes what its width would be (in bits)
     /// if the types of all known constants were declared with only the bits necessary to
@@ -300,6 +310,9 @@ public:
     ///                    symbol reference or whether to consider only unpacked structs
     ///                    and arrays.
     const Symbol* getSymbolReference(bool allowPacked = true) const;
+
+    /// Visits all symbols referenced by this expression and all subexpressions.
+    void visitSymbolReferences(function_ref<void(const Expression&, const Symbol&)> callback) const;
 
     /// Returns true if any subexpression of this expression is a hierarchical reference.
     bool hasHierarchicalReference() const;
@@ -373,10 +386,10 @@ protected:
                                 const ASTContext& context);
 
     static Expression& bindLookupResult(
-        Compilation& compilation, LookupResult& result, SourceRange sourceRange,
+        Compilation& compilation, LookupResult& result,
         const syntax::InvocationExpressionSyntax* invocation,
-        const syntax::ArrayOrRandomizeMethodExpressionSyntax* withClause,
-        const ASTContext& context);
+        const syntax::ArrayOrRandomizeMethodExpressionSyntax* withClause, const ASTContext& context,
+        Expression* accessViaExpr = nullptr);
 
     static Expression& bindSelectExpression(Compilation& compilation,
                                             const syntax::ElementSelectExpressionSyntax& syntax,
@@ -392,12 +405,13 @@ protected:
     static Expression* tryConnectPortArray(const ASTContext& context, const Type& type,
                                            Expression& expr, const InstanceSymbolBase& instance);
 
-    static Expression& badExpr(Compilation& compilation, const Expression* expr);
+    static Expression& badExpr(BumpAllocator& alloc, const Expression* expr);
 
     // Perform type propagation and constant folding of a context-determined subexpression.
     static void contextDetermined(const ASTContext& context, Expression*& expr,
                                   const Expression* parentExpr, const Type& newType,
-                                  SourceRange operatorRange, bool isAssignment = false);
+                                  SourceRange operatorRange,
+                                  ConversionKind conversionKind = ConversionKind::Propagated);
 
     // Perform type propagation and constant folding of a self-determined subexpression.
     static void selfDetermined(const ASTContext& context, Expression*& expr);
@@ -405,7 +419,6 @@ protected:
                                                     const ExpressionSyntax& syntax,
                                                     const ASTContext& context,
                                                     bitmask<ASTFlags> extraFlags = ASTFlags::None);
-    struct PropagationVisitor;
 
     template<typename TExpression, typename TVisitor, typename... Args>
     decltype(auto) visitExpression(TExpression* expr, TVisitor&& visitor, Args&&... args) const;
@@ -418,13 +431,24 @@ protected:
 
     static EffectiveSign conjunction(EffectiveSign left, EffectiveSign right);
     static bool signMatches(EffectiveSign left, EffectiveSign right);
+
+private:
+    struct EvalVisitor;
+    struct LValueVisitor;
+    struct EffectiveWidthVisitor;
+    struct EffectiveSignVisitor;
+    struct HierarchicalVisitor;
+    struct PropagationVisitor;
+    struct EquivalentToVisitor;
+
+    mutable const ConstantValue* constant = nullptr;
 };
 
 /// @brief Represents an invalid expression
 ///
 /// Usually generated and inserted into an expression tree due
 /// to violation of language semantics or type checking.
-class SLANG_EXPORT InvalidExpression : public Expression {
+class SLANG_EXPORT InvalidExpression final : public Expression {
 public:
     /// A wrapped sub-expression that is considered invalid.
     const Expression* child;
@@ -433,6 +457,7 @@ public:
         Expression(ExpressionKind::Invalid, type, SourceRange()), child(child) {}
 
     ConstantValue evalImpl(EvalContext&) const { return nullptr; }
+    bool isEquivalentImpl(const InvalidExpression&) const { return true; }
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::Invalid; }

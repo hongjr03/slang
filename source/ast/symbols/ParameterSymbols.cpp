@@ -11,6 +11,7 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/expressions/MiscExpressions.h"
+#include "slang/ast/symbols/CheckerSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/SpecifySymbols.h"
@@ -133,7 +134,8 @@ const ConstantValue& ParameterSymbol::getValue(SourceRange referencingRange) con
 
             auto& diag = ctx.addDiag(diag::ConstEvalParamCycle, location) << name;
             diag.addNote(diag::NoteReferencedHere, referencingRange);
-            return ConstantValue::Invalid;
+            value = &ConstantValue::Invalid;
+            return *value;
         }
 
         evaluating = true;
@@ -231,6 +233,7 @@ void TypeParameterSymbol::fromSyntax(const Scope& scope,
         auto param = comp.emplace<TypeParameterSymbol>(scope, name, loc, isLocal, isPort,
                                                        typeRestriction);
         param->setSyntax(*decl);
+        param->setTypeSyntax(*decl);
 
         if (!decl->assignment) {
             param->targetType.setType(comp.getErrorType());
@@ -245,6 +248,10 @@ void TypeParameterSymbol::fromSyntax(const Scope& scope,
 
         results.push_back(param);
     }
+}
+
+void TypeParameterSymbol::setTypeSyntax(const syntax::SyntaxNode& syntax) {
+    typeAlias->setSyntax(syntax);
 }
 
 void TypeParameterSymbol::checkTypeRestriction() const {
@@ -300,7 +307,7 @@ const Expression& DefParamSymbol::getInitializer() const {
 }
 
 const ConstantValue& DefParamSymbol::getValue() const {
-    auto v = getInitializer().constant;
+    auto v = getInitializer().getConstant();
     SLANG_ASSERT(v);
     return *v;
 }
@@ -329,8 +336,15 @@ static const Symbol* checkDefparamHierarchy(const Symbol& target, const Scope& d
             // If the defparam is inside a bind instantiation we need
             // to check whether our common ancestor also is.
             if (isInsideBind) {
-                auto inst = (*it)->getContainingInstance();
-                if (!inst || !inst->flags.has(InstanceFlags::ParentFromBind))
+                bitmask<InstanceFlags> instFlags;
+                if (auto inst = (*it)->getContainingInstanceOrChecker()) {
+                    if (inst->kind == SymbolKind::InstanceBody)
+                        instFlags = inst->as<InstanceBodySymbol>().flags;
+                    else
+                        instFlags = inst->as<CheckerInstanceBodySymbol>().flags;
+                }
+
+                if (!instFlags.has(InstanceFlags::ParentFromBind))
                     return &scope->asSymbol();
             }
 
@@ -390,7 +404,8 @@ void DefParamSymbol::resolve() const {
 
     auto makeInvalid = [&] {
         initializer = comp.emplace<InvalidExpression>(nullptr, comp.getErrorType());
-        initializer->constant = &ConstantValue::Invalid;
+        context.eval(*initializer);
+        SLANG_ASSERT(initializer->getConstant());
     };
 
     if (!target) {
@@ -432,8 +447,8 @@ void DefParamSymbol::resolve() const {
     }
 
     context.eval(*initializer);
-    if (!initializer->constant)
-        initializer->constant = &ConstantValue::Invalid;
+    if (!initializer->getConstant())
+        makeInvalid();
 }
 
 void DefParamSymbol::serializeTo(ASTSerializer& serializer) const {
@@ -585,8 +600,7 @@ const Symbol* SpecparamSymbol::resolvePathTerminal(std::string_view terminalName
 
     SourceRange sourceRange{loc, loc + terminalName.length()};
     auto symbol = Lookup::unqualifiedAt(*parentParent, terminalName,
-                                        LookupLocation::after(parent.asSymbol()), sourceRange,
-                                        LookupFlags::NoParentScope);
+                                        LookupLocation::after(parent.asSymbol()), sourceRange);
     if (!symbol)
         return nullptr;
 

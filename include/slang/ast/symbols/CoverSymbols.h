@@ -9,6 +9,7 @@
 
 #include "slang/ast/Expression.h"
 #include "slang/ast/Scope.h"
+#include "slang/ast/TimingControl.h"
 #include "slang/ast/types/DeclaredType.h"
 #include "slang/ast/types/Type.h"
 #include "slang/syntax/SyntaxFwd.h"
@@ -18,6 +19,7 @@ namespace slang::ast {
 
 class FormalArgumentSymbol;
 
+/// Represents a setter for a coverage option.
 class SLANG_EXPORT CoverageOptionSetter {
 public:
     CoverageOptionSetter(const Scope& scope, const syntax::CoverageOptionSyntax& syntax);
@@ -42,7 +44,7 @@ private:
 /// Represents the body of a covergroup type, separated out because the
 /// arguments of a covergroup need to live in their own scope so that
 /// they can be shadowed by body members.
-class SLANG_EXPORT CovergroupBodySymbol : public Symbol, public Scope {
+class SLANG_EXPORT CovergroupBodySymbol final : public Symbol, public Scope {
 public:
     std::span<const CoverageOptionSetter> options;
 
@@ -59,7 +61,7 @@ private:
 };
 
 /// Represents a covergroup definition type.
-class SLANG_EXPORT CovergroupType : public Type, public Scope {
+class SLANG_EXPORT CovergroupType final : public Type, public Scope {
 public:
     using ArgList = std::span<const FormalArgumentSymbol* const>;
 
@@ -92,6 +94,12 @@ public:
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::CovergroupType; }
 
+    template<typename TVisitor>
+    void visitExprs(TVisitor&& visitor) const {
+        if (auto ev = getCoverageEvent())
+            ev->visit(visitor);
+    }
+
 private:
     friend class Scope;
 
@@ -105,7 +113,8 @@ private:
 
 class BinsSelectExpr;
 
-class SLANG_EXPORT CoverageBinSymbol : public Symbol {
+/// Represents a coverage bin declaration.
+class SLANG_EXPORT CoverageBinSymbol final : public Symbol {
 public:
     struct TransRangeList {
         std::span<const Expression* const> items;
@@ -175,7 +184,8 @@ private:
     mutable bool isResolved = false;
 };
 
-class SLANG_EXPORT CoverpointSymbol : public Symbol, public Scope {
+/// Represents a coverpoint declaration.
+class SLANG_EXPORT CoverpointSymbol final : public Symbol, public Scope {
 public:
     DeclaredType declaredType;
     std::span<const CoverageOptionSetter> options;
@@ -183,8 +193,7 @@ public:
     CoverpointSymbol(Compilation& compilation, std::string_view name, SourceLocation loc);
 
     static CoverpointSymbol& fromSyntax(const Scope& scope, const syntax::CoverpointSyntax& syntax);
-    static CoverpointSymbol& fromImplicit(const Scope& scope,
-                                          const syntax::IdentifierNameSyntax& syntax);
+    static CoverpointSymbol& fromImplicit(const Scope& scope, const syntax::NameSyntax& syntax);
 
     const Type& getType() const { return declaredType.getType(); }
 
@@ -204,6 +213,9 @@ public:
 
     template<typename TVisitor>
     void visitExprs(TVisitor&& visitor) const {
+        if (auto expr = declaredType.getInitializer())
+            expr->visit(visitor);
+
         if (auto expr = getIffExpr())
             expr->visit(visitor);
 
@@ -218,7 +230,7 @@ private:
 
 /// Represents the body of a cover cross type, separated out because the
 /// members of the cross body can't be accessed outside of the cross itself.
-class SLANG_EXPORT CoverCrossBodySymbol : public Symbol, public Scope {
+class SLANG_EXPORT CoverCrossBodySymbol final : public Symbol, public Scope {
 public:
     const Type* crossQueueType = nullptr;
 
@@ -230,7 +242,8 @@ public:
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::CoverCrossBody; }
 };
 
-class SLANG_EXPORT CoverCrossSymbol : public Symbol, public Scope {
+/// Represents a cover cross declaration.
+class SLANG_EXPORT CoverCrossSymbol final : public Symbol, public Scope {
 public:
     std::span<const CoverpointSymbol* const> targets;
     std::span<const CoverageOptionSetter> options;
@@ -277,6 +290,7 @@ SLANG_ENUM(BinsSelectExprKind, EXPR)
 #undef EXPR
 // clang-format on
 
+/// Base class for all coverage bin select expressions.
 class SLANG_EXPORT BinsSelectExpr {
 public:
     BinsSelectExprKind kind;
@@ -326,7 +340,8 @@ protected:
     static BinsSelectExpr& badExpr(Compilation& compilation, const BinsSelectExpr* expr);
 };
 
-class SLANG_EXPORT InvalidBinsSelectExpr : public BinsSelectExpr {
+/// Represents an invalid coverage bin select expression.
+class SLANG_EXPORT InvalidBinsSelectExpr final : public BinsSelectExpr {
 public:
     const BinsSelectExpr* child;
 
@@ -338,7 +353,8 @@ public:
     void serializeTo(ASTSerializer& serializer) const;
 };
 
-class SLANG_EXPORT ConditionBinsSelectExpr : public BinsSelectExpr {
+/// Represents a condition-based coverage bin select expression.
+class SLANG_EXPORT ConditionBinsSelectExpr final : public BinsSelectExpr {
 public:
     const Symbol& target;
     std::span<const Expression* const> intersects;
@@ -360,7 +376,8 @@ public:
     }
 };
 
-class SLANG_EXPORT UnaryBinsSelectExpr : public BinsSelectExpr {
+/// Represents a unary coverage bin select expression.
+class SLANG_EXPORT UnaryBinsSelectExpr final : public BinsSelectExpr {
 public:
     const BinsSelectExpr& expr;
 
@@ -384,7 +401,8 @@ public:
     }
 };
 
-class SLANG_EXPORT BinaryBinsSelectExpr : public BinsSelectExpr {
+/// Represents a binary coverage bin select expression.
+class SLANG_EXPORT BinaryBinsSelectExpr final : public BinsSelectExpr {
 public:
     const BinsSelectExpr& left;
     const BinsSelectExpr& right;
@@ -407,7 +425,8 @@ public:
     }
 };
 
-class SLANG_EXPORT SetExprBinsSelectExpr : public BinsSelectExpr {
+/// Represents a set expression coverage bin select expression.
+class SLANG_EXPORT SetExprBinsSelectExpr final : public BinsSelectExpr {
 public:
     const Expression& expr;
     const Expression* matchesExpr;
@@ -430,7 +449,8 @@ public:
     }
 };
 
-class SLANG_EXPORT BinSelectWithFilterExpr : public BinsSelectExpr {
+/// Represents a coverage bin select expression with a filter.
+class SLANG_EXPORT BinSelectWithFilterExpr final : public BinsSelectExpr {
 public:
     const BinsSelectExpr& expr;
     const Expression& filter;
@@ -457,7 +477,8 @@ public:
     }
 };
 
-class SLANG_EXPORT CrossIdBinsSelectExpr : public BinsSelectExpr {
+/// Represents a cross-id coverage bin select expression.
+class SLANG_EXPORT CrossIdBinsSelectExpr final : public BinsSelectExpr {
 public:
     CrossIdBinsSelectExpr() : BinsSelectExpr(BinsSelectExprKind::CrossId) {}
 

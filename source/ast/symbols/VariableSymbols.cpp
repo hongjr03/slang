@@ -22,6 +22,7 @@
 #include "slang/ast/types/NetType.h"
 #include "slang/ast/types/Type.h"
 #include "slang/diagnostics/DeclarationsDiags.h"
+#include "slang/diagnostics/LookupDiags.h"
 #include "slang/diagnostics/ParserDiags.h"
 #include "slang/syntax/AllSyntax.h"
 
@@ -79,10 +80,12 @@ void VariableSymbol::fromSyntax(Compilation& compilation, const DataDeclarationS
     if (!hasExplicitLifetime)
         lifetime = getDefaultLifetime(scope);
 
-    const bool isInIface =
-        scope.asSymbol().kind == SymbolKind::InstanceBody &&
-        scope.asSymbol().as<InstanceBodySymbol>().getDefinition().definitionKind ==
-            DefinitionKind::Interface;
+    auto& parentSym = scope.asSymbol();
+    const bool isInIfaceOrGenBlk =
+        parentSym.kind == SymbolKind::GenerateBlock ||
+        (parentSym.kind == SymbolKind::InstanceBody &&
+         parentSym.as<InstanceBodySymbol>().getDefinition().definitionKind ==
+             DefinitionKind::Interface);
 
     for (auto declarator : syntax.declarators) {
         auto variable = compilation.emplace<VariableSymbol>(declarator->name.valueText(),
@@ -98,8 +101,8 @@ void VariableSymbol::fromSyntax(Compilation& compilation, const DataDeclarationS
         if (isCheckerFreeVar)
             variable->flags |= VariableFlags::CheckerFreeVariable;
 
-        if (isInIface)
-            variable->getDeclaredType()->addFlags(DeclaredTypeFlags::InterfaceVariable);
+        if (isInIfaceOrGenBlk)
+            variable->getDeclaredType()->addFlags(DeclaredTypeFlags::IfaceOrGenBlkVar);
 
         // If this is a static variable in a procedural context and it has an initializer,
         // the spec requires that the static keyword must be explicitly provided.
@@ -144,12 +147,14 @@ VariableSymbol::VariableSymbol(SymbolKind childKind, std::string_view name, Sour
         getDeclaredType()->addFlags(DeclaredTypeFlags::AutomaticInitializer);
 }
 
-struct StaticInitializerVisitor {
+struct InitializerVisitor {
     const ASTContext& context;
-    const Symbol& sourceVar;
+    const VariableSymbol& sourceVar;
+    const bool checkStaticOrder;
 
-    StaticInitializerVisitor(const ASTContext& context, const Symbol& sourceVar) :
-        context(context), sourceVar(sourceVar) {}
+    InitializerVisitor(const ASTContext& context, const VariableSymbol& sourceVar,
+                       bool checkStaticOrder) :
+        context(context), sourceVar(sourceVar), checkStaticOrder(checkStaticOrder) {}
 
     template<typename T>
     void visit(const T& expr) {
@@ -159,29 +164,34 @@ struct StaticInitializerVisitor {
                 case ExpressionKind::HierarchicalValue: {
                     if (auto sym = expr.getSymbolReference()) {
                         if (sym->kind == SymbolKind::Variable) {
-                            // Don't warn if this is the same var.
                             auto& var = sym->template as<VariableSymbol>();
-                            if (&var == &sourceVar)
+                            if (&var == &sourceVar) {
+                                // Warn about self-referential initializer.
+                                auto& diag = context.addDiag(diag::InitSelf, expr.sourceRange);
+                                diag << sourceVar.name;
                                 return;
+                            }
 
-                            const bool hasInit = var.getInitializer();
-                            const bool isFromPort = var.getFirstPortBackref();
-                            const bool isDeclaredBefore = var.isDeclaredBefore(sourceVar).value_or(
-                                false);
+                            if (checkStaticOrder) {
+                                const bool hasInit = var.getInitializer();
+                                const bool isFromPort = var.getFirstPortBackref();
+                                const bool isDeclaredBefore =
+                                    var.isDeclaredBefore(sourceVar).value_or(false);
 
-                            // We warn unless this var has an initializer, is declared
-                            // before us in the same instance, and isn't attached to a port.
-                            if (hasInit && !isFromPort && isDeclaredBefore)
-                                return;
+                                // We warn unless this var has an initializer, is declared
+                                // before us in the same instance, and isn't attached to a port.
+                                if (hasInit && !isFromPort && isDeclaredBefore)
+                                    return;
 
-                            auto code = (hasInit && !isFromPort) ? diag::StaticInitOrder
-                                                                 : diag::StaticInitValue;
-                            auto& diag = context.addDiag(code, expr.sourceRange);
-                            diag << sourceVar.name << var.name;
-                            diag.addNote(diag::NoteDeclarationHere, var.location);
+                                auto code = (hasInit && !isFromPort) ? diag::StaticInitOrder
+                                                                     : diag::StaticInitValue;
+                                auto& diag = context.addDiag(code, expr.sourceRange);
+                                diag << sourceVar.name << var.name;
+                                diag.addNote(diag::NoteDeclarationHere, var.location);
+                            }
                         }
-                        else if (sym->kind == SymbolKind::Net ||
-                                 sym->kind == SymbolKind::ModportPort) {
+                        else if (checkStaticOrder && (sym->kind == SymbolKind::Net ||
+                                                      sym->kind == SymbolKind::ModportPort)) {
                             auto& diag = context.addDiag(diag::StaticInitValue, expr.sourceRange);
                             diag << sourceVar.name << sym->name;
                             diag.addNote(diag::NoteDeclarationHere, sym->location);
@@ -219,7 +229,7 @@ struct StaticInitializerVisitor {
                     // Ignore new covergroup expressions.
                     break;
                 default:
-                    if constexpr (HasVisitExprs<T, StaticInitializerVisitor>)
+                    if constexpr (HasVisitExprs<T, InitializerVisitor>)
                         expr.visitExprs(*this);
                     break;
             }
@@ -228,28 +238,32 @@ struct StaticInitializerVisitor {
 };
 
 void VariableSymbol::checkInitializer() const {
-    // Check the initializer expression of static variables
-    // for references to other values that have indeterminate
-    // initialization order.
-    if (kind != SymbolKind::Variable || lifetime != VariableLifetime::Static)
+    if (kind != SymbolKind::Variable)
         return;
 
     auto scope = getParentScope();
     SLANG_ASSERT(scope);
 
-    switch (scope->asSymbol().kind) {
-        case SymbolKind::InstanceBody:
-        case SymbolKind::GenerateBlock:
-        case SymbolKind::Package:
-        case SymbolKind::CompilationUnit:
-            if (auto init = getInitializer(); init && !init->bad()) {
-                ASTContext context(*scope, LookupLocation::after(*this));
-                StaticInitializerVisitor visitor(context, *this);
-                init->visit(visitor);
-            }
-            break;
-        default:
-            break;
+    // Also check static initialization order for static variables in scopes
+    // where initialization order is not defined.
+    bool checkStaticOrder = false;
+    if (lifetime == VariableLifetime::Static) {
+        switch (scope->asSymbol().kind) {
+            case SymbolKind::InstanceBody:
+            case SymbolKind::GenerateBlock:
+            case SymbolKind::Package:
+            case SymbolKind::CompilationUnit:
+                checkStaticOrder = true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (auto init = getInitializer(); init && !init->bad()) {
+        ASTContext context(*scope, LookupLocation::after(*this));
+        InitializerVisitor visitor(context, *this, checkStaticOrder);
+        init->visit(visitor);
     }
 }
 
@@ -291,8 +305,9 @@ void FormalArgumentSymbol::fromSyntax(const Scope& scope, const PortDeclarationS
 
     auto& comp = scope.getCompilation();
     auto& header = syntax.header->as<VariablePortHeaderSyntax>();
-    ArgumentDirection direction = SemanticFacts::getDirection(header.direction.kind);
-    VariableLifetime lifetime = getDefaultLifetime(scope);
+    auto direction = header.direction ? SemanticFacts::getDirection(header.direction.kind)
+                                      : ArgumentDirection::In;
+    auto lifetime = getDefaultLifetime(scope);
 
     bool isConst = false;
     if (header.constKeyword) {
@@ -345,14 +360,31 @@ bool FormalArgumentSymbol::mergeVariable(const VariableSymbol& variable) {
     return true;
 }
 
-const Expression* FormalArgumentSymbol::getDefaultValue() const {
-    if (defaultVal || !defaultValSyntax)
-        return defaultVal;
+static const Expression* EvaluatingPlaceholder = reinterpret_cast<const Expression*>(UINTPTR_MAX);
 
+const Expression* FormalArgumentSymbol::getDefaultValue() const {
     auto scope = getParentScope();
     SLANG_ASSERT(scope);
 
-    ASTContext context(*scope, LookupLocation::after(*this), ASTFlags::NotADriver);
+    if (defaultVal || !defaultValSyntax) {
+        // If the default value expression is the placeholder value it means
+        // we're recursively calling into ourselves and should report an error
+        // and break the chain.
+        if (defaultVal == EvaluatingPlaceholder) {
+            SLANG_ASSERT(defaultValSyntax);
+
+            if (!name.empty()) {
+                scope->addDiag(diag::RecursiveDefinition, location)
+                    << name << defaultValSyntax->sourceRange();
+            }
+            defaultVal = &InvalidExpression::Instance;
+        }
+
+        return defaultVal;
+    }
+
+    ASTContext context(*scope, LookupLocation::after(*this));
+    defaultVal = EvaluatingPlaceholder;
     defaultVal = &Expression::bindArgument(getType(), direction, flags, *defaultValSyntax, context);
     return defaultVal;
 }
@@ -417,11 +449,14 @@ void NetSymbol::fromSyntax(const Scope& scope, const NetDeclarationSyntax& synta
     }
 }
 
-void NetSymbol::fromSyntax(const Scope& scope, const UserDefinedNetDeclarationSyntax& syntax,
-                           const Symbol* netTypeSym, SmallVectorBase<const NetSymbol*>& results) {
-    auto& comp = scope.getCompilation();
+void NetSymbol::fromSyntax(const ASTContext& context, const UserDefinedNetDeclarationSyntax& syntax,
+                           SmallVectorBase<const NetSymbol*>& results) {
+    auto& comp = context.getCompilation();
+    auto netTypeSym = Lookup::unqualifiedAt(*context.scope, syntax.netType.valueText(),
+                                            context.getLocation(), syntax.netType.range());
+
     if (netTypeSym && netTypeSym->kind != SymbolKind::NetType) {
-        scope.addDiag(diag::VarDeclWithDelay, syntax.delay->sourceRange());
+        context.addDiag(diag::VarDeclWithDelay, syntax.delay->sourceRange());
         netTypeSym = nullptr;
     }
 
@@ -435,7 +470,7 @@ void NetSymbol::fromSyntax(const Scope& scope, const UserDefinedNetDeclarationSy
         auto net = comp.emplace<NetSymbol>(declarator->name.valueText(),
                                            declarator->name.location(), *netType);
         net->setFromDeclarator(*declarator);
-        net->setAttributes(scope, syntax.attributes);
+        net->setAttributes(*context.scope, syntax.attributes);
         results.push_back(net);
     }
 }
@@ -630,37 +665,33 @@ void ClockVarSymbol::fromSyntax(const Scope& scope, const ClockingItemSyntax& sy
         // If there is an initializer expression we take our type from that.
         // Otherwise we need to lookup the signal in our parent scope and
         // take the type from that.
+        const Expression* expr = nullptr;
+        SourceLocation varLoc;
         if (decl->value) {
-            auto& expr = Expression::bind(*decl->value->expr, context);
-            arg->setType(*expr.type);
-            arg->setInitializer(expr);
-
-            if (dir != ArgumentDirection::In)
-                expr.requireLValue(context, decl->value->equals.location(), AssignFlags::ClockVar);
+            expr = &Expression::bind(*decl->value->expr, context);
+            varLoc = decl->value->equals.location();
         }
-        else {
-            auto sym = Lookup::unqualifiedAt(*parent, name.valueText(), ll, name.range());
-            if (sym && sym->kind != SymbolKind::Net && sym->kind != SymbolKind::Variable) {
+        else if (auto sym = Lookup::unqualifiedAt(*parent, name.valueText(), ll, name.range())) {
+            if (sym->kind != SymbolKind::Net && sym->kind != SymbolKind::Variable) {
                 auto& diag = context.addDiag(diag::InvalidClockingSignal, name.range());
                 diag << name.valueText();
                 diag.addNote(diag::NoteDeclarationHere, sym->location);
-                sym = nullptr;
-            }
-
-            if (sym) {
-                auto sourceType = sym->getDeclaredType();
-                SLANG_ASSERT(sourceType);
-                arg->getDeclaredType()->setLink(*sourceType);
-
-                auto& valExpr = ValueExpressionBase::fromSymbol(
-                    context, *sym, false, {arg->location, arg->location + arg->name.length()});
-
-                if (dir != ArgumentDirection::In)
-                    context.addDriver(sym->as<ValueSymbol>(), valExpr, AssignFlags::ClockVar);
             }
             else {
-                arg->getDeclaredType()->setType(comp.getErrorType());
+                expr = &ValueExpressionBase::fromSymbol(
+                    context, *sym, nullptr, {arg->location, arg->location + arg->name.length()});
             }
+        }
+
+        if (expr) {
+            arg->setType(*expr->type);
+            arg->setInitializer(*expr);
+            if (dir != ArgumentDirection::In)
+                expr->requireLValue(context, varLoc);
+        }
+        else {
+            // If we didn't find a signal, we need to set the type to error.
+            arg->getDeclaredType()->setType(comp.getErrorType());
         }
     }
 }
@@ -706,6 +737,16 @@ void LocalAssertionVarSymbol::fromSyntax(const Scope& scope,
         // we still need a parent pointer set so they can participate in lookups.
         var->setParent(scope);
     }
+}
+
+LocalAssertionVarSymbol& LocalAssertionVarSymbol::fromPort(const Scope& scope,
+                                                           const AssertionPortSymbol& port) {
+    auto& comp = scope.getCompilation();
+    auto var = comp.emplace<LocalAssertionVarSymbol>(port.name, port.location);
+    var->formalPort = &port;
+    var->getDeclaredType()->setLink(port.declaredType);
+    var->setParent(scope);
+    return *var;
 }
 
 } // namespace slang::ast

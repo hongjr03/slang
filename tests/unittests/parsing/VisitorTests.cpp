@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 #include "Test.h"
+#include "catch2/catch_test_macros.hpp"
 #include <fmt/core.h>
+#include <fmt/format.h>
 
+#include "slang/analysis/AnalysisManager.h"
 #include "slang/ast/ASTVisitor.h"
 #include "slang/parsing/ParserMetadata.h"
+#include "slang/syntax/AllSyntax.h"
+#include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxPrinter.h"
-#include "slang/syntax/SyntaxVisitor.h"
+#include "slang/syntax/SyntaxRewriter.h"
+#include "slang/syntax/SyntaxTree.h"
 
 class SemanticModel {
 public:
@@ -190,6 +196,7 @@ endmodule
 )");
 
     tree = TestRewriter(tree).transform(tree);
+    CHECK(tree->validate());
 
     CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module M;
@@ -217,6 +224,7 @@ endmodule
 )");
 
     tree = TestRewriter(tree).transform(tree);
+    CHECK(tree->validate());
 
     CHECK(SyntaxPrinter::printFile(*tree) == R"(
 `define ENUM_MACRO(asdf) \
@@ -239,10 +247,14 @@ module m #(parameter P = 8)();
     reg tmp;
 endmodule
 )");
+
     struct RemoveWriter : public SyntaxRewriter<RemoveWriter> {
         void handle(const ParameterPortListSyntax& decl) { remove(decl); }
     };
+
     tree = RemoveWriter().transform(tree);
+    CHECK(tree->validate());
+
     CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module m();
     reg tmp;
@@ -262,6 +274,7 @@ TEST_CASE("Remove node from comma-separated list") {
     function void foo3(int a, int b,, int c, int d, int e);
     endfunction
 )");
+
     struct RemoveWriter : public SyntaxRewriter<RemoveWriter> {
         void handle(const FunctionPortBaseSyntax& port) {
             std::string str = port.toString();
@@ -270,7 +283,10 @@ TEST_CASE("Remove node from comma-separated list") {
                 remove(port);
         }
     };
+
     tree = RemoveWriter().transform(tree);
+    CHECK(tree->validate());
+
     CHECK(SyntaxPrinter::printFile(*tree) == R"(
     // normal case
     function void foo1( int b, int d);
@@ -283,6 +299,7 @@ TEST_CASE("Remove node from comma-separated list") {
     endfunction
 )");
 }
+
 TEST_CASE("Advanced rewriting") {
     SECTION("Insert multiple newNodes surrounding oldNodes") {
         class MultipleRewriter : public RewriterBase<MultipleRewriter> {
@@ -337,6 +354,7 @@ endmodule
 )");
 
         tree = MultipleRewriter(tree).transform(tree);
+        CHECK(tree->validate());
 
         CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module M;
@@ -351,6 +369,7 @@ module M;
 endmodule
 )");
     }
+
     SECTION("Combine insert and replace operation on oldNodes") {
         class InterleavedRewriter : public RewriterBase<InterleavedRewriter> {
         public:
@@ -401,6 +420,8 @@ endmodule
 )");
 
         tree = InterleavedRewriter(tree).transform(tree);
+        CHECK(tree->validate());
+
         CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module M;
     localparam int test_t__count1 = 3;
@@ -412,6 +433,7 @@ module M;
 endmodule
 )");
     }
+
     SECTION("Combine insert and remove operation on oldNodes") {
         class InterleavedRewriter : public RewriterBase<InterleavedRewriter> {
         public:
@@ -460,6 +482,8 @@ endmodule
 )");
 
         tree = InterleavedRewriter(tree).transform(tree);
+        CHECK(tree->validate());
+
         CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module M;
     localparam int test_t__count1 = 3;
@@ -483,6 +507,7 @@ endmodule
                 return SyntaxRewriter<FirstTypedefRemover>::transform(tree);
             }
         };
+
         auto tree = SyntaxTree::fromText(R"(
 module M;
     typedef enum int { FOO = 1 } test_t_1;
@@ -494,6 +519,7 @@ endmodule
         FirstTypedefRemover rewriter;
         tree = rewriter.transform(tree);
         tree = rewriter.transform(tree);
+        CHECK(tree->validate());
 
         CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module M;
@@ -527,7 +553,7 @@ endmodule
     CHECK(count == 3);
 }
 
-struct Visitor : public ASTVisitor<Visitor, true, true> {
+struct Visitor : public ASTVisitor<Visitor, VisitFlags::AllGood> {
     int count = 0;
     template<typename T>
     void handle(const T& t) {
@@ -588,6 +614,8 @@ endmodule
         };
 
         auto newTree = CloneRewriter().transform(tree);
+        CHECK(tree->validate());
+
         CHECK(SyntaxPrinter::printFile(*newTree) == R"(
 module m;
     reg tmp3;
@@ -615,6 +643,8 @@ endmodule
         };
 
         tree = CloneRewriter().transform(tree);
+        CHECK(tree->validate());
+
         CHECK(SyntaxPrinter::printFile(*tree) == R"(
 module m;
     reg tmp;
@@ -641,6 +671,8 @@ endmodule
         };
         CloneRewriter visitor(tree);
         tree->root().visit(visitor);
+        CHECK(tree->validate());
+
         CHECK(SyntaxPrinter::printFile(*tree) == R"(module m; reg tmp; endmodule)");
     }
 }
@@ -649,6 +681,7 @@ TEST_CASE("Syntax rewriting with metadata updates") {
     auto tree = SyntaxTree::fromFileInMemory(R"(
 `default_nettype none
 `unconnected_drive pull0
+`celldefine
 `timescale 1ns/1ps
 `define FOO
 
@@ -690,9 +723,12 @@ class C; endclass
     };
 
     auto newTree = ModuleChanger().transform(tree);
+    CHECK(tree->validate());
+
     CHECK(SyntaxPrinter::printFile(*newTree) == R"(
 `default_nettype none
 `unconnected_drive pull0
+`celldefine
 `timescale 1ns/1ps
 `define FOO
 
@@ -720,32 +756,512 @@ class C; endclass
 )");
 
     auto& meta = tree->getMetadata();
-    CHECK(meta.nodeMap.size() == 3);
+    CHECK(meta.nodeMeta.size() == 3);
 
-    for (auto& [key, node] : meta.nodeMap) {
-        if (key->as<ModuleDeclarationSyntax>().header->name.valueText() == "FooBar") {
+    for (auto& [key, node] : meta.nodeMeta) {
+        if (key->header->name.valueText() == "FooBar") {
             CHECK(node.timeScale->base.unit == TimeUnit::Nanoseconds);
             CHECK(node.unconnectedDrive == TokenKind::Pull0Keyword);
+            CHECK(node.cellDefine == true);
         }
     }
 }
+
+TEST_CASE("Syntax rewriter -- replace preserves trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module test(
+    input wire clock,
+    input wire reset,
+    output reg [3:0] o_signal
+);
+wire t;
+`ifndef SYNTHESIS
+initial begin
+    $display("hello");
+end
+`endif
+assign t = o_signal[1];
+
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const ContinuousAssignSyntax& syntax) {
+            replace(syntax, parse("assign t = 2;"), /* preserveTrivia */ true);
+        }
+    };
+
+    auto result = SyntaxPrinter::printFile(*Rewriter().transform(tree));
+    CHECK(result == R"(
+module test(
+    input wire clock,
+    input wire reset,
+    output reg [3:0] o_signal
+);
+wire t;
+`ifndef SYNTHESIS
+initial begin
+    $display("hello");
+end
+`endif
+assign t = 2;
+
+endmodule
+)");
+}
+
+TEST_CASE("Remove token from tree without preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        int x = 1;
+        logic     signed y;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const IntegerTypeSyntax& node) {
+            removeToken(node, 1, false); // remove signing token - don't preserve extra whitespace
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        int x = 1;
+        logic y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Remove token from tree with preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        int x = 1;
+        logic     signed y;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const IntegerTypeSyntax& node) { removeToken(node, 1, true); }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        int x = 1;
+        logic     y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Remove token from TokenList without preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        static int x = 1;
+        automatic logic y;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DataDeclarationSyntax& decl) {
+            // Remove the first modifier token (e.g. 'static' or 'automatic').
+            if (!decl.modifiers.empty())
+                removeToken(decl.modifiers, 0, false);
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo; int x = 1; logic y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Remove token from TokenList while preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        static int x = 1;
+        automatic logic y;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DataDeclarationSyntax& decl) {
+            // Remove the first modifier token (e.g. 'static' or 'automatic').
+            if (!decl.modifiers.empty())
+                removeToken(decl.modifiers, 0, true);
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        int x = 1;
+        logic y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Replace token in tree without preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        logic   x;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DeclaratorSyntax& node) {
+            // Replace the logic name with "y" and add a space to keep the tree parsable
+            replaceToken(node, 0,
+                         makeToken(TokenKind::Identifier, "y",
+                                   std::span(&this->SingleSpace, size_t(1))),
+                         false);
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        logic y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Replace token in tree while preserving trivia") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        logic x;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DeclaratorSyntax& node) {
+            // Replace the logic name with "y"
+            replaceToken(node, 0, makeToken(TokenKind::Identifier, "y"), true);
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        logic y;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Replace token in TokenList without trivia preservation") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        static int x = 1;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DataDeclarationSyntax& decl) {
+            // Replace 'static' modifier with 'automatic'.
+            if (!decl.modifiers.empty() && decl.modifiers[0].kind == TokenKind::StaticKeyword) {
+                replaceToken(decl.modifiers, 0, makeToken(TokenKind::AutomaticKeyword, "automatic"),
+                             false);
+            }
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;automatic int x = 1;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("Replace token in TokenList with trivia preservation") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    function void foo;
+        static int x = 1;
+    endfunction
+endmodule
+)");
+
+    struct Rewriter : public SyntaxRewriter<Rewriter> {
+        void handle(const DataDeclarationSyntax& decl) {
+            // Replace 'static' modifier with 'automatic'.
+            if (!decl.modifiers.empty() && decl.modifiers[0].kind == TokenKind::StaticKeyword) {
+                replaceToken(decl.modifiers, 0, makeToken(TokenKind::AutomaticKeyword, "automatic"),
+                             true);
+            }
+        }
+    };
+
+    tree = Rewriter().transform(tree);
+    CHECK(tree->validate());
+
+    CHECK(SyntaxPrinter::printFile(*tree) == R"(
+module m;
+    function void foo;
+        automatic int x = 1;
+    endfunction
+endmodule
+)");
+}
+
+TEST_CASE("SyntaxTree/Compilation Invariant Checking") {
+    // Validates that the parent pointers in the syntax tree are correct,
+    // and provides debug info if not.
+    auto validateParents = [](const syntax::SyntaxTree& tree) {
+        bool valid = true;
+        tree.root().visit(AllSyntaxVisitor([&](const SyntaxNode& node) {
+            for (size_t i = 0; i < node.getChildCount(); i++) {
+                auto child = node.childNode(i);
+                if (!child)
+                    continue;
+
+                if (child->parent != &node) {
+                    valid = false;
+                    auto parentKind = toString(child->parent->kind);
+                    auto childKind = toString(child->kind);
+                    auto expectedParent = toString(node.kind);
+                    INFO(fmt::format("Parent pointer mismatch with `{}`. {}.parent should be {}, "
+                                     "but is instead {}\n",
+                                     node.toString(), childKind, expectedParent,
+                                     !parentKind.empty() ? parentKind : "<garbage memory>"));
+
+                    if (!parentKind.empty()) {
+                        INFO(fmt::format("Check for `comp.emplace<{}Syntax>` calls, and deep "
+                                         "clone the syntax nodes used to create it.",
+                                         parentKind));
+                    }
+                }
+            }
+        }));
+
+        return valid;
+    };
+
+    fs::path path = findTestDir();
+    path /= "../../regression/all.sv";
+    auto mTree = SyntaxTree::fromFile(path.string());
+    REQUIRE(mTree);
+
+    auto tree = *mTree;
+    REQUIRE(validateParents(*tree));
+
+    std::string originalSyntaxText = SyntaxPrinter::printFile(*tree);
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    auto& _root = compilation.getRoot();
+
+    // Check parent pointers after compilation
+    REQUIRE(validateParents(*tree));
+
+    // Check that the syntax text is the same after compilation
+    std::string syntaxTextAfterCompilation = SyntaxPrinter::printFile(*tree);
+    REQUIRE(originalSyntaxText == syntaxTextAfterCompilation);
+}
+
+// We don't try to reach these syntax kinds in the all.sv test because
+// they can't ever be visited when traversing a normal syntax tree.
+// Directives are removed by the preprocessor, library map syntax
+// nodes can only exist when parsing library map files, etc.
+static constexpr auto IgnoredSyntaxKinds = {
+    SyntaxKind::Unknown,
+    SyntaxKind::BadExpression,
+    SyntaxKind::CellDefineDirective,
+    SyntaxKind::NoUnconnectedDriveDirective,
+    SyntaxKind::EndCellDefineDirective,
+    SyntaxKind::EndKeywordsDirective,
+    SyntaxKind::ResetAllDirective,
+    SyntaxKind::UndefineAllDirective,
+    SyntaxKind::DelayModeDistributedDirective,
+    SyntaxKind::DelayModePathDirective,
+    SyntaxKind::DelayModeUnitDirective,
+    SyntaxKind::DelayModeZeroDirective,
+    SyntaxKind::ProtectDirective,
+    SyntaxKind::EndProtectDirective,
+    SyntaxKind::ProtectedDirective,
+    SyntaxKind::EndProtectedDirective,
+    SyntaxKind::IncludeDirective,
+    SyntaxKind::IncludeDirective,
+    SyntaxKind::NamedConditionalDirectiveExpression,
+    SyntaxKind::UnaryConditionalDirectiveExpression,
+    SyntaxKind::BinaryConditionalDirectiveExpression,
+    SyntaxKind::ParenthesizedConditionalDirectiveExpression,
+    SyntaxKind::ElsIfDirective,
+    SyntaxKind::IfDefDirective,
+    SyntaxKind::IfNDefDirective,
+    SyntaxKind::EndIfDirective,
+    SyntaxKind::ElseDirective,
+    SyntaxKind::MacroArgumentDefault,
+    SyntaxKind::MacroFormalArgument,
+    SyntaxKind::MacroFormalArgumentList,
+    SyntaxKind::DefineDirective,
+    SyntaxKind::MacroActualArgument,
+    SyntaxKind::MacroActualArgumentList,
+    SyntaxKind::MacroUsage,
+    SyntaxKind::TimeScaleDirective,
+    SyntaxKind::DefaultNetTypeDirective,
+    SyntaxKind::UnconnectedDriveDirective,
+    SyntaxKind::DefaultDecayTimeDirective,
+    SyntaxKind::DefaultTriregStrengthDirective,
+    SyntaxKind::LineDirective,
+    SyntaxKind::UndefDirective,
+    SyntaxKind::BeginKeywordsDirective,
+    SyntaxKind::SimplePragmaExpression,
+    SyntaxKind::NameValuePragmaExpression,
+    SyntaxKind::NumberPragmaExpression,
+    SyntaxKind::ParenPragmaExpression,
+    SyntaxKind::PragmaDirective,
+    SyntaxKind::FilePathSpec,
+    SyntaxKind::LibraryIncDirClause,
+    SyntaxKind::LibraryDeclaration,
+    SyntaxKind::LibraryIncludeStatement,
+    SyntaxKind::LibraryMap,
+};
+
+// Similarly, these kinds of symbols aren't visited by a normal visit of an AST.
+static constexpr auto IgnoredSymbolKinds = {SymbolKind::Unknown,     SymbolKind::DeferredMember,
+                                            SymbolKind::Attribute,   SymbolKind::Definition,
+                                            SymbolKind::ErrorType,   SymbolKind::Field,
+                                            SymbolKind::UntypedType, SymbolKind::LocalAssertionVar};
 
 TEST_CASE("Visit all file") {
     // Load a file containing all the SystemVerilog constructs and visit them
     // just to get coverage of all the visitor methods.
     fs::path path = findTestDir();
     path /= "../../regression/all.sv";
-    auto tree = SyntaxTree::fromFile(path.string());
+
+    auto options = optionsFor(LanguageVersion::v1800_2023);
+    auto tree = SyntaxTree::fromFile(path.string(), SyntaxTree::getDefaultSourceManager(), options);
     REQUIRE(tree);
 
-    Compilation compilation;
+    Compilation compilation(options);
     compilation.addSyntaxTree(*tree);
+    if (std::ranges::any_of(compilation.getAllDiagnostics(), [](auto& d) { return d.isError(); })) {
+        NO_COMPILATION_ERRORS;
+    }
 
-    int count = 0;
-    compilation.getRoot().visit(makeVisitor([&](auto& v, auto& elem) {
-        count++;
-        v.visitDefault(elem);
+    flat_hash_set<SymbolKind> symKinds = IgnoredSymbolKinds;
+    flat_hash_set<ExpressionKind> exprKinds = {ExpressionKind::Invalid};
+    flat_hash_set<StatementKind> stmtKinds = {StatementKind::Invalid};
+    flat_hash_set<AssertionExprKind> assertionExprKinds = {AssertionExprKind::Invalid};
+    flat_hash_set<TimingControlKind> timingControlKinds = {TimingControlKind::Invalid};
+    flat_hash_set<ConstraintKind> constraintKinds = {ConstraintKind::Invalid};
+    flat_hash_set<PatternKind> patternKinds = {PatternKind::Invalid};
+    flat_hash_set<BinsSelectExprKind> binsSelectKinds = {BinsSelectExprKind::Invalid};
+    compilation.getRoot().visit(makeVisitor(
+        [&](auto& v, std::derived_from<Symbol> auto& node) {
+            symKinds.insert(node.kind);
+            if (node.isValue())
+                symKinds.insert(node.template as<ValueSymbol>().getType().kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<Expression> auto& node) {
+            CHECK(node.isEquivalentTo(node));
+            exprKinds.insert(node.kind);
+            symKinds.insert(node.type->kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<AssertionExpr> auto& node) {
+            CHECK(node.isEquivalentTo(node));
+            assertionExprKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<TimingControl> auto& node) {
+            CHECK(node.isEquivalentTo(node));
+            timingControlKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<Constraint> auto& node) {
+            CHECK(node.isEquivalentTo(node));
+            constraintKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<Pattern> auto& node) {
+            CHECK(node.isEquivalentTo(node));
+            patternKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<BinsSelectExpr> auto& node) {
+            binsSelectKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, std::derived_from<Statement> auto& node) {
+            stmtKinds.insert(node.kind);
+            v.visitDefault(node);
+        },
+        [&](auto& v, const TransparentMemberSymbol& node) {
+            // AST visitation doesn't unwrap transparent members
+            // but we'd like to see e.g. enum values so do it here.
+            symKinds.insert(node.kind);
+            node.wrapped.visit(v);
+        }));
+
+    flat_hash_set<SyntaxKind> syntaxKinds = IgnoredSyntaxKinds;
+    (*tree)->root().visit(makeSyntaxVisitor([&](auto& v, const auto& node) {
+        syntaxKinds.insert(node.kind);
+        v.visitDefault(node);
     }));
 
-    CHECK(count == 1456);
+    auto printMissing = [](const std::string_view name, const auto& kinds, const auto& visited) {
+        for (auto kind : kinds) {
+            if (!visited.contains(kind)) {
+                FAIL_CHECK(fmt::format("Did not visit {}: {}\n", name, toString(kind)));
+            }
+        }
+    };
+    printMissing("syntax", SyntaxKind_traits::values, syntaxKinds);
+    printMissing("symbol", SymbolKind_traits::values, symKinds);
+    printMissing("expression", ExpressionKind_traits::values, exprKinds);
+    printMissing("assertion expr", AssertionExprKind_traits::values, assertionExprKinds);
+    printMissing("timing control", TimingControlKind_traits::values, timingControlKinds);
+    printMissing("constraint", ConstraintKind_traits::values, constraintKinds);
+    printMissing("pattern", PatternKind_traits::values, patternKinds);
+    printMissing("bins select", BinsSelectExprKind_traits::values, binsSelectKinds);
+    printMissing("statement", StatementKind_traits::values, stmtKinds);
+
+    analysis::AnalysisManager analysisManager;
+    compilation.freeze();
+    analysisManager.analyze(compilation);
 }

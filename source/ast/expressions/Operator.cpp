@@ -352,6 +352,7 @@ ConstantValue OpInfo::eval(BinaryOperator op, const ConstantValue& cvl, const Co
         auto& r = cvr.str();
 
         switch (op) {
+            OP(Add, std::string(l) + std::string(r));
             OP(GreaterThanEqual, SVInt(l >= r));
             OP(GreaterThan, SVInt(l > r));
             OP(LessThanEqual, SVInt(l <= r));
@@ -482,6 +483,7 @@ bool OpInfo::isShortCircuit(BinaryOperator op) {
     }
 }
 
+// LCOV_EXCL_START
 std::string_view OpInfo::getText(BinaryOperator op) {
     switch (op) {
         case BinaryOperator::Add:
@@ -591,5 +593,6 @@ int OpInfo::getPrecedence(BinaryOperator op) {
     }
     SLANG_UNREACHABLE;
 }
+// LCOV_EXCL_STOP
 
 } // namespace slang::ast

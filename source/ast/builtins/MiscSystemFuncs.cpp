@@ -24,8 +24,12 @@ using namespace syntax;
 
 class SFormatFunction : public SystemSubroutine {
 public:
-    SFormatFunction(const std::string& name, bool isNonStandard) :
-        SystemSubroutine(name, SubroutineKind::Function), isNonStandard(isNonStandard) {}
+    SFormatFunction(KnownSystemName knownNameId, bool isNonStandard) :
+        SystemSubroutine(knownNameId, SubroutineKind::Function), isNonStandard(isNonStandard) {}
+
+    // Some tools accept empty arguments to $sformat[f]; we accept them at bind
+    // time and emit a suppressible warning when the format string is checked.
+    bool allowEmptyArgument(size_t argIndex) const final { return argIndex >= 1; }
 
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
@@ -54,9 +58,8 @@ public:
         if (!formatStr)
             return nullptr;
 
-        auto result = FmtHelpers::formatArgs(formatStr.str(), args[0]->sourceRange.start(),
-                                             *callInfo.scope, context, args.subspan(1),
-                                             args[0]->kind == ExpressionKind::StringLiteral);
+        auto result = FmtHelpers::formatArgs(formatStr.str(), *args[0], *callInfo.scope, context,
+                                             args.subspan(1));
         if (!result)
             return nullptr;
 
@@ -69,7 +72,8 @@ private:
 
 class ValuePlusArgsFunction : public SystemSubroutine {
 public:
-    ValuePlusArgsFunction() : SystemSubroutine("$value$plusargs", SubroutineKind::Function) {
+    ValuePlusArgsFunction() :
+        SystemSubroutine(KnownSystemName::ValuePlusArgs, SubroutineKind::Function) {
         hasOutputArgs = true;
     }
 
@@ -113,7 +117,8 @@ public:
 
 class ClassRandomizeFunction : public SystemSubroutine {
 public:
-    ClassRandomizeFunction() : SystemSubroutine("randomize", SubroutineKind::Function) {
+    ClassRandomizeFunction() :
+        SystemSubroutine(KnownSystemName::Randomize, SubroutineKind::Function) {
         withClauseMode = WithClauseMode::Randomize;
     }
 
@@ -172,8 +177,16 @@ public:
 };
 
 class ScopeRandomizeFunction : public SystemSubroutine {
+    // 18.12
+    // The scope randomize function behaves exactly the same as a class randomize method, except
+    // that it operates on the variables of the current scope instead of class member variables.
+    // Arguments to this function specify the variables that are to be assigned random values, i.e.,
+    // the random variables.
+    //
+    // It's a common non-standard extension to allow element selects and member accesses
 public:
-    ScopeRandomizeFunction() : SystemSubroutine("randomize", SubroutineKind::Function) {
+    ScopeRandomizeFunction() :
+        SystemSubroutine(KnownSystemName::Randomize, SubroutineKind::Function) {
         withClauseMode = WithClauseMode::Randomize;
     }
 
@@ -189,17 +202,42 @@ public:
             return comp.getErrorType();
 
         for (auto arg : args) {
-            auto sym = arg->getSymbolReference();
-            if (!sym || arg->kind != ExpressionKind::NamedValue) {
+            if (arg->kind != ExpressionKind::Assignment) {
                 context.addDiag(diag::ExpectedVariableName, arg->sourceRange);
                 return comp.getErrorType();
             }
 
-            auto dt = sym->getDeclaredType();
-            SLANG_ASSERT(dt);
-            if (!dt->getType().isValidForRand(RandMode::Rand, comp.languageVersion())) {
-                context.addDiag(diag::InvalidRandType, arg->sourceRange)
-                    << dt->getType() << "rand"sv;
+            // Allow element selects and member accesses to support randomizing
+            // array elements and struct members (non-standard extension).
+            auto* left = &arg->as<AssignmentExpression>().left();
+            bool isNonstandard = false;
+            while (true) {
+                if (left->kind == ExpressionKind::ElementSelect) {
+                    isNonstandard = true;
+                    left = &left->as<ElementSelectExpression>().value();
+                }
+                else if (left->kind == ExpressionKind::MemberAccess) {
+                    isNonstandard = true;
+                    left = &left->as<MemberAccessExpression>().value();
+                }
+                else {
+                    break;
+                }
+            }
+
+            if (left->kind != ExpressionKind::NamedValue) {
+                context.addDiag(diag::ExpectedVariableName, arg->sourceRange);
+                return comp.getErrorType();
+            }
+
+            if (isNonstandard)
+                context.addDiag(diag::NonstandardScopeRandomize, arg->sourceRange);
+
+            // Use the type of the actual expression (which may be an element type)
+            // rather than the declared type of the base symbol.
+            auto& targetType = *arg->as<AssignmentExpression>().left().type;
+            if (!targetType.isValidForRand(RandMode::Rand, comp.languageVersion())) {
+                context.addDiag(diag::InvalidRandType, arg->sourceRange) << targetType << "rand"sv;
             }
         }
 
@@ -218,7 +256,8 @@ public:
 
 class GlobalClockFunction : public SystemSubroutine {
 public:
-    GlobalClockFunction() : SystemSubroutine("$global_clock", SubroutineKind::Function) {}
+    GlobalClockFunction() :
+        SystemSubroutine(KnownSystemName::GlobalClock, SubroutineKind::Function) {}
 
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
@@ -231,7 +270,7 @@ public:
             return comp.getErrorType();
         }
 
-        if (!comp.getGlobalClocking(*context.scope)) {
+        if (!comp.getGlobalClockingAndNoteUse(*context.scope)) {
             if (!context.scope->isUninstantiated())
                 context.addDiag(diag::NoGlobalClocking, range);
             return comp.getErrorType();
@@ -249,8 +288,8 @@ public:
 
 class InferredValueFunction : public SystemSubroutine {
 public:
-    InferredValueFunction(const std::string& name, bool isClockFunc) :
-        SystemSubroutine(name, SubroutineKind::Function), isClockFunc(isClockFunc) {}
+    InferredValueFunction(KnownSystemName knownNameId, bool isClockFunc) :
+        SystemSubroutine(knownNameId, SubroutineKind::Function), isClockFunc(isClockFunc) {}
 
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
@@ -304,7 +343,10 @@ struct SequenceMethodExprVisitor {
 
 class SequenceMethod : public SystemSubroutine {
 public:
-    SequenceMethod(const std::string& name) : SystemSubroutine(name, SubroutineKind::Function) {}
+    bool isMatched;
+
+    SequenceMethod(KnownSystemName knownNameId, bool isMatched) :
+        SystemSubroutine(knownNameId, SubroutineKind::Function), isMatched(isMatched) {}
 
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
@@ -313,6 +355,11 @@ public:
             return comp.getErrorType();
 
         checkLocalVars(*args[0], context, range);
+
+        if (!context.flags.has(ASTFlags::AssertionExpr) && isMatched) {
+            context.addDiag(diag::SequenceMatchedOutsideAssertion, range);
+            return comp.getErrorType();
+        }
 
         return comp.getBitType();
     }
@@ -395,21 +442,27 @@ private:
 };
 
 void Builtins::registerMiscSystemFuncs() {
+    using parsing::KnownSystemName;
+
 #define REGISTER(name) addSystemSubroutine(std::make_shared<name##Function>())
     REGISTER(ValuePlusArgs);
     REGISTER(ScopeRandomize);
     REGISTER(GlobalClock);
 #undef REGISTER
 
-    addSystemSubroutine(std::make_shared<SFormatFunction>("$sformatf", false));
-    addSystemSubroutine(std::make_shared<SFormatFunction>("$psprintf", true));
+    addSystemSubroutine(std::make_shared<SFormatFunction>(KnownSystemName::SFormatF, false));
+    addSystemSubroutine(std::make_shared<SFormatFunction>(KnownSystemName::PSPrintF, true));
 
-    addSystemSubroutine(std::make_shared<InferredValueFunction>("$inferred_clock", true));
-    addSystemSubroutine(std::make_shared<InferredValueFunction>("$inferred_disable", false));
+    addSystemSubroutine(
+        std::make_shared<InferredValueFunction>(KnownSystemName::InferredClock, true));
+    addSystemSubroutine(
+        std::make_shared<InferredValueFunction>(KnownSystemName::InferredDisable, false));
 
     addSystemMethod(SymbolKind::ClassType, std::make_shared<ClassRandomizeFunction>());
-    addSystemMethod(SymbolKind::SequenceType, std::make_shared<SequenceMethod>("triggered"));
-    addSystemMethod(SymbolKind::SequenceType, std::make_shared<SequenceMethod>("matched"));
+    addSystemMethod(SymbolKind::SequenceType,
+                    std::make_shared<SequenceMethod>(KnownSystemName::Triggered, false));
+    addSystemMethod(SymbolKind::SequenceType,
+                    std::make_shared<SequenceMethod>(KnownSystemName::Matched, true));
 }
 
 } // namespace slang::ast::builtins

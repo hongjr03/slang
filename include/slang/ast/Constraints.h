@@ -48,6 +48,9 @@ public:
     /// Indicates whether the constraint is invalid.
     bool bad() const { return kind == ConstraintKind::Invalid; }
 
+    /// Returns true if this constraint is structurally equivalent to the other one.
+    bool isEquivalentTo(const Constraint& other) const;
+
     /// Binds a constraint tree from the given syntax node.
     static const Constraint& bind(const syntax::ConstraintItemSyntax& syntax,
                                   const ASTContext& context);
@@ -104,7 +107,7 @@ protected:
 ///
 /// Usually generated and inserted into an constraint tree due
 /// to violation of language semantics or type checking.
-class SLANG_EXPORT InvalidConstraint : public Constraint {
+class SLANG_EXPORT InvalidConstraint final : public Constraint {
 public:
     /// A wrapped child constraint that is considered invalid.
     const Constraint* child;
@@ -114,11 +117,15 @@ public:
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Invalid; }
 
+    bool isEquivalentImpl(const InvalidConstraint&) const { return true; }
     void serializeTo(ASTSerializer& serializer) const;
+
+    template<typename TVisitor>
+    void visitExprs(TVisitor&&) const {}
 };
 
 /// Represents a list of constraints.
-class SLANG_EXPORT ConstraintList : public Constraint {
+class SLANG_EXPORT ConstraintList final : public Constraint {
 public:
     /// The list of constraints.
     std::span<const Constraint* const> list;
@@ -129,6 +136,7 @@ public:
     static Constraint& fromSyntax(const syntax::ConstraintBlockSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const ConstraintList& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::List; }
@@ -141,7 +149,7 @@ public:
 };
 
 /// Represents a constraint defined by a logical expression.
-class SLANG_EXPORT ExpressionConstraint : public Constraint {
+class SLANG_EXPORT ExpressionConstraint final : public Constraint {
 public:
     /// The constraint expression.
     const Expression& expr;
@@ -155,6 +163,7 @@ public:
     static Constraint& fromSyntax(const syntax::ExpressionConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const ExpressionConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Expression; }
@@ -166,7 +175,7 @@ public:
 };
 
 /// Represents a constraint defined by an implication.
-class SLANG_EXPORT ImplicationConstraint : public Constraint {
+class SLANG_EXPORT ImplicationConstraint final : public Constraint {
 public:
     /// The implication predicate.
     const Expression& predicate;
@@ -180,6 +189,7 @@ public:
     static Constraint& fromSyntax(const syntax::ImplicationConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const ImplicationConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Implication; }
@@ -192,7 +202,7 @@ public:
 };
 
 /// Represents a constraint defined by an if-else condition.
-class SLANG_EXPORT ConditionalConstraint : public Constraint {
+class SLANG_EXPORT ConditionalConstraint final : public Constraint {
 public:
     /// The condition predicate.
     const Expression& predicate;
@@ -211,6 +221,7 @@ public:
     static Constraint& fromSyntax(const syntax::ConditionalConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const ConditionalConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Conditional; }
@@ -225,7 +236,7 @@ public:
 };
 
 /// Represents a constraint that enforces uniqueness of variables.
-class SLANG_EXPORT UniquenessConstraint : public Constraint {
+class SLANG_EXPORT UniquenessConstraint final : public Constraint {
 public:
     /// The set of expressions defining the uniqueness set.
     std::span<const Expression* const> items;
@@ -236,6 +247,7 @@ public:
     static Constraint& fromSyntax(const syntax::UniquenessConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const UniquenessConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Uniqueness; }
@@ -248,7 +260,7 @@ public:
 };
 
 /// Represents a constraint that disables a soft random variable.
-class SLANG_EXPORT DisableSoftConstraint : public Constraint {
+class SLANG_EXPORT DisableSoftConstraint final : public Constraint {
 public:
     /// The target expression of the disable.
     const Expression& target;
@@ -259,6 +271,7 @@ public:
     static Constraint& fromSyntax(const syntax::DisableConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const DisableSoftConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::DisableSoft; }
@@ -270,7 +283,7 @@ public:
 };
 
 /// Represents a constraint that enforces ordering of solving variables.
-class SLANG_EXPORT SolveBeforeConstraint : public Constraint {
+class SLANG_EXPORT SolveBeforeConstraint final : public Constraint {
 public:
     /// The list of expressions for variables that should be solved
     /// *before* variables in the @a after list.
@@ -287,6 +300,7 @@ public:
     static Constraint& fromSyntax(const syntax::SolveBeforeConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const SolveBeforeConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::SolveBefore; }
@@ -301,7 +315,7 @@ public:
 };
 
 /// Represents a constraint that iterates over the elements of an array.
-class SLANG_EXPORT ForeachConstraint : public Constraint {
+class SLANG_EXPORT ForeachConstraint final : public Constraint {
 public:
     /// The target array of the iteration.
     const Expression& arrayRef;
@@ -320,6 +334,7 @@ public:
     static Constraint& fromSyntax(const syntax::LoopConstraintSyntax& syntax,
                                   const ASTContext& context);
 
+    bool isEquivalentImpl(const ForeachConstraint& rhs) const;
     void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(ConstraintKind kind) { return kind == ConstraintKind::Foreach; }

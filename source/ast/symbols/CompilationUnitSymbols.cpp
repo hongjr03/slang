@@ -178,6 +178,46 @@ const Symbol* PackageSymbol::findForImport(std::string_view lookupName) const {
     return nullptr;
 }
 
+void PackageSymbol::checkExplicitExports() const {
+    // If we have an explicit export declaration, make sure that the
+    // referenced symbol is actually imported into the package.
+    auto& scopeNameMap = getNameMap();
+    auto wildcardData = getWildcardImportData();
+    for (auto& decl : exportDecls) {
+        if (decl->item.kind == TokenKind::Star)
+            continue;
+
+        auto lookupName = decl->item.valueText();
+        if (auto it = scopeNameMap.find(lookupName); it != scopeNameMap.end()) {
+            auto ei = it->second->as_if<ExplicitImportSymbol>();
+            if (ei && ei->isFromExport && !ei->sawCorrespondingImport() && ei->importedSymbol()) {
+                bool found = false;
+                if (wildcardData) {
+                    if (wildcardData->importedSymbols.contains(lookupName)) {
+                        // If the target symbol was already wildcard imported then we're done.
+                        found = true;
+                    }
+                    else {
+                        // There was no explicit import for this export, but if there is a viable
+                        // candidate for import then this export counts as a sufficient reference.
+                        for (auto import : wildcardData->wildcardImports) {
+                            auto package = import->getPackage();
+                            if (!package || package->name != decl->package.valueText())
+                                continue;
+
+                            found = package->findForImport(lookupName) != nullptr;
+                            break;
+                        }
+                    }
+                }
+
+                if (!found)
+                    addDiag(diag::PackageExportNotImported, decl->item.range()) << lookupName;
+            }
+        }
+    }
+}
+
 DefinitionSymbol::ParameterDecl::ParameterDecl(
     const Scope& scope, const ParameterDeclarationSyntax& syntax, const DeclaratorSyntax& decl,
     bool isLocal, bool isPort, std::span<const syntax::AttributeInstanceSyntax* const> attributes) :
@@ -255,11 +295,11 @@ static const SourceLibrary& getLibForDef(const Scope& scope, const SyntaxTree* s
 DefinitionSymbol::DefinitionSymbol(const Scope& scope, LookupLocation lookupLocation,
                                    const ModuleDeclarationSyntax& syntax,
                                    const NetType& defaultNetType, UnconnectedDrive unconnectedDrive,
-                                   std::optional<TimeScale> directiveTimeScale,
+                                   bool cellDefine, std::optional<TimeScale> directiveTimeScale,
                                    const SyntaxTree* syntaxTree) :
     Symbol(SymbolKind::Definition, syntax.header->name.valueText(), syntax.header->name.location()),
-    defaultNetType(defaultNetType), unconnectedDrive(unconnectedDrive), syntaxTree(syntaxTree),
-    sourceLibrary(getLibForDef(scope, syntaxTree)) {
+    defaultNetType(defaultNetType), unconnectedDrive(unconnectedDrive), cellDefine(cellDefine),
+    syntaxTree(syntaxTree), sourceLibrary(getLibForDef(scope, syntaxTree)) {
 
     // Extract and save various properties of the definition.
     setParent(scope, lookupLocation.getIndex());
@@ -330,9 +370,8 @@ std::string_view DefinitionSymbol::getKindString() const {
             return "interface"sv;
         case DefinitionKind::Program:
             return "program"sv;
-        default:
-            SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 std::string_view DefinitionSymbol::getArticleKindString() const {
@@ -343,9 +382,8 @@ std::string_view DefinitionSymbol::getArticleKindString() const {
             return "an interface"sv;
         case DefinitionKind::Program:
             return "a program"sv;
-        default:
-            SLANG_UNREACHABLE;
     }
+    SLANG_UNREACHABLE;
 }
 
 void DefinitionSymbol::serializeTo(ASTSerializer& serializer) const {
@@ -353,6 +391,7 @@ void DefinitionSymbol::serializeTo(ASTSerializer& serializer) const {
     serializer.write("definitionKind", toString(definitionKind));
     serializer.write("defaultLifetime", toString(defaultLifetime));
     serializer.write("unconnectedDrive", toString(unconnectedDrive));
+    serializer.write("cellDefine", cellDefine);
 
     if (timeScale)
         serializer.write("timeScale", timeScale->toString());

@@ -47,6 +47,23 @@ struct SequenceLengthVisitor {
     }
 };
 
+struct VacuityCheckVisitor {
+    template<typename T>
+    bool visit(const T& expr) {
+        return expr.canSucceedVacuouslyImpl();
+    }
+};
+
+struct EquivalentToVisitor {
+    template<typename T>
+    bool visit(const T& lhs, const AssertionExpr& rhs) {
+        if (lhs.kind != rhs.kind)
+            return false;
+
+        return lhs.isEquivalentImpl(rhs.as<T>());
+    }
+};
+
 } // namespace
 
 namespace slang::ast {
@@ -55,7 +72,7 @@ using namespace parsing;
 using namespace syntax;
 
 static const Expression& bindExpr(const ExpressionSyntax& syntax, const ASTContext& context,
-                                  bool allowInstances = false) {
+                                  bool allowInstances = false, bool isBoolean = true) {
     auto& expr = Expression::bind(syntax, context, ASTFlags::AssertionExpr);
     if (expr.bad())
         return expr;
@@ -63,10 +80,17 @@ static const Expression& bindExpr(const ExpressionSyntax& syntax, const ASTConte
     if (allowInstances && (expr.type->isSequenceType() || expr.type->isPropertyType()))
         return expr;
 
-    if (!expr.type->isValidForSequence() && expr.kind != ExpressionKind::Dist) {
-        auto& comp = context.getCompilation();
-        context.addDiag(diag::AssertionExprType, expr.sourceRange) << *expr.type;
-        return *comp.emplace<InvalidExpression>(&expr, comp.getErrorType());
+    if (expr.kind != ExpressionKind::Dist) {
+        if (!expr.type->isValidForSequence()) {
+            auto& comp = context.getCompilation();
+            context.addDiag(diag::AssertionExprType, expr.sourceRange) << *expr.type;
+            return *comp.emplace<InvalidExpression>(&expr, comp.getErrorType());
+        }
+
+        // This should always return true since we checked isValidForSequence above,
+        // but we call it to get bool conversion warnings issued.
+        if (isBoolean)
+            context.requireBooleanConvertible(expr);
     }
 
     return expr;
@@ -96,9 +120,10 @@ const AssertionExpr& AssertionExpr::bind(const SequenceExprSyntax& syntax,
         case SyntaxKind::ParenthesizedSequenceExpr: {
             auto& pse = syntax.as<ParenthesizedSequenceExprSyntax>();
             if (pse.matchList || pse.repetition)
-                return SequenceWithMatchExpr::fromSyntax(pse, ctx);
-
-            return bind(*pse.expr, context);
+                result = &SequenceWithMatchExpr::fromSyntax(pse, ctx);
+            else
+                result = const_cast<AssertionExpr*>(&bind(*pse.expr, context));
+            break;
         }
         case SyntaxKind::FirstMatchSequenceExpr:
             result = &FirstMatchAssertionExpr::fromSyntax(syntax.as<FirstMatchSequenceExprSyntax>(),
@@ -188,7 +213,9 @@ const AssertionExpr& AssertionExpr::bind(const PropertyExprSyntax& syntax,
                     return badExpr(ctx.getCompilation(), nullptr);
                 }
             }
-            return bind(*ppe.expr, context);
+
+            result = const_cast<AssertionExpr*>(&bind(*ppe.expr, context));
+            break;
         }
         case SyntaxKind::ClockingPropertyExpr:
             result = &ClockingAssertionExpr::fromSyntax(syntax.as<ClockingPropertyExprSyntax>(),
@@ -243,6 +270,7 @@ const AssertionExpr& AssertionExpr::bind(const PropertySpecSyntax& syntax,
         result = &clocking;
     }
 
+    const_cast<AssertionExpr*>(result)->syntax = &syntax;
     return *result;
 }
 
@@ -279,6 +307,11 @@ void AssertionExpr::requireSequence(const ASTContext& context, DiagCode code) co
     SLANG_UNREACHABLE;
 }
 
+bool AssertionExpr::isEquivalentTo(const AssertionExpr& other) const {
+    EquivalentToVisitor visitor;
+    return visit(visitor, other);
+}
+
 AssertionExpr::NondegeneracyCheckResult AssertionExpr::checkNondegeneracy() const {
     NondegeneracyCheckVisitor visitor;
     return visit(visitor);
@@ -287,6 +320,15 @@ AssertionExpr::NondegeneracyCheckResult AssertionExpr::checkNondegeneracy() cons
 std::optional<SequenceRange> AssertionExpr::computeSequenceLength() const {
     SequenceLengthVisitor visitor;
     return visit(visitor);
+}
+
+bool AssertionExpr::canSucceedVacuously() const {
+    VacuityCheckVisitor visitor;
+    return visit(visitor);
+}
+
+bool AssertionExpr::isParenthesized() const {
+    return syntax && syntax->kind == SyntaxKind::ParenthesizedExpression;
 }
 
 AssertionExpr& AssertionExpr::badExpr(Compilation& compilation, const AssertionExpr* expr) {
@@ -325,15 +367,20 @@ bool AssertionExpr::checkAssertionCall(const CallExpression& call, const ASTCont
 
             if (formal->direction == ArgumentDirection::Ref) {
                 SLANG_ASSERT(index < args.size());
-                if (auto sym = args[index]->getSymbolReference()) {
-                    if (VariableSymbol::isKind(sym->kind) &&
-                        sym->as<VariableSymbol>().lifetime == VariableLifetime::Automatic) {
+                bool anyBad = false;
+                args[index]->visitSymbolReferences([&](const Expression&, const Symbol& sym) {
+                    if (auto var = sym.as_if<VariableSymbol>();
+                        var && var->lifetime == VariableLifetime::Automatic &&
+                        var->kind != SymbolKind::Field) {
+
                         auto& diag = context.addDiag(refArgCode, args[index]->sourceRange);
-                        diag << sym->name << formal->name;
-                        diag.addNote(diag::NoteDeclarationHere, sym->location);
-                        return false;
+                        diag << sym.name << formal->name;
+                        diag.addNote(diag::NoteDeclarationHere, sym.location);
+                        anyBad = true;
                     }
-                }
+                });
+                if (anyBad)
+                    return false;
             }
 
             index++;
@@ -344,6 +391,8 @@ bool AssertionExpr::checkAssertionCall(const CallExpression& call, const ASTCont
 }
 
 struct SampledValueExprVisitor {
+    using KnownSystemName = parsing::KnownSystemName;
+
     const ASTContext& context;
     bool isFutureGlobal;
     DiagCode localVarCode;
@@ -370,14 +419,14 @@ struct SampledValueExprVisitor {
                 case ExpressionKind::Call: {
                     auto& call = expr.template as<CallExpression>();
                     if (call.isSystemCall()) {
-                        if (call.getSubroutineName() == "matched"sv && !call.arguments().empty() &&
+                        auto ksn = call.getKnownSystemName();
+                        if (ksn == KnownSystemName::Matched && !call.arguments().empty() &&
                             call.arguments()[0]->type->isSequenceType()) {
                             context.addDiag(matchedCode, expr.sourceRange);
                         }
 
-                        if (isFutureGlobal && FutureGlobalNames.count(call.getSubroutineName())) {
+                        if (isFutureGlobal && SemanticFacts::isGlobalFutureSampledValueFunc(ksn))
                             context.addDiag(diag::GlobalSampledValueNested, expr.sourceRange);
-                        }
                     }
                     break;
                 }
@@ -388,10 +437,6 @@ struct SampledValueExprVisitor {
             }
         }
     }
-
-    static inline const flat_hash_set<std::string_view> FutureGlobalNames = {
-        "$future_gclk"sv, "$rising_gclk"sv, "$falling_gclk"sv, "$steady_gclk"sv,
-        "$changing_gclk"sv};
 };
 
 void AssertionExpr::checkSampledValueExpr(const Expression& expr, const ASTContext& context,
@@ -487,6 +532,10 @@ SequenceRepetition::SequenceRepetition(const SequenceRepetitionSyntax& syntax,
             kind = Consecutive;
             range.min = 1;
             return;
+        case TokenKind::Star:
+            kind = Consecutive;
+            range.min = 0;
+            break;
         default:
             kind = Consecutive;
             break;
@@ -626,6 +675,22 @@ std::optional<SequenceRange> SimpleAssertionExpr::computeSequenceLengthImpl() co
     return res;
 }
 
+bool SimpleAssertionExpr::canSucceedVacuouslyImpl() const {
+    if (expr.kind == ExpressionKind::AssertionInstance) {
+        auto& aie = expr.as<AssertionInstanceExpression>();
+        if (aie.type->isPropertyType())
+            return aie.body.canSucceedVacuously();
+    }
+
+    // Sequences are never vacuous.
+    return false;
+}
+
+bool SimpleAssertionExpr::isEquivalentImpl(const SimpleAssertionExpr& rhs) const {
+    return expr.isEquivalentTo(rhs.expr) && repetition.has_value() == rhs.repetition.has_value() &&
+           (!repetition || repetition->isEquivalentTo(*rhs.repetition));
+}
+
 void SimpleAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("expr", expr);
     if (repetition) {
@@ -644,7 +709,7 @@ AssertionExpr& SequenceConcatExpr::fromSyntax(const DelayedSequenceExprSyntax& s
         ok &= !seq.bad();
 
         SequenceRange delay{0, 0};
-        elems.push_back({delay, &seq});
+        elems.push_back({delay, SourceRange{}, &seq});
     }
 
     for (auto es : syntax.elements) {
@@ -653,7 +718,9 @@ AssertionExpr& SequenceConcatExpr::fromSyntax(const DelayedSequenceExprSyntax& s
         seq.requireSequence(context);
         ok &= !seq.bad();
 
+        SourceRange delayRange;
         if (es->delayVal) {
+            delayRange = es->delayVal->sourceRange();
             auto val = context.evalInteger(*es->delayVal, ASTFlags::AssertionDelayOrRepetition);
             if (!context.requirePositive(val, es->delayVal->sourceRange()))
                 ok = false;
@@ -661,14 +728,20 @@ AssertionExpr& SequenceConcatExpr::fromSyntax(const DelayedSequenceExprSyntax& s
                 delay.max = delay.min = uint32_t(*val);
         }
         else if (es->range) {
+            delayRange = es->range->sourceRange();
             delay = SequenceRange::fromSyntax(*es->range, context,
                                               /* allowUnbounded */ true);
         }
+        else if (es->op.kind == TokenKind::Star) {
+            delayRange = es->op.range();
+            delay.min = 0;
+        }
         else if (es->op.kind == TokenKind::Plus) {
+            delayRange = es->op.range();
             delay.min = 1;
         }
 
-        elems.push_back(Element{delay, &seq});
+        elems.push_back(Element{delay, delayRange, &seq});
     }
 
     auto& comp = context.getCompilation();
@@ -782,6 +855,12 @@ std::optional<SequenceRange> SequenceConcatExpr::computeSequenceLengthImpl() con
     res.min = delayMin;
     res.max = delayMax;
     return res;
+}
+
+bool SequenceConcatExpr::isEquivalentImpl(const SequenceConcatExpr& rhs) const {
+    return std::ranges::equal(elements, rhs.elements, [](const Element& le, const Element& re) {
+        return le.delay.isEquivalentTo(re.delay) && le.sequence->isEquivalentTo(*re.sequence);
+    });
 }
 
 void SequenceConcatExpr::serializeTo(ASTSerializer& serializer) const {
@@ -907,6 +986,15 @@ std::optional<SequenceRange> SequenceWithMatchExpr::computeSequenceLengthImpl() 
     return res;
 }
 
+bool SequenceWithMatchExpr::isEquivalentImpl(const SequenceWithMatchExpr& rhs) const {
+    return expr.isEquivalentTo(rhs.expr) && repetition.has_value() == rhs.repetition.has_value() &&
+           (!repetition || repetition->isEquivalentTo(*rhs.repetition)) &&
+           std::ranges::equal(matchItems, rhs.matchItems,
+                              [](const Expression* l, const Expression* r) {
+                                  return l->isEquivalentTo(*r);
+                              });
+}
+
 void SequenceWithMatchExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("expr", expr);
     if (repetition) {
@@ -989,6 +1077,27 @@ AssertionExpr& UnaryAssertionExpr::fromSyntax(const UnarySelectPropertyExprSynta
     return *comp.emplace<UnaryAssertionExpr>(op, expr, range);
 }
 
+bool UnaryAssertionExpr::canSucceedVacuouslyImpl() const {
+    switch (op) {
+        case UnaryAssertionOperator::Not:
+            return expr.canSucceedVacuously();
+        case UnaryAssertionOperator::NextTime:
+        case UnaryAssertionOperator::SNextTime:
+        case UnaryAssertionOperator::Always:
+        case UnaryAssertionOperator::SAlways:
+        case UnaryAssertionOperator::Eventually:
+        case UnaryAssertionOperator::SEventually:
+            return true;
+    }
+    SLANG_UNREACHABLE;
+}
+
+bool UnaryAssertionExpr::isEquivalentImpl(const UnaryAssertionExpr& rhs) const {
+    return op == rhs.op && expr.isEquivalentTo(rhs.expr) &&
+           range.has_value() == rhs.range.has_value() &&
+           (!range || range->isEquivalentTo(*rhs.range));
+}
+
 void UnaryAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("op", toString(op));
     serializer.write("expr", expr);
@@ -1039,7 +1148,7 @@ AssertionExpr& BinaryAssertionExpr::fromSyntax(const BinarySequenceExprSyntax& s
         right.requireSequence(context);
     }
 
-    return *comp.emplace<BinaryAssertionExpr>(op, left, right);
+    return *comp.emplace<BinaryAssertionExpr>(op, left, right, syntax.op.range());
 }
 
 AssertionExpr& BinaryAssertionExpr::fromSyntax(const BinaryPropertyExprSyntax& syntax,
@@ -1094,7 +1203,7 @@ AssertionExpr& BinaryAssertionExpr::fromSyntax(const BinaryPropertyExprSyntax& s
     }
     // clang-format on
 
-    return *comp.emplace<BinaryAssertionExpr>(op, left, right);
+    return *comp.emplace<BinaryAssertionExpr>(op, left, right, syntax.op.range());
 }
 
 void BinaryAssertionExpr::requireSequence(const ASTContext& context, DiagCode code) const {
@@ -1222,7 +1331,7 @@ AssertionExpr::NondegeneracyCheckResult BinaryAssertionExpr::checkNondegeneracyI
     }
 
     return res;
-};
+}
 
 std::optional<SequenceRange> BinaryAssertionExpr::computeSequenceLengthImpl() const {
     const auto leftLen = left.computeSequenceLength();
@@ -1269,6 +1378,35 @@ std::optional<SequenceRange> BinaryAssertionExpr::computeSequenceLengthImpl() co
     }
 }
 
+bool BinaryAssertionExpr::canSucceedVacuouslyImpl() const {
+    switch (op) {
+        case BinaryAssertionOperator::Or:
+        case BinaryAssertionOperator::And:
+        case BinaryAssertionOperator::Iff:
+            return left.canSucceedVacuously() && right.canSucceedVacuously();
+        case BinaryAssertionOperator::Until:
+        case BinaryAssertionOperator::SUntil:
+        case BinaryAssertionOperator::UntilWith:
+        case BinaryAssertionOperator::SUntilWith:
+        case BinaryAssertionOperator::Implies:
+        case BinaryAssertionOperator::OverlappedImplication:
+        case BinaryAssertionOperator::NonOverlappedImplication:
+        case BinaryAssertionOperator::OverlappedFollowedBy:
+        case BinaryAssertionOperator::NonOverlappedFollowedBy:
+            return true;
+        case BinaryAssertionOperator::Intersect:
+        case BinaryAssertionOperator::Throughout:
+        case BinaryAssertionOperator::Within:
+            // These are sequence operations, always nonvacuous
+            return false;
+    }
+    SLANG_UNREACHABLE;
+}
+
+bool BinaryAssertionExpr::isEquivalentImpl(const BinaryAssertionExpr& rhs) const {
+    return op == rhs.op && left.isEquivalentTo(rhs.left) && right.isEquivalentTo(rhs.right);
+}
+
 void BinaryAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("op", toString(op));
     serializer.write("left", left);
@@ -1295,6 +1433,14 @@ AssertionExpr::NondegeneracyCheckResult FirstMatchAssertionExpr::checkNondegener
     return res;
 }
 
+bool FirstMatchAssertionExpr::isEquivalentImpl(const FirstMatchAssertionExpr& rhs) const {
+    return seq.isEquivalentTo(rhs.seq) &&
+           std::ranges::equal(matchItems, rhs.matchItems,
+                              [](const Expression* l, const Expression* r) {
+                                  return l->isEquivalentTo(*r);
+                              });
+}
+
 void FirstMatchAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("seq", seq);
 
@@ -1304,12 +1450,23 @@ void FirstMatchAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.endArray();
 }
 
+static void checkForClockingBlock(const ASTContext& context, const SyntaxNode& syntax) {
+    auto parentScope = context.scope->asSymbol().getParentScope();
+    SLANG_ASSERT(parentScope);
+
+    if (parentScope->asSymbol().kind == SymbolKind::ClockingBlock)
+        context.addDiag(diag::ExplicitClockInClockingBlock, syntax.sourceRange());
+}
+
 AssertionExpr& ClockingAssertionExpr::fromSyntax(const ClockingSequenceExprSyntax& syntax,
                                                  const ASTContext& context) {
     auto& comp = context.getCompilation();
     auto& clocking = TimingControl::bind(*syntax.event,
                                          context.resetFlags(ASTFlags::NonProcedural));
     auto& expr = bind(*syntax.expr, context);
+
+    checkForClockingBlock(context, *syntax.event);
+
     return *comp.emplace<ClockingAssertionExpr>(clocking, expr);
 }
 
@@ -1324,6 +1481,8 @@ AssertionExpr& ClockingAssertionExpr::fromSyntax(const ClockingPropertyExprSynta
         context.addDiag(diag::ExpectedExpression, last.location() + last.rawText().length());
         return badExpr(comp, nullptr);
     }
+
+    checkForClockingBlock(context, *syntax.event);
 
     auto& expr = bind(*syntax.expr, context);
     return *comp.emplace<ClockingAssertionExpr>(clocking, expr);
@@ -1349,7 +1508,14 @@ AssertionExpr& ClockingAssertionExpr::fromSyntax(const TimingControlSyntax& synt
                                                  const ASTContext& context) {
     auto& comp = context.getCompilation();
     auto& clocking = TimingControl::bind(syntax, context.resetFlags(ASTFlags::NonProcedural));
+
+    checkForClockingBlock(context, syntax);
+
     return *comp.emplace<ClockingAssertionExpr>(clocking, expr);
+}
+
+bool ClockingAssertionExpr::isEquivalentImpl(const ClockingAssertionExpr& rhs) const {
+    return clocking.isEquivalentTo(rhs.clocking) && expr.isEquivalentTo(rhs.expr);
 }
 
 void ClockingAssertionExpr::serializeTo(ASTSerializer& serializer) const {
@@ -1366,6 +1532,10 @@ AssertionExpr& StrongWeakAssertionExpr::fromSyntax(const StrongWeakPropertyExprS
 
     return *comp.emplace<StrongWeakAssertionExpr>(
         expr, syntax.keyword.kind == TokenKind::StrongKeyword ? Strong : Weak);
+}
+
+bool StrongWeakAssertionExpr::isEquivalentImpl(const StrongWeakAssertionExpr& rhs) const {
+    return strength == rhs.strength && expr.isEquivalentTo(rhs.expr);
 }
 
 void StrongWeakAssertionExpr::serializeTo(ASTSerializer& serializer) const {
@@ -1407,6 +1577,11 @@ AssertionExpr& AbortAssertionExpr::fromSyntax(const AcceptOnPropertyExprSyntax& 
     return *comp.emplace<AbortAssertionExpr>(cond, expr, action, isSync);
 }
 
+bool AbortAssertionExpr::isEquivalentImpl(const AbortAssertionExpr& rhs) const {
+    return condition.isEquivalentTo(rhs.condition) && expr.isEquivalentTo(rhs.expr) &&
+           action == rhs.action && isSync == rhs.isSync;
+}
+
 void AbortAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("condition", condition);
     serializer.write("expr", expr);
@@ -1427,6 +1602,21 @@ AssertionExpr& ConditionalAssertionExpr::fromSyntax(const ConditionalPropertyExp
     return *comp.emplace<ConditionalAssertionExpr>(cond, ifExpr, elseExpr);
 }
 
+bool ConditionalAssertionExpr::canSucceedVacuouslyImpl() const {
+    // If there is an else branch then we can be vacuous if either side
+    // can be vacuous. Otherwise we are always vacuous because the if
+    // condition may be false and no branch taken.
+    if (elseExpr)
+        return ifExpr.canSucceedVacuously() || elseExpr->canSucceedVacuously();
+    return true;
+}
+
+bool ConditionalAssertionExpr::isEquivalentImpl(const ConditionalAssertionExpr& rhs) const {
+    return condition.isEquivalentTo(rhs.condition) && ifExpr.isEquivalentTo(rhs.ifExpr) &&
+           bool(elseExpr) == bool(rhs.elseExpr) &&
+           (!elseExpr || elseExpr->isEquivalentTo(*rhs.elseExpr));
+}
+
 void ConditionalAssertionExpr::serializeTo(ASTSerializer& serializer) const {
     serializer.write("condition", condition);
     serializer.write("if", ifExpr);
@@ -1437,7 +1627,7 @@ void ConditionalAssertionExpr::serializeTo(ASTSerializer& serializer) const {
 AssertionExpr& CaseAssertionExpr::fromSyntax(const CasePropertyExprSyntax& syntax,
                                              const ASTContext& context) {
     auto& comp = context.getCompilation();
-    auto& expr = bindExpr(*syntax.expr, context);
+    auto& expr = bindExpr(*syntax.expr, context, /* allowInstances */ false, /* isBoolean */ false);
 
     const AssertionExpr* defCase = nullptr;
     SmallVector<ItemGroup, 4> items;
@@ -1447,8 +1637,10 @@ AssertionExpr& CaseAssertionExpr::fromSyntax(const CasePropertyExprSyntax& synta
             auto& body = AssertionExpr::bind(*sci.expr, context);
 
             SmallVector<const Expression*> exprs;
-            for (auto es : sci.expressions)
-                exprs.push_back(&bindExpr(*es, context));
+            for (auto es : sci.expressions) {
+                exprs.push_back(
+                    &bindExpr(*es, context, /* allowInstances */ false, /* isBoolean */ false));
+            }
 
             items.push_back(ItemGroup{exprs.copy(comp), &body});
         }
@@ -1463,6 +1655,32 @@ AssertionExpr& CaseAssertionExpr::fromSyntax(const CasePropertyExprSyntax& synta
     }
 
     return *comp.emplace<CaseAssertionExpr>(expr, items.copy(comp), defCase);
+}
+
+bool CaseAssertionExpr::canSucceedVacuouslyImpl() const {
+    // If there's no default then there's always the chance we're vacuous.
+    if (!defaultCase)
+        return true;
+
+    // Otherwise, we're vacuous if any branch can be vacuous.
+    for (auto& item : items) {
+        if (item.body->canSucceedVacuously())
+            return true;
+    }
+
+    return defaultCase->canSucceedVacuously();
+}
+
+bool CaseAssertionExpr::isEquivalentImpl(const CaseAssertionExpr& rhs) const {
+    return expr.isEquivalentTo(rhs.expr) && bool(defaultCase) == bool(rhs.defaultCase) &&
+           (!defaultCase || defaultCase->isEquivalentTo(*rhs.defaultCase)) &&
+           std::ranges::equal(items, rhs.items, [](const ItemGroup& l, const ItemGroup& r) {
+               return std::ranges::equal(l.expressions, r.expressions,
+                                         [](const Expression* le, const Expression* re) {
+                                             return le->isEquivalentTo(*re);
+                                         }) &&
+                      l.body->isEquivalentTo(*r.body);
+           });
 }
 
 void CaseAssertionExpr::serializeTo(ASTSerializer& serializer) const {
@@ -1499,6 +1717,10 @@ AssertionExpr& DisableIffAssertionExpr::fromSyntax(const DisableIffSyntax& synta
         context.addDiag(diag::RecursivePropDisableIff, syntax.sourceRange());
 
     return *comp.emplace<DisableIffAssertionExpr>(cond, expr);
+}
+
+bool DisableIffAssertionExpr::isEquivalentImpl(const DisableIffAssertionExpr& rhs) const {
+    return condition.isEquivalentTo(rhs.condition) && expr.isEquivalentTo(rhs.expr);
 }
 
 void DisableIffAssertionExpr::serializeTo(ASTSerializer& serializer) const {

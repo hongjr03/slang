@@ -43,38 +43,6 @@ bool isSameEnum(const Expression& expr, const Type& enumType) {
     return expr.type->isMatching(enumType);
 }
 
-// This checks whether the two types are essentially the same struct or union type,
-// which is true if they have the same number of fields with the same names and the
-// same field types.
-bool isSameStructUnion(const Type& left, const Type& right) {
-    const Type& lt = left.getCanonicalType();
-    const Type& rt = right.getCanonicalType();
-    if (lt.kind != rt.kind)
-        return false;
-
-    if (lt.kind != SymbolKind::PackedStructType && lt.kind != SymbolKind::PackedUnionType)
-        return false;
-
-    auto lr = lt.as<Scope>().membersOfType<FieldSymbol>();
-    auto rr = rt.as<Scope>().membersOfType<FieldSymbol>();
-
-    auto lit = lr.begin();
-    auto rit = rr.begin();
-    while (lit != lr.end()) {
-        if (rit == rr.end() || lit->name != rit->name)
-            return false;
-
-        auto& lft = lit->getType();
-        auto& rft = rit->getType();
-        if (!lft.isMatching(rft) && !isSameStructUnion(lft, rft))
-            return false;
-
-        ++lit;
-        ++rit;
-    }
-    return rit == rr.end();
-}
-
 bool isUnionMemberType(const Type& left, const Type& right) {
     const Type& lt = left.getCanonicalType();
     const Type& rt = right.getCanonicalType();
@@ -104,145 +72,6 @@ bool hasSameDims(const Type& left, const Type& right) {
     return hasSameDims(*le, *re);
 }
 
-void checkImplicitConversions(const ASTContext& context, const Type& sourceType,
-                              const Type& targetType, const Expression& op,
-                              const Expression* parentExpr, SourceRange operatorRange,
-                              ConversionKind conversionKind) {
-    auto isStructUnionEnum = [](const Type& t) {
-        return t.kind == SymbolKind::PackedStructType || t.kind == SymbolKind::PackedUnionType ||
-               t.kind == SymbolKind::EnumType;
-    };
-
-    auto isMultiDimArray = [](const Type& t) {
-        return t.kind == SymbolKind::PackedArrayType && t.getArrayElementType()->getBitWidth() > 1;
-    };
-
-    auto parentIsComparison = [&] {
-        return parentExpr && parentExpr->kind == ExpressionKind::BinaryOp &&
-               OpInfo::isComparison(parentExpr->as<BinaryExpression>().op);
-    };
-
-    auto addDiag = [&](DiagCode code) -> Diagnostic& {
-        auto& diag = context.addDiag(code, op.sourceRange);
-        if (operatorRange.start())
-            diag << operatorRange;
-        return diag;
-    };
-
-    // Don't warn about conversions in compound assignment operators.
-    auto isCompoundAssign = [&] {
-        auto& expr = op.unwrapImplicitConversions();
-        if (expr.kind == ExpressionKind::LValueReference)
-            return true;
-
-        return expr.kind == ExpressionKind::BinaryOp &&
-               expr.as<BinaryExpression>().left().unwrapImplicitConversions().kind ==
-                   ExpressionKind::LValueReference;
-    };
-    if (isCompoundAssign())
-        return;
-
-    const Type& lt = targetType.getCanonicalType();
-    const Type& rt = sourceType.getCanonicalType();
-    if (lt.isIntegral() && rt.isIntegral()) {
-        // Warn for conversions between different enums/structs/unions.
-        if (isStructUnionEnum(lt) && isStructUnionEnum(rt) && !lt.isMatching(rt)) {
-            if (!isSameStructUnion(lt, rt) && !isUnionMemberType(lt, rt))
-                addDiag(diag::ImplicitConvert) << sourceType << targetType;
-            return;
-        }
-
-        // Warn for conversions between packed arrays of differing
-        // dimension counts or sizes.
-        if (isMultiDimArray(lt) && isMultiDimArray(rt) && !hasSameDims(lt, rt)) {
-            // Avoid warning for assignments or comparisons with 0 or '0, '1.
-            auto isZeroOrUnsized = [](const Expression& e) {
-                auto expr = &e.unwrapImplicitConversions();
-                if (expr->kind == ExpressionKind::ConditionalOp) {
-                    if (auto known = expr->as<ConditionalExpression>().knownSide())
-                        expr = known;
-                }
-
-                return expr->kind == ExpressionKind::UnbasedUnsizedIntegerLiteral ||
-                       (expr->kind == ExpressionKind::IntegerLiteral &&
-                        bool(expr->as<IntegerLiteral>().getValue() == 0));
-            };
-
-            if (!isZeroOrUnsized(op) &&
-                (!parentIsComparison() ||
-                 !isZeroOrUnsized(parentExpr->as<BinaryExpression>().right()))) {
-                addDiag(diag::PackedArrayConv) << sourceType << targetType;
-            }
-        }
-
-        // Check to rule out false positives: try to eval as a constant.
-        // We'll ignore any constants, because they will get their own more
-        // fine grained warning during eval.
-        if (context.tryEval(op))
-            return;
-
-        // Warn for sign conversions.
-        if (lt.isSigned() != rt.isSigned()) {
-            // Comparisons get their own warning elsewhere.
-            if (!parentIsComparison())
-                addDiag(diag::SignConversion) << sourceType << targetType;
-        }
-
-        // Don't issue width warnings for propagated conversions, as they would
-        // be extremely noisy and of dubious value (since they act the way people
-        // expect their expressions to behave).
-        if (conversionKind == ConversionKind::Propagated)
-            return;
-
-        // Warn for implicit assignments between integral types of differing widths.
-        bitwidth_t targetWidth = lt.getBitWidth();
-        bitwidth_t actualWidth = rt.getBitWidth();
-        if (targetWidth == actualWidth)
-            return;
-
-        // Before we go and issue this warning, weed out false positives by
-        // recomputing the width of the expression, with all constants sized
-        // to the minimum width necessary to represent them. Otherwise, even
-        // code as simple as this will result in a warning:
-        //    logic [3:0] a = 1;
-        std::optional<bitwidth_t> effective = op.getEffectiveWidth();
-        if (!effective)
-            return;
-
-        // Now that we know the effective width, compare it to the expression's
-        // actual width. We don't warn if the target is anywhere in between the
-        // effective and the actual width.
-        SLANG_ASSERT(effective <= actualWidth);
-        if (targetWidth < effective || targetWidth > actualWidth) {
-            DiagCode code;
-            if (context.getInstance())
-                code = targetWidth < effective ? diag::PortWidthTruncate : diag::PortWidthExpand;
-            else
-                code = targetWidth < effective ? diag::WidthTruncate : diag::WidthExpand;
-            addDiag(code) << actualWidth << targetWidth;
-        }
-    }
-    else if (lt.isNumeric() && rt.isNumeric()) {
-        // Don't warn for constexprs.
-        if (context.tryEval(op))
-            return;
-
-        DiagCode code;
-        if (lt.isIntegral())
-            code = diag::FloatIntConv;
-        else if (rt.isIntegral())
-            code = diag::IntFloatConv;
-        else if (lt.getBitWidth() < rt.getBitWidth())
-            code = diag::FloatNarrow;
-        else if (lt.getBitWidth() > rt.getBitWidth())
-            code = diag::FloatWiden;
-        else
-            return;
-
-        addDiag(code) << sourceType << targetType;
-    }
-}
-
 } // namespace
 
 namespace slang::ast {
@@ -269,12 +98,17 @@ bool Expression::isImplicitlyAssignableTo(Compilation& compilation, const Type& 
         return true;
     }
 
+    if (targetType.isString() && type->isIntegral() &&
+        compilation.hasFlag(CompilationFlags::RelaxStringConversions)) {
+        return true;
+    }
+
     return false;
 }
 
 Expression& Expression::convertAssignment(const ASTContext& context, const Type& type,
                                           Expression& expr, SourceRange assignmentRange,
-                                          Expression** lhsExpr, bitmask<AssignFlags>* assignFlags) {
+                                          Expression** lhsExpr) {
     if (expr.bad())
         return expr;
 
@@ -286,7 +120,7 @@ Expression& Expression::convertAssignment(const ASTContext& context, const Type&
     const Type* rt = expr.type;
 
     auto finalizeType = [&](const Type& t) {
-        contextDetermined(context, result, nullptr, t, assignmentRange, /* isAssignment */ true);
+        contextDetermined(context, result, nullptr, t, assignmentRange, ConversionKind::Implicit);
     };
 
     if (type.isEquivalent(*rt)) {
@@ -298,8 +132,9 @@ Expression& Expression::convertAssignment(const ASTContext& context, const Type&
         // If the types are not actually matching we might still want
         // to issue conversion warnings.
         if (!context.inUnevaluatedBranch() && !type.isMatching(*rt)) {
-            checkImplicitConversions(context, *rt, type, *result, nullptr, assignmentRange,
-                                     ConversionKind::Implicit);
+            ConversionExpression::checkImplicitConversions(context, *rt, type, *result, nullptr,
+                                                           assignmentRange,
+                                                           ConversionKind::Implicit);
         }
 
         return *result;
@@ -321,13 +156,8 @@ Expression& Expression::convertAssignment(const ASTContext& context, const Type&
                 Expression* conn = tryConnectPortArray(context, *rt, **lhsExpr, *instance);
                 if (conn) {
                     selfDetermined(context, conn);
-                    *lhsExpr = conn;
-
-                    SLANG_ASSERT(assignFlags);
-                    if (assignFlags)
-                        *assignFlags |= AssignFlags::SlicedPort;
-
                     selfDetermined(context, result);
+                    *lhsExpr = conn;
                     return *result;
                 }
             }
@@ -347,27 +177,12 @@ Expression& Expression::convertAssignment(const ASTContext& context, const Type&
                                                       *result, nullptr, assignmentRange);
         }
 
-        if (expr.kind == ExpressionKind::Streaming) {
-            if (Bitstream::canBeSource(type, expr.as<StreamingConcatenationExpression>(),
-                                       assignmentRange, context)) {
-                // Add an implicit bit-stream casting otherwise types are not assignment compatible.
-                // The size rule is not identical to explicit bit-stream casting so a different
-                // ConversionKind is used.
-                result = comp.emplace<ConversionExpression>(type, ConversionKind::StreamingConcat,
-                                                            *result, result->sourceRange);
-                selfDetermined(context, result);
-                return *result;
-            }
-            return badExpr(comp, &expr);
-        }
-
         if (expr.kind == ExpressionKind::ValueRange) {
             // Convert each side of the range and return that as a new range.
             auto convert = [&](Expression& expr) -> Expression& {
                 if (expr.kind == ExpressionKind::UnboundedLiteral)
                     return expr;
-                return convertAssignment(context, type, expr, assignmentRange, lhsExpr,
-                                         assignFlags);
+                return convertAssignment(context, type, expr, assignmentRange, lhsExpr);
             };
 
             auto& vre = expr.as<ValueRangeExpression>();
@@ -441,6 +256,8 @@ static bool actuallyNeededCast(const Type& type, const Expression& operand) {
             return actuallyNeededCast(type, operand.as<MinTypMaxExpression>().selected());
         case ExpressionKind::ConditionalOp: {
             auto& cond = operand.as<ConditionalExpression>();
+            if (!type.isEquivalent(*cond.left().type) || !type.isEquivalent(*cond.right().type))
+                return true;
             return actuallyNeededCast(type, cond.left()) || actuallyNeededCast(type, cond.right());
         }
         default:
@@ -465,9 +282,15 @@ Expression& ConversionExpression::fromSyntax(Compilation& comp, const CastExpres
             return badExpr(comp, nullptr);
         }
 
-        operand = &create(comp, *syntax.right, context, ASTFlags::StreamingAllowed, type);
-        selfDetermined(context, operand);
-
+        // Don't pass type as assignmentTarget for streaming operands: the existing
+        // isBitstreamCast path below handles them with the correct semantics and error codes.
+        // For other operands (e.g. assignment patterns), assignmentTarget is needed for type
+        // deduction. The cast syntax wraps the operand in ParenthesizedExpressionSyntax, so
+        // check the inner expression kind.
+        const bool isStreamingOperand = syntax.right->expression->kind ==
+                                        SyntaxKind::StreamingConcatenationExpression;
+        operand = &create(comp, *syntax.right, context, ASTFlags::StreamingAllowed,
+                          isStreamingOperand ? nullptr : type);
         if (operand->bad())
             return badExpr(comp, nullptr);
     }
@@ -480,7 +303,7 @@ Expression& ConversionExpression::fromSyntax(Compilation& comp, const CastExpres
         if (!context.requireValidBitWidth(width, targetExpr.sourceRange))
             return badExpr(comp, nullptr);
 
-        operand = &selfDetermined(comp, *syntax.right, context, ASTFlags::StreamingAllowed);
+        operand = &create(comp, *syntax.right, context, ASTFlags::StreamingAllowed);
         if (operand->bad())
             return badExpr(comp, nullptr);
 
@@ -543,10 +366,34 @@ Expression& ConversionExpression::fromSyntax(Compilation& comp, const CastExpres
     };
 
     if (type->isMatching(*operand->type) && !isGenvar() && !isDifferentTypedef() &&
-        ((assignmentTarget && assignmentTarget->isMatching(*type)) ||
+        ((assignmentTarget && assignmentTarget->isMatching(*type) &&
+          operand->kind != ExpressionKind::ConditionalOp) ||
          !actuallyNeededCast(*type, *operand))) {
         context.addDiag(diag::UselessCast, syntax.apostrophe.location())
             << *operand->type << targetExpr.sourceRange << operand->sourceRange;
+    }
+
+    if (type->isAssignmentCompatible(*operand->type)) {
+        // The type we propagate should use the sign of the operand, just like it
+        // would if we were doing an implicit conversion via an assignment expression.
+        auto propagatedType = type;
+        if (type->isNumeric() && operand->type->isNumeric()) {
+            propagatedType = OpInfo::binaryType(comp, type, operand->type, false,
+                                                /* signednessFromRt */ true);
+        }
+
+        contextDetermined(context, operand, nullptr, *propagatedType, syntax.apostrophe.range(),
+                          ConversionKind::Explicit);
+
+        if (operand->kind == ExpressionKind::Conversion &&
+            !operand->as<ConversionExpression>().isImplicit()) {
+            operand->sourceRange = syntax.sourceRange();
+            operand->type = type;
+            return *operand;
+        }
+    }
+    else {
+        selfDetermined(context, operand);
     }
 
     return *result();
@@ -566,6 +413,7 @@ Expression& ConversionExpression::fromSyntax(Compilation& compilation,
     // and passes the type through unchanged.
     if (syntax.signing.kind == TokenKind::ConstKeyword) {
         result->type = operand.type;
+        result->isConstCast = true;
         return *result;
     }
 
@@ -589,7 +437,8 @@ Expression& ConversionExpression::makeImplicit(const ASTContext& context, const 
                                                const Expression* parentExpr,
                                                SourceRange operatorRange) {
     auto& comp = context.getCompilation();
-    SLANG_ASSERT(expr.isImplicitlyAssignableTo(comp, targetType));
+    SLANG_ASSERT(conversionKind == ConversionKind::Explicit ||
+                 expr.isImplicitlyAssignableTo(comp, targetType));
 
     Expression* op = &expr;
     selfDetermined(context, op);
@@ -749,6 +598,170 @@ ConstantValue ConversionExpression::convert(EvalContext& context, const Type& fr
     SLANG_UNREACHABLE;
 }
 
+void ConversionExpression::checkImplicitConversions(
+    const ASTContext& context, const Type& sourceType, const Type& targetType, const Expression& op,
+    const Expression* parentExpr, SourceRange operatorRange, ConversionKind conversionKind) {
+
+    auto isStructUnionEnum = [](const Type& t) {
+        return t.kind == SymbolKind::PackedStructType || t.kind == SymbolKind::PackedUnionType ||
+               t.kind == SymbolKind::EnumType;
+    };
+
+    auto isMultiDimArray = [](const Type& t) {
+        return t.kind == SymbolKind::PackedArrayType && t.getArrayElementType()->getBitWidth() > 1;
+    };
+
+    auto parentIsComparison = [&] {
+        return parentExpr && parentExpr->kind == ExpressionKind::BinaryOp &&
+               OpInfo::isComparison(parentExpr->as<BinaryExpression>().op);
+    };
+
+    auto addDiag = [&](DiagCode code) -> Diagnostic& {
+        auto& diag = context.addDiag(code, op.sourceRange);
+        if (operatorRange.start())
+            diag << operatorRange;
+        return diag;
+    };
+
+    // Don't warn about conversions in compound assignment operators.
+    auto& unwrapped = op.unwrapImplicitConversions();
+    auto isCompoundAssign = [&] {
+        if (unwrapped.kind == ExpressionKind::LValueReference)
+            return true;
+
+        return unwrapped.kind == ExpressionKind::BinaryOp &&
+               unwrapped.as<BinaryExpression>().left().unwrapImplicitConversions().kind ==
+                   ExpressionKind::LValueReference;
+    };
+    if (isCompoundAssign())
+        return;
+
+    // Drill through one-element packed arrays, since they can be treated
+    // as implicitly being their one element.
+    auto unwrapType = [&](const Type& t) -> const Type& {
+        auto& ct = t.getCanonicalType();
+        if (ct.kind == SymbolKind::PackedArrayType && ct.getFixedRange().width() == 1)
+            return *ct.getArrayElementType();
+        return ct;
+    };
+
+    auto& lt = unwrapType(targetType);
+    auto& rt = unwrapType(sourceType);
+    if (lt.isIntegral() && rt.isIntegral()) {
+        // Warn for conversions between different enums/structs/unions.
+        if (isStructUnionEnum(lt) && isStructUnionEnum(rt) && !lt.isMatching(rt)) {
+            if (!lt.isIdenticalStructUnion(rt) && !isUnionMemberType(lt, rt))
+                addDiag(diag::ImplicitConvert) << sourceType << targetType;
+            return;
+        }
+
+        // Warn for conversions between packed arrays of differing
+        // dimension counts or sizes.
+        if ((isMultiDimArray(lt) || isMultiDimArray(rt)) && !hasSameDims(lt, rt)) {
+            // Avoid warning for assignments or comparisons with 0 or '0, '1.
+            auto isZeroOrUnsized = [](const Expression& e) {
+                auto expr = &e.unwrapImplicitConversions();
+                if (expr->kind == ExpressionKind::ConditionalOp) {
+                    if (auto known = expr->as<ConditionalExpression>().knownSide())
+                        expr = known;
+                }
+
+                return expr->kind == ExpressionKind::UnbasedUnsizedIntegerLiteral ||
+                       (expr->kind == ExpressionKind::IntegerLiteral &&
+                        bool(expr->as<IntegerLiteral>().getValue() == 0));
+            };
+
+            auto isAppropriateConcat = [&]() {
+                if (unwrapped.kind == ExpressionKind::Concatenation && isMultiDimArray(lt) &&
+                    lt.getBitWidth() == rt.getBitWidth()) {
+                    auto& elemType = *lt.getArrayElementType();
+                    for (auto subExpr : unwrapped.as<ConcatenationExpression>().operands()) {
+                        if (!hasSameDims(elemType, *subExpr->type))
+                            return false;
+                    }
+                    return true;
+                }
+                return false;
+            };
+
+            if (!isZeroOrUnsized(unwrapped) &&
+                (!parentIsComparison() ||
+                 !isZeroOrUnsized(parentExpr->as<BinaryExpression>().right())) &&
+                !isAppropriateConcat()) {
+                addDiag(diag::PackedArrayConv) << sourceType << targetType;
+            }
+        }
+
+        // Check to rule out false positives: try to eval as a constant.
+        // We'll ignore any constants, because they will get their own more
+        // fine grained warning during eval.
+        if (context.tryEval(op))
+            return;
+
+        // Warn for sign conversions.
+        if (lt.isSigned() != rt.isSigned()) {
+            // Comparisons get their own warning elsewhere.
+            if (!parentIsComparison() && op.getEffectiveSign(/* isForConversion */ false) !=
+                                             Expression::EffectiveSign::Either) {
+                addDiag(diag::SignConversion) << sourceType << targetType;
+            }
+        }
+
+        // Don't issue width warnings for propagated conversions, as they would
+        // be extremely noisy and of dubious value (since they act the way people
+        // expect their expressions to behave).
+        if (conversionKind == ConversionKind::Propagated)
+            return;
+
+        // Warn for implicit assignments between integral types of differing widths.
+        bitwidth_t targetWidth = lt.getBitWidth();
+        bitwidth_t actualWidth = rt.getBitWidth();
+        if (targetWidth == actualWidth)
+            return;
+
+        // Before we go and issue this warning, weed out false positives by
+        // recomputing the width of the expression, with all constants sized
+        // to the minimum width necessary to represent them. Otherwise, even
+        // code as simple as this will result in a warning:
+        //    logic [3:0] a = 1;
+        std::optional<bitwidth_t> effective = op.getEffectiveWidth();
+        if (!effective)
+            return;
+
+        // Now that we know the effective width, compare it to the expression's
+        // actual width. We don't warn if the target is anywhere in between the
+        // effective and the actual width.
+        SLANG_ASSERT(effective <= actualWidth);
+        if (targetWidth < effective || targetWidth > actualWidth) {
+            DiagCode code;
+            if (context.getInstance())
+                code = targetWidth < effective ? diag::PortWidthTruncate : diag::PortWidthExpand;
+            else
+                code = targetWidth < effective ? diag::WidthTruncate : diag::WidthExpand;
+            addDiag(code) << actualWidth << targetWidth;
+        }
+    }
+    else if (lt.isNumeric() && rt.isNumeric()) {
+        // Don't warn for constexprs.
+        if (context.tryEval(op))
+            return;
+
+        DiagCode code;
+        if (lt.isIntegral())
+            code = diag::FloatIntConv;
+        else if (rt.isIntegral())
+            code = diag::IntFloatConv;
+        else if (lt.getBitWidth() < rt.getBitWidth())
+            code = diag::FloatNarrow;
+        else if (lt.getBitWidth() > rt.getBitWidth())
+            code = diag::FloatWiden;
+        else
+            return;
+
+        addDiag(code) << sourceType << targetType;
+    }
+}
+
 std::optional<bitwidth_t> ConversionExpression::getEffectiveWidthImpl() const {
     if (isImplicit())
         return operand().getEffectiveWidth();
@@ -759,6 +772,11 @@ Expression::EffectiveSign ConversionExpression::getEffectiveSignImpl(bool isForC
     if (isImplicit())
         return operand().getEffectiveSign(isForConversion);
     return type->isSigned() ? EffectiveSign::Signed : EffectiveSign::Unsigned;
+}
+
+bool ConversionExpression::isEquivalentImpl(const ConversionExpression& rhs) const {
+    return conversionKind == rhs.conversionKind && isConstCast == rhs.isConstCast &&
+           operand().isEquivalentTo(rhs.operand());
 }
 
 void ConversionExpression::serializeTo(ASTSerializer& serializer) const {

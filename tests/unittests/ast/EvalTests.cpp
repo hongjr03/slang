@@ -1196,6 +1196,45 @@ endfunction
     CHECK(sformatf("%v", "3'b1z0") == "St1 HiZ St0");
 
     CHECK(sformatf("%t", "12345") == "               12345");
+
+    session.eval(R"(
+typedef enum {ON, OFF} switch_e;
+typedef struct {switch_e sw; string s;} pair_t;
+localparam pair_t va[int] = '{10:'{OFF, "switch10"}, 20:'{ON, "switch20"}};
+localparam union packed { struct packed { logic [3:0] a; } a; logic [3:0] b; } up = 15;
+
+localparam int da[] = '{3, 0, 0, 1};
+localparam int fa[8] = '{2:4, default:1};
+localparam int qa[$] = '{1, 2, 3};
+localparam int aa[*] = '{3:1, 4:2, 5:3};
+
+localparam switch_e eu = switch_e'(3);
+
+typedef union tagged { void A; int B; } TaggedUnion;
+
+localparam TaggedUnion tu1 = tagged A;
+localparam TaggedUnion tu2 = tagged B 3;
+localparam TaggedUnion tu3 = funcTU();
+
+function automatic TaggedUnion funcTU();
+    TaggedUnion tu;
+    return tu;
+endfunction
+)");
+
+    CHECK(sformatf("%p", "va") == "'{10:'{sw:OFF, s:\"switch10\"}, 20:'{sw:ON, s:\"switch20\"}}");
+    CHECK(sformatf("%p", "\"Hello World\"") == "\"Hello World\"");
+    CHECK(sformatf("%0p", "va") == "'{10:'{OFF,\"switch10\"},20:'{ON,\"switch20\"}}");
+    CHECK(sformatf("%p", "up") == "'{a:4'b1111}");
+    CHECK(sformatf("%p", "da") == "'{3, 0, 0, 1}");
+    CHECK(sformatf("%0p", "fa") == "'{1,1,4,1,1,1,1,1}");
+    CHECK(sformatf("%0p", "qa") == "'{1,2,3}");
+    CHECK(sformatf("%p", "aa") == "'{3:1, 4:2, 5:3}");
+    CHECK(sformatf("%p", "eu") == "3");
+    CHECK(sformatf("%p", "tu1") == "A");
+    CHECK(sformatf("%p", "tu2") == "B:3");
+    CHECK(sformatf("%p", "tu3") == "(unset)");
+    NO_SESSION_ERRORS;
 }
 
 TEST_CASE("sformatf with trailing percent") {
@@ -2501,14 +2540,15 @@ endfunction
     CHECK(session.eval("f3();").integer() == 139);
 
     auto diags = session.getDiagnostics();
-    REQUIRE(diags.size() == 7);
+    REQUIRE(diags.size() == 8);
     CHECK(diags[0].code == diag::ArithOpMismatch);
     CHECK(diags[1].code == diag::ConstEvalNoCaseItemsMatched);
     CHECK(diags[2].code == diag::ConstEvalCaseItemsNotUnique);
     CHECK(diags[3].code == diag::ConstantConversion);
     CHECK(diags[4].code == diag::ArithOpMismatch);
     CHECK(diags[5].code == diag::ArithOpMismatch);
-    CHECK(diags[6].code == diag::ArithOpMismatch);
+    CHECK(diags[6].code == diag::WidthExpand);
+    CHECK(diags[7].code == diag::ArithOpMismatch);
 }
 
 TEST_CASE("case statement eval regression") {
@@ -2568,4 +2608,116 @@ endmodule
 
     auto& compare = root.lookupName<ParameterSymbol>("m.Compare");
     CHECK(compare.getValue().integer() == 1);
+}
+
+TEST_CASE("Eval truthiness of strings") {
+    ScriptSession session;
+    session.eval(R"(
+function automatic bit b;
+    string s = "SDF";
+    if (s)
+        return 1;
+    return 0;
+endfunction
+)");
+
+    CHECK(session.eval("b()").integer() == 1);
+
+    NO_SESSION_ERRORS;
+}
+
+TEST_CASE("Eval static cast type propagation") {
+    ScriptSession session;
+    CHECK(session.eval("(3)'(1'b1 << 2)").integer() == 4);
+    CHECK(session.eval("int'(1'b1 + (1'b1 << 2))").integer() == 5);
+
+    NO_SESSION_ERRORS;
+}
+
+TEST_CASE("Package eval regress -- GH #1410") {
+    ScriptSession session;
+    session.eval(R"(
+package pkg_test;
+    localparam TEST=42;
+endpackage)");
+
+    CHECK(session.eval("pkg_test::TEST").integer() == 42);
+
+    NO_SESSION_ERRORS;
+}
+
+TEST_CASE("Eval bad statement") {
+    ScriptSession session;
+    CHECK(!session.eval("fork=L:for"));
+}
+
+TEST_CASE("Concat LHS assignment preserves signedness -- GH #1705") {
+    ScriptSession session;
+    session.eval(R"(
+function [7:0] f(input [7:0] value);
+    reg signed [2:0] tmp1, tmp2;
+    begin
+        {tmp1, tmp2} = {value[2:0], value[6:4]};
+        f[7:4] = tmp1;
+        f[3:0] = tmp2;
+    end
+endfunction
+)");
+
+    CHECK(session.eval("f(8'h5a)").integer() == 0x2d);
+    NO_SESSION_ERRORS;
+}
+
+TEST_CASE("Void system functions in constant functions") {
+    // Regression test: void-returning system methods (push_back, sort, etc.)
+    // should not cause constant function evaluation to fail.
+    ScriptSession session;
+    session.eval(R"(
+function automatic int foo;
+    int a[$] = '{1, 2};
+    a.push_back(3);
+    return a[$];
+endfunction
+)");
+    CHECK(session.eval("foo()").integer() == 3);
+
+    session.eval(R"(
+function automatic int bar;
+    int a[] = '{3, 1, 2};
+    a.sort;
+    return a[0];
+endfunction
+)");
+    CHECK(session.eval("bar()").integer() == 1);
+
+    session.eval(R"(
+function automatic int baz;
+    int a[$] = '{1, 2, 3};
+    a.delete(0);
+    return a[0];
+endfunction
+)");
+    CHECK(session.eval("baz()").integer() == 2);
+
+    NO_SESSION_ERRORS;
+}
+
+TEST_CASE("Eval scalar bit select") {
+    // Bit-select of a scalar type is nonstandard but permitted as a warning.
+    // Verify constant evaluation returns correct values.
+    ScriptSession session;
+    session.eval("logic p = 1'b1;");
+    CHECK(session.eval("p[0]").integer() == 1);
+
+    session.eval("logic q = 1'bx;");
+    CHECK(session.eval("q[0]").integer().hasUnknown());
+
+    session.eval("bit b = 1'b1;");
+    CHECK(session.eval("b[0]").integer() == 1);
+
+    auto diags = session.getDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::CannotIndexScalar);
+    CHECK(diags[1].code == diag::CannotIndexScalar);
+    CHECK(diags[2].code == diag::CannotIndexScalar);
 }

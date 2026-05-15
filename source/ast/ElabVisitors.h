@@ -8,6 +8,7 @@
 #pragma once
 
 #include "slang/ast/ASTVisitor.h"
+#include "slang/ast/EvalContext.h"
 #include "slang/diagnostics/CompilationDiags.h"
 #include "slang/diagnostics/DeclarationsDiags.h"
 #include "slang/util/TimeTrace.h"
@@ -18,7 +19,7 @@ using namespace syntax;
 
 // This visitor is used to touch every node in the AST to ensure that all lazily
 // evaluated members have been realized and we have recorded every diagnostic.
-struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
+struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor> {
     DiagnosticVisitor(Compilation& compilation, const size_t& numErrors, uint32_t errorLimit) :
         compilation(compilation), numErrors(numErrors), errorLimit(errorLimit) {}
 
@@ -45,17 +46,12 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
                           std::is_same_v<SpecparamSymbol, T>) {
                 symbol.getValue();
             }
-
-            for (auto attr : compilation.getAttributes(symbol))
-                attr->getValue();
         }
 
         if constexpr (requires { symbol.getBody().bad(); }) {
             auto& body = symbol.getBody();
-            if (body.bad())
-                return true;
-
-            body.visit(*this);
+            if (!body.bad())
+                body.visit(*this);
         }
 
         visitDefault(symbol);
@@ -74,6 +70,12 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
         symbol.getPackage();
     }
 
+    void handle(const PackageSymbol& symbol) {
+        if (!handleDefault(symbol))
+            return;
+        symbol.checkExplicitExports();
+    }
+
     void handle(const InterfacePortSymbol& symbol) {
         if (!handleDefault(symbol))
             return;
@@ -87,8 +89,14 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
             // processing and checking.
             if (!symbol.modport.empty()) {
                 auto [_, modport] = symbol.getConnection();
-                if (modport)
-                    modportsWithExports.push_back({&symbol, modport});
+                if (modport) {
+                    for (auto& method : modport->membersOfType<MethodPrototypeSymbol>()) {
+                        if (method.flags.has(MethodFlags::ModportExport)) {
+                            modportsWithExports.push_back({&symbol, modport});
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -147,11 +155,13 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
         if (!handleDefault(symbol))
             return;
 
-        if (auto sub = symbol.getSubroutine())
-            handle(*sub);
-
-        if (symbol.flags.has(MethodFlags::InterfaceExtern))
+        if (symbol.flags.has(MethodFlags::InterfaceExtern)) {
             externIfaceProtos.push_back(&symbol);
+
+            auto scope = symbol.getParentScope();
+            SLANG_ASSERT(scope);
+            compilation.noteCannotCache(*scope);
+        }
     }
 
     void handle(const GenericClassDefSymbol& symbol) {
@@ -260,9 +270,6 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
         if (finishedEarly())
             return;
 
-        for (auto attr : compilation.getAttributes(symbol))
-            attr->getValue();
-
         visit(symbol.body);
 
         if (!finishedEarly()) {
@@ -298,35 +305,29 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
         if (finishedEarly())
             return;
 
-        TimeTraceScope timeScope("AST Instance", [&] {
-            std::string buffer;
-            symbol.getHierarchicalPath(buffer);
-            return buffer;
-        });
-
-        for (auto attr : compilation.getAttributes(symbol))
-            attr->getValue();
-
-        for (auto conn : symbol.getPortConnections()) {
-            conn->getExpression();
-            conn->checkSimulatedNetTypes();
-            for (auto attr : compilation.getAttributes(*conn))
-                attr->getValue();
-        }
-
-        // Detect infinite recursion, which happens if we see this exact
-        // instance body somewhere higher up in the stack.
-        if (!activeInstanceBodies.emplace(&symbol.body).second) {
-            symbol.getParentScope()->addDiag(diag::InfinitelyRecursiveHierarchy, symbol.location)
-                << symbol.name;
-            hierarchyProblem = true;
+        // If we're not visiting instances and this instance came from a bind directive
+        // we don't even want to look at its port connections right now. This is because
+        // we are probably doing a force elaborate due to a wildcard package import and
+        // bind directive connections don't contribute to the set of imported symbols
+        // from wildcard imports, and if we visit connections anyway we can get into a
+        // recursive loop when trying to resolve bind port connections. We will come back
+        // and visit this instance later during the normal elaboration process.
+        if (!visitInstances && symbol.body.flags.has(InstanceFlags::FromBind))
             return;
-        }
+
+        TimeTraceScope timeScope("AST Instance", [&] { return symbol.getHierarchicalPath(); });
+
+        for (auto conn : symbol.getPortConnections())
+            conn->getExpression();
+
+        if (!visitInstances)
+            return;
 
         // In order to avoid "effectively infinite" recursions, where parameter values
         // are changing but the numbers are so huge that we would run for almost forever,
         // check the depth and bail out after a certain configurable point.
         auto guard = ScopeGuard([this, &symbol] { activeInstanceBodies.erase(&symbol.body); });
+        activeInstanceBodies.emplace(&symbol.body);
         if (activeInstanceBodies.size() > compilation.getOptions().maxInstanceDepth) {
             auto& diag = symbol.getParentScope()->addDiag(diag::MaxInstanceDepthExceeded,
                                                           symbol.location);
@@ -336,8 +337,19 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
             return;
         }
 
-        if (visitInstances)
+        // If we have already visited an identical instance body we don't have to do
+        // it again, because all possible diagnostics have already been collected.
+        // Otherwise descend into the body and visit everything.
+        if (!tryApplyFromCache(symbol)) {
             visit(symbol.body);
+        }
+        else if (activeInstanceBodies.contains(symbol.getCanonicalBody())) {
+            // Detect infinite recursion that we missed earlier because of caching.
+            auto name = symbol.name.empty() ? "<unnamed instance>"sv : symbol.name;
+            symbol.getParentScope()->addDiag(diag::InfinitelyRecursiveHierarchy, symbol.location)
+                << name;
+            hierarchyProblem = true;
+        }
     }
 
     void handle(const SubroutineSymbol& symbol) {
@@ -422,9 +434,46 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
 
     void finalize() {
         // Once everything has been visited, go back over and check things that might
-        // have been influenced by visiting later symbols. Unfortunately visiting
-        // a specialization can trigger more specializations to be made for the
-        // same or other generic class, so we need to be careful here when iterating.
+        // have been influenced by visiting later symbols.
+
+        // For all hierarchical assignments, make sure we actually visited their
+        // target instances and didn't skip them due to caching.
+        while (!compilation.hierarchicalAssignments.empty()) {
+            disableCache = true;
+            auto hierarchicalAssignments = std::move(compilation.hierarchicalAssignments);
+            compilation.hierarchicalAssignments.clear();
+
+            for (auto hierRef : hierarchicalAssignments) {
+                // Walk the path and visit all instances we find that were previously cached.
+                for (auto& [sym, _] : hierRef->path) {
+                    if (sym->kind == SymbolKind::Instance) {
+                        // If this instance has a canonical pointer it means we previously
+                        // determined we could cache it, so we need to visit it here.
+                        // Additionally we will unset the canonical pointer so that
+                        // we don't try to cache it again in the future.
+                        auto& inst = sym->as<InstanceSymbol>();
+                        if (inst.getCanonicalBody() != nullptr) {
+                            inst.setCanonicalBody(nullptr);
+                            inst.visit(*this);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check the validity of virtual interface assignments.
+        while (!compilation.virtualIfaceInstances.empty()) {
+            auto vii = std::move(compilation.virtualIfaceInstances);
+            compilation.virtualIfaceInstances.clear();
+
+            for (auto inst : vii) {
+                inst->visit(*this);
+                compilation.checkVirtualIfaceInstance(*inst);
+            }
+        }
+
+        // Visiting a specialization can trigger more specializations to be made for the
+        // same or other generic classes, so we need to be careful here when iterating.
         SmallSet<const Type*, 8> visitedSpecs;
         SmallVector<const Type*> toVisit;
         bool didSomething;
@@ -452,13 +501,116 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
             if (symbol->numSpecializations() == 0)
                 symbol->getInvalidSpecialization().visit(*this);
         }
+
+        // Visit all attributes and force their values to resolve.
+        for (auto& [_, attrList] : compilation.attributeMap) {
+            for (auto attr : attrList)
+                attr->getValue();
+        }
     }
+
+    static bool isWithinInterface(const InstanceSymbol& symbol) {
+        auto scope = symbol.getParentScope();
+        while (scope) {
+            auto container = scope->getContainingInstance();
+            if (!container || !container->parentInstance)
+                return false;
+
+            if (container->parentInstance->isInterface())
+                return true;
+
+            scope = container->parentInstance->getParentScope();
+        }
+        return false;
+    }
+
+    bool tryApplyFromCache(const InstanceSymbol& symbol) {
+        if (disableCache)
+            return false;
+
+        // We can use a cached version of this instance's body if we have already
+        // visited an identical body elsewhere, with some caveats explained below.
+        SLANG_ASSERT(symbol.getCanonicalBody() == nullptr);
+
+        // Instances that are targeted by defparams, bind directives, or configuration rules,
+        // or that are themselves created by a bind directive, cannot participate in caching.
+        if (!InstanceCacheKey::isEligibleForCaching(symbol))
+            return false;
+
+        // "Identical" needs to take into account parameter values and interface ports,
+        // since the types of members and expression can vary based on those. This is
+        // computed in the InstanceCacheKey.
+        //
+        // Interface ports must be connected to instances that themselves follow the
+        // restrictions on defparams, bind directives, and config rules. This is checked
+        // in the InstanceCacheKey constructor and returned in the 'valid' parameter.
+        bool valid = true;
+        SmallSet<const InstanceSymbol*, 2> visitedInstances;
+        InstanceCacheKey key(symbol, valid, visitedInstances);
+        if (!valid)
+            return false;
+
+        auto [it, inserted] = instanceCache.try_emplace(std::move(key), symbol.body);
+        if (inserted)
+            return false;
+
+        // If we haven't resolved the side effects entry yet do that now.
+        // We do this opportunistically here because we know we have a cache hit.
+        auto& entry = it->second;
+        if (!entry.sideEffects) {
+            if (auto sideEffectIt = compilation.instanceSideEffectMap.find(entry.canonicalBody);
+                sideEffectIt != compilation.instanceSideEffectMap.end()) {
+                entry.sideEffects = sideEffectIt->second.get();
+            }
+            else {
+                entry.sideEffects = nullptr;
+            }
+        }
+
+        // If any hierarchical names extend upward out of the instance we won't consider
+        // it for caching, since the names could be different based on the context.
+        // This could be optimized in the future by having another layer of caching based
+        // on what the name resolves to for each instance.
+        auto sideEffects = entry.sideEffects.value();
+        if (sideEffects && (sideEffects->cannotCache || !sideEffects->upwardNames.empty())) {
+            return false;
+        }
+
+        // Assuming we find an appropriately cached instance, we will store a pointer to it
+        // in other instances to facilitate downstream consumers in not needing to recreate
+        // this duplication detection logic again.
+        symbol.setCanonicalBody(entry.canonicalBody);
+
+        // If this is an interface or an instance instantiated within an interface
+        // we want to return false so that we continue visiting the body. This is
+        // because we're very likely going to be connected to a module port and need
+        // all types resolved before we freeze the compilation and move on to the
+        // multithreaded analysis phase.
+        auto defKind = symbol.getDefinition().definitionKind;
+        if (compilation.hasFlag(CompilationFlags::DisableInstanceCaching) ||
+            defKind == DefinitionKind::Interface ||
+            (defKind == DefinitionKind::Program && isWithinInterface(symbol))) {
+            return false;
+        }
+
+        return true;
+    }
+
+    struct InstanceCacheEntry {
+        not_null<const InstanceBodySymbol*> canonicalBody;
+        std::optional<const Compilation::InstanceSideEffects*> sideEffects;
+
+        explicit InstanceCacheEntry(const InstanceBodySymbol& canonicalBody) :
+            canonicalBody(&canonicalBody) {}
+    };
 
     Compilation& compilation;
     const size_t& numErrors;
     uint32_t errorLimit;
     bool visitInstances = true;
+    bool disableCache = false;
     bool hierarchyProblem = false;
+    flat_hash_map<InstanceCacheKey, InstanceCacheEntry> instanceCache;
     flat_hash_set<const InstanceBodySymbol*> activeInstanceBodies;
     flat_hash_set<const DefinitionSymbol*> usedIfacePorts;
     SmallVector<const GenericClassDefSymbol*> genericClasses;
@@ -466,322 +618,6 @@ struct DiagnosticVisitor : public ASTVisitor<DiagnosticVisitor, false, false> {
     SmallVector<const MethodPrototypeSymbol*> externIfaceProtos;
     SmallVector<std::pair<const InterfacePortSymbol*, const ModportSymbol*>> modportsWithExports;
     TimingPathMap timingPathMap;
-};
-
-// This visitor is for finding all defparam directives in the hierarchy.
-// We're given a target generate "level" to reach, where the level is a measure
-// of how deep the design is in terms of nested generate blocks. Once we reach
-// the target level we don't go any deeper, except for the following case:
-//
-// If we find a potentially infinitely recursive module (because it instantiates
-// itself directly or indirectly) we will continue traversing deeper to see if we
-// hit the limit for max depth, which lets us bail out of defparam evaluation completely.
-// Since defparams are disallowed from modifying parameters above them across generate
-// blocks, an infinitely recursive module instantiation can't be stopped by a deeper
-// defparam evaluation.
-//
-// This visitor also implicitly serves to discover bind directives. They are registered
-// with the compilation by Scope::addMembers and then get processed after we finish
-// visiting the tree.
-struct DefParamVisitor : public ASTVisitor<DefParamVisitor, false, false> {
-    DefParamVisitor(size_t maxInstanceDepth, size_t generateLevel) :
-        maxInstanceDepth(maxInstanceDepth), generateLevel(generateLevel) {}
-
-    void handle(const RootSymbol& symbol) { visitDefault(symbol); }
-    void handle(const CompilationUnitSymbol& symbol) { visitDefault(symbol); }
-
-    void handle(const DefParamSymbol& symbol) {
-        if (generateDepth <= generateLevel)
-            found.push_back(&symbol);
-    }
-
-    void handle(const InstanceSymbol& symbol) {
-        if (symbol.body.flags.has(InstanceFlags::Uninstantiated) || hierarchyProblem)
-            return;
-
-        // If we hit max depth we have a problem -- setting the hierarchyProblem
-        // member will cause other functions to early out so that we complete
-        // this visitation as quickly as possible.
-        if (instanceDepth > maxInstanceDepth) {
-            hierarchyProblem = &symbol;
-            return;
-        }
-
-        bool inserted = false;
-        const bool wasInRecursive = inRecursiveInstance;
-        if (!inRecursiveInstance) {
-            // If the instance's definition is already in the active set,
-            // we potentially have an infinitely recursive instantiation and
-            // need to go all the way to the maximum depth to find out.
-            inserted = activeInstances.emplace(&symbol.getDefinition()).second;
-            if (!inserted)
-                inRecursiveInstance = true;
-        }
-
-        // If we're past our target depth because we're searching for a potentially
-        // infinitely recursive instantiation, don't count the block.
-        if (generateDepth <= generateLevel)
-            numBlocksSeen++;
-
-        instanceDepth++;
-        visitDefault(symbol.body);
-        instanceDepth--;
-
-        inRecursiveInstance = wasInRecursive;
-        if (inserted)
-            activeInstances.erase(&symbol.getDefinition());
-    }
-
-    void handle(const GenerateBlockSymbol& symbol) {
-        if (symbol.isUninstantiated || hierarchyProblem)
-            return;
-
-        if (generateDepth >= generateLevel && !inRecursiveInstance)
-            return;
-
-        // We don't count the case where we are *at* the target level
-        // because we're about to descend into the generate block,
-        // so it counts as deeper level.
-        if (generateDepth < generateLevel)
-            numBlocksSeen++;
-
-        generateDepth++;
-        visitDefault(symbol);
-        generateDepth--;
-    }
-
-    void handle(const GenerateBlockArraySymbol& symbol) {
-        for (auto& member : symbol.members()) {
-            if (hierarchyProblem)
-                return;
-            member.visit(*this);
-        }
-    }
-
-    template<typename T>
-    void handle(const T&) {}
-
-    SmallVector<const DefParamSymbol*> found;
-    flat_hash_set<const DefinitionSymbol*> activeInstances;
-    size_t instanceDepth = 0;
-    size_t maxInstanceDepth = 0;
-    size_t generateLevel = 0;
-    size_t numBlocksSeen = 0;
-    size_t generateDepth = 0;
-    bool inRecursiveInstance = false;
-    const InstanceSymbol* hierarchyProblem = nullptr;
-};
-
-// This visitor runs post-elaboration and can be used to find and report on
-// things like unused code elements.
-struct PostElabVisitor : public ASTVisitor<PostElabVisitor, false, false> {
-    explicit PostElabVisitor(Compilation& compilation) : compilation(compilation) {}
-
-    void handle(const NetSymbol& symbol) {
-        if (symbol.isImplicit) {
-            checkValueUnused(symbol, diag::UnusedImplicitNet, diag::UnusedImplicitNet,
-                             diag::UnusedImplicitNet);
-        }
-        else {
-            checkValueUnused(symbol, diag::UnusedNet, diag::UndrivenNet, diag::UnusedButSetNet);
-        }
-    }
-
-    void handle(const MethodPrototypeSymbol&) {
-        // Ignore method prototype arguments, they're not unused.
-    }
-
-    void handle(const SubroutineSymbol& symbol) {
-        if (symbol.flags.has(MethodFlags::Pure | MethodFlags::InterfaceExtern |
-                             MethodFlags::DPIImport | MethodFlags::Randomize)) {
-            return;
-        }
-
-        visitDefault(symbol);
-    }
-
-    void handle(const VariableSymbol& symbol) {
-        if (symbol.flags.has(VariableFlags::CompilerGenerated))
-            return;
-
-        if (symbol.kind == SymbolKind::Variable) {
-            // Class handles and covergroups are considered used if they are
-            // constructed, since construction can have side effects.
-            auto& type = symbol.getType();
-            if (type.isClass() || type.isCovergroup()) {
-                if (auto init = symbol.getDeclaredType()->getInitializer();
-                    init && (init->kind == ExpressionKind::NewClass ||
-                             init->kind == ExpressionKind::NewCovergroup)) {
-                    return;
-                }
-            }
-
-            checkValueUnused(symbol, diag::UnusedVariable, diag::UnassignedVariable,
-                             diag::UnusedButSetVariable);
-        }
-        else if (symbol.kind == SymbolKind::FormalArgument) {
-            auto parent = symbol.getParentScope();
-            SLANG_ASSERT(parent);
-
-            if (parent->asSymbol().kind == SymbolKind::Subroutine) {
-                auto& sub = parent->asSymbol().as<SubroutineSymbol>();
-                if (!sub.isVirtual())
-                    checkValueUnused(symbol, diag::UnusedArgument, std::nullopt, std::nullopt);
-            }
-        }
-    }
-
-    void handle(const ParameterSymbol& symbol) {
-        checkValueUnused(symbol, diag::UnusedParameter, {}, diag::UnusedParameter);
-    }
-
-    void handle(const TypeParameterSymbol& symbol) {
-        checkUnused(symbol, diag::UnusedTypeParameter);
-    }
-
-    void handle(const TypeAliasType& symbol) {
-        auto syntax = symbol.getSyntax();
-        if (!syntax || symbol.name.empty())
-            return;
-
-        {
-            auto [used, _] = compilation.isReferenced(*syntax);
-            if (used)
-                return;
-        }
-
-        // If this is a typedef for an enum declaration, count usage
-        // of any of the enum values as a usage of the typedef itself
-        // (since there's no good way otherwise to introduce enum values
-        // without the typedef).
-        auto& targetType = symbol.targetType.getType();
-        if (targetType.kind == SymbolKind::EnumType) {
-            for (auto& val : targetType.as<EnumType>().values()) {
-                if (auto valSyntax = val.getSyntax()) {
-                    auto [valUsed, _] = compilation.isReferenced(*valSyntax);
-                    if (valUsed)
-                        return;
-                }
-            }
-        }
-
-        addDiag(symbol, diag::UnusedTypedef);
-    }
-
-    void handle(const GenvarSymbol& symbol) { checkUnused(symbol, diag::UnusedGenvar); }
-
-    void handle(const SequenceSymbol& symbol) { checkAssertionDeclUnused(symbol, "sequence"sv); }
-    void handle(const PropertySymbol& symbol) { checkAssertionDeclUnused(symbol, "property"sv); }
-    void handle(const LetDeclSymbol& symbol) { checkAssertionDeclUnused(symbol, "let"sv); }
-    void handle(const CheckerSymbol& symbol) { checkAssertionDeclUnused(symbol, "checker"sv); }
-
-    void handle(const ExplicitImportSymbol& symbol) { checkUnused(symbol, diag::UnusedImport); }
-
-    void handle(const WildcardImportSymbol& symbol) {
-        auto syntax = symbol.getSyntax();
-        if (!syntax)
-            return;
-
-        auto [used, _] = compilation.isReferenced(*syntax);
-        if (!used) {
-            if (shouldWarn(symbol))
-                symbol.getParentScope()->addDiag(diag::UnusedWildcardImport, symbol.location);
-        }
-    }
-
-private:
-    void checkValueUnused(const ValueSymbol& symbol, DiagCode unusedCode,
-                          std::optional<DiagCode> unsetCode, std::optional<DiagCode> unreadCode) {
-        auto syntax = symbol.getSyntax();
-        if (!syntax || symbol.name.empty())
-            return;
-
-        auto [rvalue, lvalue] = compilation.isReferenced(*syntax);
-
-        auto portRef = symbol.getFirstPortBackref();
-        if (portRef) {
-            // This is a variable or net connected internally to a port.
-            // If there is more than one port connection something unusually
-            // complicated is going on so don't try to diagnose warnings.
-            if (portRef->getNextBackreference())
-                return;
-
-            // Otherwise check and warn about the port being unused.
-            switch (portRef->port->direction) {
-                case ArgumentDirection::In:
-                    if (!rvalue)
-                        addDiag(symbol, diag::UnusedPort);
-                    break;
-                case ArgumentDirection::Out:
-                    if (!lvalue)
-                        addDiag(symbol, diag::UndrivenPort);
-                    break;
-                case ArgumentDirection::InOut:
-                    if (!rvalue && !lvalue)
-                        addDiag(symbol, diag::UnusedPort);
-                    else if (!rvalue)
-                        addDiag(symbol, diag::UnusedButSetPort);
-                    else if (!lvalue)
-                        addDiag(symbol, diag::UndrivenPort);
-                    break;
-                case ArgumentDirection::Ref:
-                    if (!rvalue && !lvalue)
-                        addDiag(symbol, diag::UnusedPort);
-                    break;
-            }
-            return;
-        }
-
-        if (!rvalue && !lvalue)
-            addDiag(symbol, unusedCode);
-        else if (!rvalue && unreadCode)
-            addDiag(symbol, *unreadCode);
-        else if (!lvalue && !symbol.getDeclaredType()->getInitializerSyntax() && unsetCode)
-            addDiag(symbol, *unsetCode);
-    }
-
-    void checkUnused(const Symbol& symbol, DiagCode code) {
-        auto syntax = symbol.getSyntax();
-        if (!syntax || symbol.name.empty())
-            return;
-
-        auto [used, _] = compilation.isReferenced(*syntax);
-        if (!used)
-            addDiag(symbol, code);
-    }
-
-    void checkAssertionDeclUnused(const Symbol& symbol, std::string_view kind) {
-        auto syntax = symbol.getSyntax();
-        if (!syntax || symbol.name.empty())
-            return;
-
-        auto [used, _] = compilation.isReferenced(*syntax);
-        if (!used && shouldWarn(symbol)) {
-            symbol.getParentScope()->addDiag(diag::UnusedAssertionDecl, symbol.location)
-                << kind << symbol.name;
-        }
-    }
-
-    bool hasUnusedAttrib(const Symbol& symbol) {
-        for (auto attr : compilation.getAttributes(symbol)) {
-            if (attr->name == "unused"sv || attr->name == "maybe_unused"sv)
-                return attr->getValue().isTrue();
-        }
-        return false;
-    }
-
-    bool shouldWarn(const Symbol& symbol) {
-        auto scope = symbol.getParentScope();
-        return !scope->isUninstantiated() && scope->asSymbol().kind != SymbolKind::Package &&
-               symbol.name != "_"sv && !hasUnusedAttrib(symbol);
-    }
-
-    void addDiag(const Symbol& symbol, DiagCode code) {
-        if (shouldWarn(symbol))
-            symbol.getParentScope()->addDiag(code, symbol.location) << symbol.name;
-    }
-
-    Compilation& compilation;
 };
 
 } // namespace slang::ast

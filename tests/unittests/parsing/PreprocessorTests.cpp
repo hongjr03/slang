@@ -3,10 +3,14 @@
 
 #include "Test.h"
 
+#include "slang/driver/Driver.h"
+#include "slang/parsing/Parser.h"
 #include "slang/parsing/Preprocessor.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/text/SourceManager.h"
+
+using namespace slang::driver;
 
 void trimTrailingWhitespace(std::string& str) {
     size_t off = 0;
@@ -126,8 +130,9 @@ void testDirective(SyntaxKind kind) {
     std::string_view text = LexerFacts::getDirectiveText(kind);
 
     diagnostics.clear();
-    auto buffer = getSourceManager().assignText(text);
-    Lexer lexer(buffer, alloc, diagnostics);
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(text);
+    Lexer lexer(buffer, alloc, diagnostics, sm);
 
     Token token = lexer.lex();
     REQUIRE(token);
@@ -760,7 +765,7 @@ TEST_CASE("Macro arg location bug") {
     CHECK(result == R"(
 source:4:15: error: unknown macro or compiler directive '`bar'
    `FOO(      `bar      )   asdfasdfasdfasdfasdfasdfsadfasdfasdfasdfasdf
-              ^
+              ^~~~
 )");
 }
 
@@ -793,7 +798,8 @@ bar
 )";
     auto& expected = R"(
 asdfllkj
-foobar
+foo
+bar
 )";
 
     std::string result = preprocess(text);
@@ -963,7 +969,7 @@ TEST_CASE("Nested ifdef and macros") {
     `endif
 `FOO
 )";
-    auto& expected = "\n\n\n        asdfasdf\n\n";
+    auto& expected = "\n\n        asdfasdf\n\n";
 
     std::string result = preprocess(text);
     CHECK(result == expected);
@@ -1286,15 +1292,25 @@ TokenKind lexDefaultNetType(std::string_view text) {
 
 TEST_CASE("default_nettype directive") {
     CHECK(lexDefaultNetType("`default_nettype wire") == TokenKind::WireKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype uwire") == TokenKind::UWireKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype wand") == TokenKind::WAndKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype wor") == TokenKind::WOrKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype tri") == TokenKind::TriKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype tri0") == TokenKind::Tri0Keyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype tri1") == TokenKind::Tri1Keyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype triand") == TokenKind::TriAndKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype trior") == TokenKind::TriOrKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype trireg") == TokenKind::TriRegKeyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexDefaultNetType("`default_nettype none") == TokenKind::Unknown);
     CHECK_DIAGNOSTICS_EMPTY;
 
@@ -1317,12 +1333,36 @@ TokenKind lexUnconnectedDrive(std::string_view text) {
 
 TEST_CASE("unconnected_drive directive") {
     CHECK(lexUnconnectedDrive("`unconnected_drive pull0") == TokenKind::Pull0Keyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexUnconnectedDrive("`unconnected_drive pull1") == TokenKind::Pull1Keyword);
+    CHECK_DIAGNOSTICS_EMPTY;
     CHECK(lexUnconnectedDrive("`nounconnected_drive") == TokenKind::Unknown);
     CHECK_DIAGNOSTICS_EMPTY;
 
     CHECK(lexUnconnectedDrive("`unconnected_drive asdf") == TokenKind::Unknown);
     CHECK(!diagnostics.empty());
+}
+
+bool lexCellDefine(std::string_view text) {
+    diagnostics.clear();
+
+    Preprocessor preprocessor(getSourceManager(), alloc, diagnostics);
+    preprocessor.pushSource(text);
+
+    Token token = preprocessor.next();
+    REQUIRE(token);
+    return preprocessor.getCellDefine();
+}
+
+TEST_CASE("celldefine directive") {
+    CHECK(lexCellDefine("`celldefine") == true);
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    CHECK(lexCellDefine("`celldefine\n`endcelldefine") == false);
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    CHECK(lexCellDefine("`endcelldefine") == false);
+    CHECK_DIAGNOSTICS_EMPTY;
 }
 
 TEST_CASE("macro-defined include file") {
@@ -1696,6 +1736,65 @@ module m;
   always_ff @(posedge (clk)) begin
     q <= (rst) ? (0) : (d);
   end
+endmodule
+)");
+
+    auto tree = SyntaxTree::fromText(text);
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Macro concat into block comment -- missing terminator") {
+    auto& text = R"(
+`define FFSR(__q, __d, __reset_value, __clk, __reset_clk) \
+  `ifndef FOOBAR                                          \
+  /``* synopsys sync_set_reset `"__reset_clk`".           \
+    `endif                                                \
+  always_ff @(posedge (__clk)) begin                      \
+    __q <= (__reset_clk) ? (__reset_value) : (__d);       \
+  end
+
+module m;
+  logic q, d, clk, rst;
+  `FFSR(q, d, 0, clk, rst)
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == R"(
+module m;
+  logic q, d, clk, rst;
+
+
+endmodule
+)");
+
+    auto tree = SyntaxTree::fromText(text);
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ExpectedMacroCommentEnd);
+    CHECK(diags[1].code == diag::MissingEndIfDirective);
+}
+
+TEST_CASE("Macro concat into line comment") {
+    auto& text = R"(
+`define M /``/metacomment \
+  /*foo*/ /``/ baz
+`M
+
+module m;
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == R"(
+//metacomment
+  /*foo*/ // baz
+module m;
 endmodule
 )");
 
@@ -2490,6 +2589,51 @@ TEST9
     CHECK_DIAGNOSTICS_EMPTY;
 }
 
+TEST_CASE("Conditional ifdef expression precedence") {
+    auto& text = R"(
+`define A
+`define B
+
+`ifdef (C && A || B)
+PREC1
+`endif
+`ifdef (A || C && B)
+PREC2
+`endif
+`ifdef (A && B || C && B)
+PREC3
+`endif
+)";
+
+    auto& expected = R"(
+PREC1
+PREC2
+PREC3
+)";
+
+    std::string result = preprocess(text, optionsFor(LanguageVersion::v1800_2023));
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Conditional ifdef expression right-associativity") {
+    auto& text = R"(
+`define A
+
+`ifdef (!A -> A -> B)
+RIGHTASSOC1
+`endif
+)";
+
+    auto& expected = R"(
+RIGHTASSOC1
+)";
+
+    std::string result = preprocess(text, optionsFor(LanguageVersion::v1800_2023));
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
 TEST_CASE("Conditional ifdef expression errors") {
     auto& text = R"(
 `define A 0
@@ -2675,10 +2819,829 @@ endmodule
 
     LexerOptions lo;
     lo.enableLegacyProtect = true;
+    lo.commentHandlers["pragma"]["protect"] = {CommentHandler::Protect};
 
     std::string result = preprocess(text, lo);
     CHECK(result == expected);
 
     REQUIRE(diagnostics.size() == 1);
     CHECK(diagnostics[0].code == diag::ProtectedEnvelope);
+}
+
+TEST_CASE("Printing of preprocessed file regress -- GH #1317") {
+    SyntaxTree::getDefaultSourceManager().assignText("inc.v", "`define WIDTH 123\n");
+
+    auto& text = R"(
+`include "inc.v"
+
+`ifdef TEST
+    `define TEST2
+`endif
+
+module b();
+
+reg [`WIDTH-1:0]t;
+
+endmodule
+)";
+
+    auto tree = SyntaxTree::fromFileInMemory(text, SyntaxTree::getDefaultSourceManager());
+
+    auto result = SyntaxPrinter::printFile(*tree);
+    CHECK(result == text);
+}
+
+TEST_CASE("Invalid macro concatenation regress -- GH #1484") {
+    auto& text = R"(
+`define S0 ````n
+module m;
+    int i = `S0;
+endmodule
+)";
+
+    auto& expected = R"(
+module m;
+    int i = n;
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::IgnoredMacroPaste);
+}
+
+TEST_CASE("Macro arg implicit concat after expansion") {
+    auto& text = R"(
+`define M1 t
+`define M2(ARG) foo`__LINE__ = 1; for`M1``ARG = 2;
+
+module m;
+    int foo9;
+    int fort4K;
+    initial begin
+        `M2(4K)
+    end
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == R"(
+module m;
+    int foo9;
+    int fort4K;
+    initial begin
+        foo9 = 1; fort4K = 2;
+    end
+endmodule
+)");
+
+    auto tree = SyntaxTree::fromText(text);
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Pragma number parsing regression 1") {
+    auto& text = R"(
+`pragma D's 11111111111111111110's 1.`pragma I's
+)";
+
+    // Just checking no crash.
+    preprocess(text);
+}
+
+TEST_CASE("Pragma number parsing regression 2") {
+    auto& text = R"(
+`pragma D .`p
+)";
+
+    // Just checking no crash.
+    preprocess(text);
+}
+
+TEST_CASE("Intrinsic macro tokens are marked as macro locations") {
+    diagnostics.clear();
+
+    std::string_view text = R"(
+module directives();
+    initial $display("At %s @ %d\n", `__FILE__, `__LINE__);
+endmodule
+)";
+
+    auto& sm = getSourceManager();
+    Preprocessor preprocessor(sm, alloc, diagnostics);
+    preprocessor.pushSource(text, "test.sv");
+
+    bool sawFile = false;
+    bool sawLine = false;
+
+    while (true) {
+        Token token = preprocessor.next();
+        if (token.kind == TokenKind::EndOfFile)
+            break;
+
+        SourceLocation loc = token.location();
+
+        // Check that the expanded tokens __FILE__ and __LINE__ are marked as macro locations
+        if (token.kind == TokenKind::StringLiteral) {
+            std::string_view val = token.valueText();
+            if (val == "test.sv") {
+                CHECK(sm.isMacroLoc(loc));               // token from macro expansion
+                CHECK(sm.getFileName(loc) == "test.sv"); // the source file name is correct
+                sawFile = true;
+            }
+        }
+        else if (token.kind == TokenKind::IntegerLiteral) {
+            std::string_view val = token.valueText();
+            if (val == "3") {
+                CHECK(sm.isMacroLoc(loc));
+                CHECK(sm.getFileName(loc) == "test.sv");
+                sawLine = true;
+            }
+        }
+    }
+
+    CHECK(sawFile);
+    CHECK(sawLine);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Preprocessor: Include files expanded from within a macro") {
+    getSourceManager().assignText("inc.svh", "parameter int WIDTH = 8");
+
+    auto& text = R"(
+module m #(`include "inc.svh",
+           parameter int INDEX = 0) ();
+endmodule
+
+`define FOO \
+module n #(`include "inc.svh", \
+           parameter int INDEX = 0) (); \
+endmodule
+`FOO
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == R"(
+module m #(parameter int WIDTH = 8,
+           parameter int INDEX = 0) ();
+endmodule
+module n #(parameter int WIDTH = 8,
+           parameter int INDEX = 0) ();
+endmodule
+)");
+
+    auto tree = SyntaxTree::fromText(text, getSourceManager());
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Preprocessor: Include inside macro with nested include in included file") {
+    // Regression test: when a macro body contains `include "X", and X itself
+    // contains another `include "Y", the paused macro expansion must not resume
+    // until X is fully processed - not when Y (a nested include inside X) finishes.
+    getSourceManager().assignText("macro_nested_body.svh", R"(
+`ifndef _macro_nested_body_svh
+`define _macro_nested_body_svh
+
+`endif
+)");
+
+    getSourceManager().assignText("macro_nested_pkg.sv", R"(
+`ifndef _macro_nested_pkg_sv
+`define _macro_nested_pkg_sv
+
+package pkg;
+    timeunit 1ps; timeprecision 1ps;
+    class c;
+        virtual function void f1();
+            `include "macro_nested_body.svh"
+        endfunction
+    endclass
+endpackage
+
+`endif
+)");
+
+    getSourceManager().assignText("macro_nested_defines.svh", R"(
+`ifndef _macro_nested_defines_svh
+`define _macro_nested_defines_svh
+
+`define TEST_HEADER(TEST_NAME) \
+`include "macro_nested_pkg.sv" \
+module TEST_NAME; \
+timeunit 1ps; timeprecision 1ps; \
+    class mytest;
+
+`endif
+)");
+
+    auto& text = R"(
+`include "macro_nested_defines.svh"
+`TEST_HEADER(mytest)
+        virtual task test_body();
+        endtask
+    endclass
+endmodule
+)";
+
+    auto& expected = R"(
+package pkg;
+    timeunit 1ps; timeprecision 1ps;
+    class c;
+        virtual function void f1();
+
+        endfunction
+    endclass
+endpackage
+
+module mytest;
+timeunit 1ps; timeprecision 1ps;
+    class mytest;
+        virtual task test_body();
+        endtask
+    endclass
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    result.erase(std::remove(result.begin(), result.end(), '\r'), result.end());
+    CHECK(result == expected);
+
+    // The design should also compile cleanly.
+    auto tree = SyntaxTree::fromText(text, getSourceManager());
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Preprocessor: non-trivial restore of begin_keywords vs mapped option") {
+    getSourceManager().assignText("inc2.svh", R"(
+config cfg;
+    design m;
+endconfig
+
+`include "inc3.foo"
+)");
+
+    getSourceManager().assignText("inc3.foo", R"(
+config cfg;
+    design m;
+endconfig
+)");
+
+    PreprocessorOptions options;
+    options.keywordMapping.push_back({"*.svh", KeywordVersion::v1800_2023});
+
+    diagnostics.clear();
+    Preprocessor preprocessor(getSourceManager(), alloc, diagnostics, options);
+    preprocessor.pushSource(R"(
+`begin_keywords "1364-2001-noconfig"
+`include "inc2.svh"
+`end_keywords
+)");
+
+    Parser parser(preprocessor);
+    parser.parseCompilationUnit();
+
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::ExpectedDeclarator);
+}
+
+TEST_CASE("Comments before endifs should be elided") {
+    auto& text = R"(
+module my_mod #(
+        parameter int PARAM_A = 1 //! One comment
+        `ifdef MYDEF
+        ,
+        parameter int PARAM_B = 1 //! Another comment
+        `endif
+)();
+endmodule
+)";
+
+    auto& expected = R"(
+module my_mod #(
+        parameter int PARAM_A = 1 //! One comment
+
+)();
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Macro missing arg with stringification crash regress") {
+    auto& text = R"(
+`define A(a, b) $error(`"\"a\"`");
+`define B(a, b) a + b
+
+module m;
+    localparam int x = `B(a,
+    `A(a, b)
+endmodule
+)";
+
+    preprocess(text);
+}
+
+TEST_CASE("Macro concat regress -- GH #1651") {
+    auto& text = R"(
+`define FOO(a) a``30.value
+
+module m;
+    struct { int value; } a30;
+    int i;
+    assign i = `FOO(a);
+endmodule
+)";
+
+    Compilation compilation;
+    compilation.addSyntaxTree(SyntaxTree::fromText(text));
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Macro stringify escapes are processed correctly") {
+    auto& text = R"(
+`define A(a) $error(`"`\`"a`\`"`")
+`define B(a) $error(`"\"a\"`")
+`A(foo);
+`B(foo);
+)";
+
+    auto& expected = R"(
+$error("\"foo\"");
+$error("\"a\"");
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+
+    auto tree = SyntaxTree::fromText(text);
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ErrorTask);
+    CHECK(diags[1].code == diag::ErrorTask);
+}
+
+TEST_CASE("Macro with nested ifdef regress -- GH #1677") {
+    auto& text = R"(
+`define A(define, block) \
+    `ifndef define       \
+        block            \
+    `endif
+
+`define B(define, dst, src) \
+    `A(define, dst = src;)
+
+`define C(name, def) \
+    `define name``_SET(dst, src)  `B(def, dst, src)
+
+`C(P,Q)
+
+module m;
+    initial begin
+        `P_SET(a, b)
+    end
+endmodule
+)";
+
+    auto& expected = R"(
+
+module m;
+    initial begin
+
+
+
+        a = b;
+
+    end
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Nested macro with multiline arg") {
+    auto& text = R"(
+`define MACRO_PARENT(code) \
+  `define MACRO_FOOBAR 1 \
+  code
+
+`define MACRO_CHILD reg r;
+
+module top;
+`MACRO_PARENT(
+  logic foobar;
+  `MACRO_CHILD
+);
+endmodule
+)";
+
+    auto& expected = R"(
+module top;
+
+  logic foobar;
+  reg r;;
+endmodule
+)";
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- matching macro names (no warning)") {
+    auto& text = R"(
+`ifndef MY_HEADER_H
+`define MY_HEADER_H
+
+module m;
+endmodule
+
+`endif
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- mismatched macro names") {
+    auto& text = R"(
+`ifndef MY_HEADER_H
+`define MY_OTHER_HEADER_H
+
+module m;
+endmodule
+
+`endif
+)";
+    preprocess(text);
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::HeaderGuardMismatch);
+}
+
+TEST_CASE("Header guard -- mismatched in included file") {
+    getSourceManager().assignText("hdr.svh", "`ifndef HDR_SVH\n"
+                                             "`define HDR_SVH_TYPO\n"
+                                             "`endif\n");
+    auto& text = R"(`include "hdr.svh")";
+    preprocess(text);
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::HeaderGuardMismatch);
+}
+
+TEST_CASE("Header guard -- ifdef does not trigger check") {
+    // `ifdef (not `ifndef) should not activate the header guard check.
+    auto& text = R"(
+`ifdef MY_HEADER_H
+`define MY_OTHER_HEADER_H
+`endif
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- inner ifndef mismatch does not warn") {
+    // Only the outermost `ifndef is checked. Inner mismatches are not reported.
+    auto& text = R"(
+`ifndef OUTER_H
+`define OUTER_H
+
+`ifndef INNER_H
+`define INNER_WRONG_H
+`endif
+
+`endif
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- outer mismatch with nested content warns") {
+    auto& text = R"(
+`ifndef OUTER_H
+`define OUTER_WRONG_H
+
+`ifndef INNER_H
+`define INNER_H
+`endif
+
+`endif
+)";
+    preprocess(text);
+    REQUIRE(diagnostics.size() == 1);
+    CHECK(diagnostics[0].code == diag::HeaderGuardMismatch);
+}
+
+TEST_CASE("Header guard -- other directive between ifndef and define cancels") {
+    auto& text = R"(
+`ifndef FOO_H
+`timescale 1ns/1ps
+`define BAR_H
+`endif
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- real token before ifndef cancels") {
+    auto& text = R"(
+module m; endmodule
+`ifndef FOO_H
+`define BAR_H
+`endif
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- trailing content after endif cancels") {
+    auto& text = R"(
+`ifndef FOO_H
+`define BAR_H
+`endif
+module m; endmodule
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- directive after endif cancels") {
+    auto& text = R"(
+`ifndef FOO_H
+`define BAR_H
+`endif
+`timescale 1ns/1ps
+)";
+    preprocess(text);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Header guard -- undef guard macro allows re-include") {
+    // After `undef-ing the header guard macro the file should be re-included
+    // on the next `include, and macros defined inside it should be visible again.
+    getSourceManager().assignText("defines.svh", "`ifndef _DEFINES_H\n"
+                                                 "`define _DEFINES_H\n"
+                                                 "`define FOOBAR 1\n"
+                                                 "`endif\n");
+    auto& text = R"(
+`include "defines.svh"
+`undef FOOBAR
+`undef _DEFINES_H
+`include "defines.svh"
+`FOOBAR
+)";
+    auto& expected = R"(
+1
+)";
+
+    std::string result = preprocess(text);
+    result.erase(std::remove(result.begin(), result.end(), '\r'), result.end());
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("Macro with trailing space after line continuation") {
+    // We concatenate 2 raw strings to avoid the C++ compiler warning about trailing space
+    std::string text1 = R"(
+module top;
+`define TOP_MACRO \
+  bit a, b;\ )";
+    std::string text2 = R"(
+  initial begin\
+     a = b + 1;\
+     $finish;\
+  end
+`TOP_MACRO
+endmodule
+)";
+
+    auto& expected = R"(
+module top;
+  bit a, b;
+  initial begin
+     a = b + 1;
+     $finish;
+  end
+endmodule
+)";
+
+    LexerOptions lo;
+    lo.allowMacroTrailingSpace = true;
+
+    CHECK(text1[text1.size() - 2] == '\\');
+    CHECK(text1[text1.size() - 1] == ' ');
+    std::string result = preprocess(text1 + text2, lo);
+    CHECK(result == expected);
+    CHECK_DIAGNOSTICS_EMPTY;
+}
+
+TEST_CASE("allowMissingProtectedScopeEnd - module") {
+    // Include file where the module's endmodule is inside a protected region.
+    SyntaxTree::getDefaultSourceManager().assignText(
+        "missing_endmodule.sv", "module m;\n"
+                                "`pragma protect begin_protected\n"
+                                "`pragma protect encoding=(enctype=\"raw\"), data_block\n"
+                                "encrypted_payload_containing_endmodule\n"
+                                "`pragma protect end_protected\n");
+
+    PreprocessorOptions ppOpts;
+    ppOpts.allowMissingProtectedScopeEnd = true;
+    Bag options;
+    options.set(ppOpts);
+
+    auto tree = SyntaxTree::fromText("`include \"missing_endmodule.sv\"", options);
+    auto errors = filterWarnings(tree->diagnostics());
+    CHECK(errors.empty());
+    CHECK(std::any_of(tree->diagnostics().begin(), tree->diagnostics().end(),
+                      [](auto& d) { return d.code == diag::ProtectedEnvelope; }));
+}
+
+TEST_CASE("allowMissingProtectedScopeEnd - class") {
+    // Include file where the class's endclass is inside a protected region.
+    SyntaxTree::getDefaultSourceManager().assignText(
+        "missing_endclass.sv", "class c;\n"
+                               "`pragma protect begin_protected\n"
+                               "`pragma protect encoding=(enctype=\"raw\"), data_block\n"
+                               "encrypted_payload_containing_endclass\n"
+                               "`pragma protect end_protected\n");
+
+    PreprocessorOptions ppOpts;
+    ppOpts.allowMissingProtectedScopeEnd = true;
+    Bag options;
+    options.set(ppOpts);
+
+    auto tree = SyntaxTree::fromText("`include \"missing_endclass.sv\"", options);
+    auto errors = filterWarnings(tree->diagnostics());
+    CHECK(errors.empty());
+    CHECK(std::any_of(tree->diagnostics().begin(), tree->diagnostics().end(),
+                      [](auto& d) { return d.code == diag::ProtectedEnvelope; }));
+}
+
+TEST_CASE("allowMissingProtectedScopeEnd - without option, error is reported") {
+    // Without the option, the missing endmodule should produce a parse error.
+    SyntaxTree::getDefaultSourceManager().assignText(
+        "missing_endmodule_no_opt.sv", "module m;\n"
+                                       "`pragma protect begin_protected\n"
+                                       "`pragma protect encoding=(enctype=\"raw\"), data_block\n"
+                                       "encrypted_payload_containing_endmodule\n"
+                                       "`pragma protect end_protected\n");
+
+    auto tree = SyntaxTree::fromText("`include \"missing_endmodule_no_opt.sv\"");
+    auto errors = filterWarnings(tree->diagnostics());
+    CHECK(!errors.empty());
+}
+
+TEST_CASE("allowMissingProtectedScopeEnd - no false fabrication when scope is in parent") {
+    // The module is opened in the parent source; a child include has protected code
+    // but the real endmodule is in the parent. The option must NOT fabricate an extra
+    // endmodule when the child exits (expectedEndKindBuffer != child buffer).
+    SyntaxTree::getDefaultSourceManager().assignText(
+        "protected_child.sv", "`pragma protect begin_protected\n"
+                              "`pragma protect encoding=(enctype=\"raw\"), data_block\n"
+                              "encrypted_payload_no_scope\n"
+                              "`pragma protect end_protected\n");
+
+    PreprocessorOptions ppOpts;
+    ppOpts.allowMissingProtectedScopeEnd = true;
+    Bag options;
+    options.set(ppOpts);
+
+    auto tree = SyntaxTree::fromText("module m;\n"
+                                     "`include \"protected_child.sv\"\n"
+                                     "endmodule\n",
+                                     options);
+    auto errors = filterWarnings(tree->diagnostics());
+    CHECK(errors.empty());
+    CHECK(std::any_of(tree->diagnostics().begin(), tree->diagnostics().end(),
+                      [](auto& d) { return d.code == diag::ProtectedEnvelope; }));
+}
+
+TEST_CASE("Nested token paste in parameterized macro GH #1782") {
+    // Token paste forming a macro invocation should be expanded before
+    // being passed as an argument to an inner macro. Without the fix,
+    // `PARAM_NAME_``_sum_var with _sum_var=sum would form `PARAM_NAME_sum
+    // but fail to expand it, then paste _INT/_FRAC onto it in an inner macro
+    // producing `PARAM_NAME_sum_INT which is not a defined macro.
+    auto& text = R"(
+`define DEF(d,v) \
+  `ifndef d \
+    `define d v \
+  `endif
+
+`define INT(_param, _int)     int _param``_INT = _int
+`define FRAC(_param, _frac=0) int _param``_FRAC = _frac
+
+`define FIXED_LOCALPARAM(_param, _int, _frac=0) \
+  localparam `INT(_param, _int); \
+  localparam `FRAC(_param, _frac)
+
+`define FIXED_WIDTH(_param) ((_param``_INT) + (_param``_FRAC))
+
+`define FIXED_VAR(_param, _var) \
+  `DEF(PARAM_NAME_``_var, _param) \
+  logic signed [`FIXED_WIDTH(_param)-1:0] _var
+
+`define INST(_mod, _inst, _suffix) ._mod``_suffix(_inst``_suffix)
+
+`define FIXED_PARAM_INST(_mod, _inst) \
+  `INST(_mod, _inst, _INT), \
+  `INST(_mod, _inst, _FRAC)
+
+`define ADD_PARAM_INST(_sum_param, _a_param) \
+  `FIXED_PARAM_INST(SUM, _sum_param), \
+  `FIXED_PARAM_INST(DIN, _a_param)
+
+`define ADD1(_sum_var, _a_var) \
+  fixed_add1 #(`ADD_PARAM_INST(`PARAM_NAME_``_sum_var, `PARAM_NAME_``_a_var)) \
+  u_add_``_sum_var ( \
+    .sum(_sum_var), \
+    .din(_a_var) \
+  )
+
+module fixed_add1 #(
+  parameter int SUM_INT = 5,
+  parameter int SUM_FRAC = 7,
+  parameter int DIN_INT = 4,
+  parameter int DIN_FRAC = 7
+) (
+  output logic signed [SUM_INT+SUM_FRAC-1:0] sum,
+  input  logic signed [DIN_INT+DIN_FRAC-1:0] din
+);
+endmodule
+
+module using_add;
+  `FIXED_LOCALPARAM(DATA, 4, 7);
+  `FIXED_LOCALPARAM(SUM, 5, 7);
+
+  `FIXED_VAR(DATA, a);
+  `FIXED_VAR(SUM, sum);
+
+  `ADD1(sum, a);
+endmodule
+)";
+
+    auto& expected = R"(
+module fixed_add1 #(
+  parameter int SUM_INT = 5,
+  parameter int SUM_FRAC = 7,
+  parameter int DIN_INT = 4,
+  parameter int DIN_FRAC = 7
+) (
+  output logic signed [SUM_INT+SUM_FRAC-1:0] sum,
+  input  logic signed [DIN_INT+DIN_FRAC-1:0] din
+);
+endmodule
+module using_add;
+
+  localparam int DATA_INT = 4;
+  localparam int DATA_FRAC = 7;
+
+  localparam int SUM_INT = 5;
+  localparam int SUM_FRAC = 7;
+
+
+
+
+
+  logic signed [((DATA_INT) + (DATA_FRAC))-1:0] a;
+
+
+
+
+
+  logic signed [((SUM_INT) + (SUM_FRAC))-1:0] sum;
+
+  fixed_add1 #(
+
+  .SUM_INT(SUM_INT),
+  .SUM_FRAC(SUM_FRAC),
+
+  .DIN_INT(DATA_INT),
+  .DIN_FRAC(DATA_FRAC))
+  u_add_sum (
+    .sum(sum),
+    .din(a)
+  );
+endmodule
+)";
+
+    auto tree = SyntaxTree::fromText(text);
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    std::string result = preprocess(text);
+    CHECK(result == expected);
 }

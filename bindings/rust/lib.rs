@@ -209,7 +209,7 @@ impl fmt::Display for Bit {
 }
 
 impl SourceLocation {
-    const NO_LOCATION: usize = (1usize << 36) - 1;
+    const NO_LOCATION: usize = ((1u64 << 36) - 1) as usize;
 
     #[inline]
     pub fn from_unique_ptr(_ptr: UniquePtr<ffi::SourceLocation>) -> Option<Self> {

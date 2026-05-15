@@ -137,6 +137,11 @@ public:
     /// The type of symbol.
     SymbolKind kind;
 
+private:
+    // This is here to avoid extra padding.
+    mutable SymbolIndex indexInScope{0};
+
+public:
     /// The name of the symbol; if the symbol does not have a name,
     /// this will be an empty string.
     std::string_view name;
@@ -171,13 +176,16 @@ public:
     /// If the symbol has a declared type, returns a pointer to it. Otherwise returns nullptr.
     const DeclaredType* getDeclaredType() const;
 
+    /// Gets the symbol's hierarchical path.
+    std::string getHierarchicalPath() const;
+
     /// Gets the symbol's hierarchical path by walking up to the root node and appending
-    /// each parent's name.
-    void getHierarchicalPath(std::string& buffer) const;
+    /// each parent's name to the provided buffer.
+    void appendHierarchicalPath(std::string& buffer) const;
 
     /// Gets the symbol's lexical path by walking up to the compilation unit and appending
-    /// each parent's name.
-    void getLexicalPath(std::string& buffer) const;
+    /// each parent's name to the provided buffer.
+    std::string getLexicalPath() const;
 
     /// Determines whether this symbol is considered to be declared before the
     /// given symbol, in the same compilation unit. If it is, this method returns true.
@@ -295,7 +303,6 @@ private:
     // determine ordering during lookups) will be set here.
     mutable const Scope* parentScope = nullptr;
     mutable const Symbol* nextInScope = nullptr;
-    mutable SymbolIndex indexInScope{0};
 
     const syntax::SyntaxNode* originatingSyntax = nullptr;
 };

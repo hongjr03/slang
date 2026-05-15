@@ -54,14 +54,20 @@ const Statement& SubroutineSymbol::getBody() const {
 
             stmt = &Statement::bindItems(syntax->as<FunctionDeclarationSyntax>().items, context,
                                          stmtCtx);
+
+            // If statement creation fails we may leave some blocks behind; clear them out
+            // so that we don't get spurious asserts about it.
+            if (stmt->bad())
+                stmtCtx.blocks = {};
         }
     }
     return *stmt;
 }
 
-SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
-                                               const FunctionDeclarationSyntax& syntax,
-                                               const Scope& parent, bool outOfBlock) {
+std::pair<SubroutineSymbol*, bool> SubroutineSymbol::fromSyntax(
+    Compilation& compilation, const FunctionDeclarationSyntax& syntax, const Scope& parent,
+    bool outOfBlock) {
+
     // If this subroutine has a scoped name, it should be an out of block declaration.
     // We shouldn't create a symbol now, since we need the class prototype to hook
     // us in to the correct scope. Register this syntax with the compilation so that
@@ -74,6 +80,7 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
         if (auto last = parent.getLastMember())
             index = (uint32_t)last->getIndex() + 1;
 
+        bool isExternIfaceMethod = false;
         auto& scopedName = proto->name->as<ScopedNameSyntax>();
         if (scopedName.separator.kind == TokenKind::DoubleColon) {
             // This is an out-of-block class method implementation.
@@ -84,14 +91,15 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
             // We should create the method like normal but not add it to
             // the parent name map (because it can only be looked up via
             // the interface instance).
-            auto result = SubroutineSymbol::fromSyntax(compilation, syntax, parent,
-                                                       /* outOfBlock */ true);
+            auto [result, _] = SubroutineSymbol::fromSyntax(compilation, syntax, parent,
+                                                            /* outOfBlock */ true);
             SLANG_ASSERT(result);
 
             result->setParent(parent, SymbolIndex(index));
             compilation.addExternInterfaceMethod(*result);
+            isExternIfaceMethod = true;
         }
-        return nullptr;
+        return {nullptr, isExternIfaceMethod};
     }
 
     Token nameToken = proto->name->getLastToken();
@@ -128,7 +136,7 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
     result->setSyntax(syntax);
     result->setAttributes(parent, syntax.attributes);
 
-    SmallVector<const FormalArgumentSymbol*> arguments;
+    SmallVector<FormalArgumentSymbol*> arguments;
     if (proto->portList)
         result->flags |= buildArguments(*result, parent, *proto->portList, *lifetime, arguments);
 
@@ -136,11 +144,12 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
         result->flags |= MethodFlags::Constructor;
         result->declaredReturnType.setType(compilation.getVoidType());
     }
-    else if (subroutineKind == SubroutineKind::Function) {
+    else if (subroutineKind == SubroutineKind::Function &&
+             proto->returnType->kind != SyntaxKind::VoidType) {
         // The function gets an implicit variable inserted that represents the return value.
         auto implicitReturnVar = compilation.emplace<VariableSymbol>(result->name, result->location,
                                                                      VariableLifetime::Automatic);
-        implicitReturnVar->setDeclaredType(*proto->returnType);
+        implicitReturnVar->getDeclaredType()->setLink(result->declaredReturnType);
         implicitReturnVar->flags |= VariableFlags::CompilerGenerated;
         result->addMember(*implicitReturnVar);
         result->returnValVar = implicitReturnVar;
@@ -170,8 +179,9 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
                 portListError = true;
             }
 
+            // const_cast is ok because we immediately put the const back on down below.
             auto& arg = last->as<FormalArgumentSymbol>();
-            arguments.push_back(&arg);
+            arguments.push_back(const_cast<FormalArgumentSymbol*>(&arg));
 
             if (lifetime == VariableLifetime::Static && arg.direction == ArgumentDirection::Ref)
                 parent.addDiag(diag::RefArgAutomaticFunc, last->location);
@@ -180,7 +190,7 @@ SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
     }
 
     result->arguments = arguments.copy(compilation);
-    return result;
+    return {result, false};
 }
 
 static std::pair<bitmask<MethodFlags>, Visibility> getMethodFlags(
@@ -239,7 +249,7 @@ static std::pair<bitmask<MethodFlags>, Visibility> getMethodFlags(
 SubroutineSymbol* SubroutineSymbol::fromSyntax(Compilation& compilation,
                                                const ClassMethodDeclarationSyntax& syntax,
                                                const Scope& parent) {
-    auto result = fromSyntax(compilation, *syntax.declaration, parent, /* outOfBlock */ false);
+    auto [result, _] = fromSyntax(compilation, *syntax.declaration, parent, /* outOfBlock */ false);
     if (!result)
         return nullptr;
 
@@ -292,7 +302,7 @@ SubroutineSymbol& SubroutineSymbol::fromSyntax(Compilation& compilation,
     if (syntax.specString.valueText() == "DPI")
         parent.addDiag(diag::DPISpecDisallowed, syntax.specString.range());
 
-    SmallVector<const FormalArgumentSymbol*> arguments;
+    SmallVector<FormalArgumentSymbol*> arguments;
     if (proto.portList) {
         result->flags |= SubroutineSymbol::buildArguments(*result, parent, *proto.portList,
                                                           VariableLifetime::Automatic, arguments);
@@ -301,8 +311,7 @@ SubroutineSymbol& SubroutineSymbol::fromSyntax(Compilation& compilation,
     // Check arguments for extra rules imposed by DPI imports.
     bool pureError = false;
     for (auto arg : arguments) {
-        const_cast<FormalArgumentSymbol*>(arg)->getDeclaredType()->addFlags(
-            DeclaredTypeFlags::DPIArg);
+        arg->getDeclaredType()->addFlags(DeclaredTypeFlags::DPIArg);
 
         if (arg->direction == ArgumentDirection::Ref)
             parent.addDiag(diag::DPIRefArg, arg->location);
@@ -325,7 +334,7 @@ SubroutineSymbol& SubroutineSymbol::createOutOfBlock(Compilation& compilation,
                                                      const Scope& parent,
                                                      const Scope& definitionScope,
                                                      SymbolIndex outOfBlockIndex) {
-    auto result = fromSyntax(compilation, syntax, parent, /* outOfBlock */ true);
+    auto [result, _] = fromSyntax(compilation, syntax, parent, /* outOfBlock */ true);
     SLANG_ASSERT(result);
 
     // Set the parent pointer of the new subroutine so that lookups work correctly.
@@ -460,6 +469,10 @@ SubroutineSymbol& SubroutineSymbol::createFromPrototype(Compilation& compilation
     result->flags = prototype.flags;
     result->arguments = cloneArguments(compilation, *result, prototype.getArguments());
     result->prototype = &prototype;
+
+    if (auto s = prototype.getSyntax())
+        result->setSyntax(*s);
+
     return *result;
 }
 
@@ -571,9 +584,8 @@ void SubroutineSymbol::checkVirtualMethodMatch(const Scope& scope,
                     return "protected"sv;
                 case Visibility::Public:
                     return "public"sv;
-                default:
-                    return ""sv;
             }
+            return ""sv;
         };
 
         auto& diag = scope.addDiag(diag::VirtualVisibilityMismatch, derivedMethod.location);
@@ -628,10 +640,9 @@ struct LocalVarCheckVisitor {
     }
 };
 
-void SubroutineSymbol::inheritDefaultedArgList(
-    Scope& scope, const Scope& parentScope, const SyntaxNode& syntax,
-    SmallVectorBase<const FormalArgumentSymbol*>& arguments) {
-
+void SubroutineSymbol::inheritDefaultedArgList(Scope& scope, const Scope& parentScope,
+                                               const SyntaxNode& syntax,
+                                               SmallVectorBase<FormalArgumentSymbol*>& arguments) {
     auto& comp = scope.getCompilation();
     if (parentScope.asSymbol().kind == SymbolKind::ClassType) {
         auto& ct = parentScope.asSymbol().as<ClassType>();
@@ -669,7 +680,7 @@ void SubroutineSymbol::inheritDefaultedArgList(
 
 bitmask<MethodFlags> SubroutineSymbol::buildArguments(
     Scope& scope, const Scope& parentScope, const FunctionPortListSyntax& syntax,
-    VariableLifetime defaultLifetime, SmallVectorBase<const FormalArgumentSymbol*>& arguments) {
+    VariableLifetime defaultLifetime, SmallVectorBase<FormalArgumentSymbol*>& arguments) {
 
     auto& comp = scope.getCompilation();
     const DataTypeSyntax* lastType = nullptr;
@@ -679,8 +690,8 @@ bitmask<MethodFlags> SubroutineSymbol::buildArguments(
     bitmask<MethodFlags> resultFlags;
 
     for (auto portBase : syntax.ports) {
-        if (portBase->previewNode)
-            scope.addMembers(*portBase->previewNode);
+        if (auto preview = portBase->previewNode())
+            scope.addMembers(*preview);
 
         if (portBase->kind == SyntaxKind::DefaultFunctionPort) {
             lastDirection = ArgumentDirection::In;
@@ -849,7 +860,7 @@ void SubroutineSymbol::connectExternInterfacePrototype() const {
 
     if (!proto->flags.has(MethodFlags::ForkJoin) && proto->getFirstExternImpl() != nullptr) {
         auto& diag = scope->addDiag(diag::DupInterfaceExternMethod, location);
-        diag << (subroutineKind == SubroutineKind::Function ? "function"sv : "task"sv);
+        diag << SemanticFacts::getSubroutineKindStr(subroutineKind);
         diag << ifaceName << name;
         diag.addNote(diag::NotePreviousDefinition, proto->getFirstExternImpl()->impl->location);
     }
@@ -971,7 +982,7 @@ MethodPrototypeSymbol& MethodPrototypeSymbol::fromSyntax(const Scope& scope,
         }
     }
 
-    SmallVector<const FormalArgumentSymbol*> arguments;
+    SmallVector<FormalArgumentSymbol*> arguments;
     if (proto.portList) {
         result->flags |= SubroutineSymbol::buildArguments(*result, scope, *proto.portList,
                                                           VariableLifetime::Automatic, arguments);
@@ -1042,7 +1053,7 @@ MethodPrototypeSymbol& MethodPrototypeSymbol::fromSyntax(const Scope& scope,
     else
         result.declaredReturnType.setType(comp.getVoidType());
 
-    SmallVector<const FormalArgumentSymbol*> arguments;
+    SmallVector<FormalArgumentSymbol*> arguments;
     if (proto.portList) {
         result.flags |= SubroutineSymbol::buildArguments(result, scope, *proto.portList,
                                                          VariableLifetime::Automatic, arguments);
@@ -1088,7 +1099,7 @@ MethodPrototypeSymbol& MethodPrototypeSymbol::createExternIfaceMethod(const Scop
     else
         result->declaredReturnType.setType(comp.getVoidType());
 
-    SmallVector<const FormalArgumentSymbol*> arguments;
+    SmallVector<FormalArgumentSymbol*> arguments;
     if (proto.portList) {
         result->flags |= SubroutineSymbol::buildArguments(*result, scope, *proto.portList,
                                                           VariableLifetime::Automatic, arguments);
@@ -1169,7 +1180,7 @@ const SubroutineSymbol* MethodPrototypeSymbol::getSubroutine() const {
 
     // Otherwise, there must be a body for any declared prototype.
     if (!syntax) {
-        outerScope.addDiag(diag::NoMemberImplFound, location) << name;
+        outerScope.addDiag(diag::MemberImplNotFound, location) << name;
         return nullptr;
     }
 

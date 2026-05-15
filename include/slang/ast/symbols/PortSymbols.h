@@ -22,7 +22,7 @@ class ModportSymbol;
 /// Represents the public-facing side of a module / program / interface port.
 /// The port symbol itself is not directly referenceable from within the instance;
 /// it can however connect directly to a symbol that is.
-class SLANG_EXPORT PortSymbol : public Symbol {
+class SLANG_EXPORT PortSymbol final : public Symbol {
 public:
     /// An instance-internal symbol that this port connects to, if any.
     /// Ports that do not connect directly to an internal symbol will have
@@ -64,6 +64,9 @@ public:
     };
     void getNetTypes(SmallVectorBase<NetTypeRange>& ranges) const;
 
+    static void getNetRanges(const Expression& expr,
+                             SmallVectorBase<PortSymbol::NetTypeRange>& ranges);
+
     bool isNetPort() const;
 
     void serializeTo(ASTSerializer& serializer) const;
@@ -78,6 +81,12 @@ public:
 
     using Symbol::setParent;
 
+    template<typename TVisitor>
+    void visitExprs(TVisitor&& visitor) const {
+        if (auto expr = getInitializer())
+            expr->visit(visitor);
+    }
+
 private:
     mutable const Type* type = nullptr;
     mutable const Expression* initializer = nullptr;
@@ -89,7 +98,7 @@ private:
 /// Represents a multi-port, which is a port symbol that externally appears as
 /// a single connection but internally connects to multiple names, potentially
 /// with varying directions.
-class SLANG_EXPORT MultiPortSymbol : public Symbol {
+class SLANG_EXPORT MultiPortSymbol final : public Symbol {
 public:
     std::span<const PortSymbol* const> ports;
 
@@ -121,7 +130,7 @@ private:
 
 /// Represents the public-facing side of a module / program / interface port
 /// that is also a connection to an interface instance (optionally with a modport restriction).
-class SLANG_EXPORT InterfacePortSymbol : public Symbol {
+class SLANG_EXPORT InterfacePortSymbol final : public Symbol {
 public:
     using IfaceConn = std::pair<const Symbol*, const ModportSymbol*>;
 
@@ -147,6 +156,9 @@ public:
     /// Gets the interface instance that this port connects to.
     IfaceConn getConnection() const;
 
+    /// Gets the interface connection and the connection expression.
+    std::pair<IfaceConn, const Expression*> getConnectionAndExpr() const;
+
     const ModportSymbol* getModport(const ASTContext& context, const InstanceSymbol& instance,
                                     syntax::DeferredSourceRange sourceRange) const;
 
@@ -158,6 +170,7 @@ private:
     mutable std::optional<std::span<const ConstantRange>> range;
 };
 
+/// Represents a connection to a port on an instance.
 class SLANG_EXPORT PortConnection {
 public:
     using IfaceConn = InterfacePortSymbol::IfaceConn;
@@ -166,15 +179,14 @@ public:
 
     PortConnection(const Symbol& port);
     PortConnection(const Symbol& port, const syntax::ExpressionSyntax& expr);
+    PortConnection(const Symbol& port, const Expression& expr);
     PortConnection(const Symbol& port, bool useDefault);
-    PortConnection(const InterfacePortSymbol& port, const Symbol* connectedSymbol,
-                   const ModportSymbol* modport);
-    PortConnection(const Symbol& port, const Symbol* connectedSymbol,
-                   SourceRange implicitNameRange);
+    PortConnection(const InterfacePortSymbol& port, const IfaceConn& conn, const Expression* expr);
+    PortConnection(const Symbol& port, const Symbol* connectedSymbol, SourceRange implicitNameRange,
+                   bool isWildcard);
 
     IfaceConn getIfaceConn() const;
     const Expression* getExpression() const;
-    void checkSimulatedNetTypes() const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -202,16 +214,17 @@ private:
     const InstanceSymbol& getParentInstance() const;
 
     const Symbol* connectedSymbol = nullptr;
-    union {
-        mutable const Expression* expr = nullptr;
-        const ModportSymbol* modport;
-    };
+    mutable const Expression* expr = nullptr;
+    const ModportSymbol* modport = nullptr;
     union {
         const syntax::ExpressionSyntax* exprSyntax = nullptr;
         SourceRange implicitNameRange;
     };
     bool useDefault = false;
+
+public:
     bool isImplicit = false;
+    bool isWildcard = false;
 };
 
 } // namespace slang::ast

@@ -7,6 +7,7 @@
 //------------------------------------------------------------------------------
 #pragma once
 
+#include "slang/ast/EvaluatedDimension.h"
 #include "slang/syntax/SyntaxFwd.h"
 #include "slang/syntax/SyntaxNode.h"
 
@@ -81,15 +82,15 @@ enum class SLANG_EXPORT DeclaredTypeFlags {
     /// The type is for an interconnect net, which has special rules.
     InterconnectNet = 1 << 15,
 
-    /// The type is for a variable declaration inside an interface.
-    InterfaceVariable = 1 << 16,
+    /// The type is for a variable declaration inside an interface or generate block.
+    IfaceOrGenBlkVar = 1 << 16,
 
     /// A mask of flags that indicate additional type rules are needed to
     /// be checked after the type itself is resolved.
     NeedsTypeCheck = NetType | UserDefinedNetType | FormalArgMergeVar | Rand | DPIReturnType |
-                     DPIArg | RequireSequenceType | CoverageType | InterfaceVariable
+                     DPIArg | RequireSequenceType | CoverageType | IfaceOrGenBlkVar
 };
-SLANG_BITMASK(DeclaredTypeFlags, InterfaceVariable)
+SLANG_BITMASK(DeclaredTypeFlags, IfaceOrGenBlkVar)
 
 /// Ties together various syntax nodes that declare the type of some parent symbol
 /// along with the logic necessary to resolve that type. Optionally includes an
@@ -138,6 +139,14 @@ public:
     const syntax::SyntaxList<syntax::VariableDimensionSyntax>* getDimensionSyntax() const {
         return dimensions;
     }
+
+    /// Returns all declared dimensions for this type, in declaration order.
+    ///
+    /// Packed dimensions from the base type syntax come first, followed by any unpacked
+    /// dimensions set via @a setDimensionSyntax.
+    ///
+    /// @note The result is recomputed on each call and is not cached.
+    std::vector<EvaluatedDimension> getResolvedDimensions() const;
 
     /// Resolves and returns the initializer expression, if present. Otherwise returns nullptr.
     const Expression* getInitializer() const;

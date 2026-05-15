@@ -462,6 +462,32 @@ endmodule
     CHECK(diags[5].code == diag::UnusedResult);
 }
 
+TEST_CASE("Deferred assertion ref arg to static unpacked struct member") {
+    auto tree = SyntaxTree::fromText(R"(
+module Test;
+    typedef struct {
+        int a;
+        int b;
+    } pair_t;
+
+    pair_t p;
+
+    function automatic void report_ref(ref int val);
+        $display("REF: %0d", val);
+    endfunction
+
+    initial begin
+        p.b = 20;
+        assert #0 (0) else report_ref(p.b);
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
 TEST_CASE("Break statement check -- regression") {
     auto tree = SyntaxTree::fromText(R"(
 module foo;
@@ -670,6 +696,35 @@ module m;
     initial begin
         j <= #2 2;
         g = @(posedge j[0]) 3;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Intra-assignment timing control with assignment pattern") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    typedef struct packed {
+        logic one;
+        logic two;
+        logic three;
+        logic four;
+    } protocol_t;
+
+    parameter TP = 1;
+    logic clk_i;
+    logic reset_ni;
+    protocol_t proto_i, proto_o;
+
+    always_ff @(posedge clk_i or negedge reset_ni) begin
+        if (!reset_ni)
+            proto_o <= #TP '{ default: '0, one: 1'b1 };
+        else
+            proto_o <= #TP proto_i;
     end
 endmodule
 )");
@@ -1095,6 +1150,8 @@ module m;
     logic l[3];
     wire [2:0] w;
 
+    wire struct packed { logic a; logic b; } st;
+
     nettype int nt;
     nt x;
 
@@ -1106,6 +1163,7 @@ module m;
         release i[1];
         force {w[1], x} = 1;
         assign q = 1;
+        force st.a = 1;
     end
 endmodule
 )");
@@ -1280,6 +1338,7 @@ module m;
         @cb i++;
         @(cb) i++;
         @(cb or posedge cb) i++;
+        @(cb iff i > 0) i++;
         @(cb.clk) i++;
     end
 endmodule
@@ -1312,6 +1371,27 @@ endmodule
     REQUIRE(diags.size() == 2);
     CHECK(diags[0].code == diag::ExprMustBeIntegral);
     CHECK(diags[1].code == diag::NoDefaultClocking);
+}
+
+TEST_CASE("Cycle delay in interface") {
+    auto tree = SyntaxTree::fromText(R"(
+interface intf(
+    input clk
+);
+
+    default clocking cb @(posedge clk);
+    endclocking
+
+    task zeroDelay();
+        ##0;
+    endtask
+
+endinterface
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
 }
 
 TEST_CASE("Synchronous drives") {
@@ -1353,15 +1433,14 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 8);
+    REQUIRE(diags.size() == 7);
     CHECK(diags[0].code == diag::WriteToInputClockVar);
     CHECK(diags[1].code == diag::ClockVarSyncDrive);
     CHECK(diags[2].code == diag::ClockVarBadTiming);
     CHECK(diags[3].code == diag::CycleDelayNonClock);
     CHECK(diags[4].code == diag::ClockVarAssignConcat);
-    CHECK(diags[5].code == diag::ClockVarTargetAssign);
-    CHECK(diags[6].code == diag::ClockVarSyncDrive);
-    CHECK(diags[7].code == diag::ClockVarOutputRead);
+    CHECK(diags[5].code == diag::ClockVarSyncDrive);
+    CHECK(diags[6].code == diag::ClockVarOutputRead);
 }
 
 TEST_CASE("Invalid case statement regress GH #422") {
@@ -1527,6 +1606,68 @@ endclass
     CHECK(diags[0].code == diag::NonstandardForeach);
 }
 
+TEST_CASE("foreach loop with function call as array name") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+  typedef struct packed {
+    bit [5:0] c;
+    bit [0:0] b;
+    bit [1:0] p;
+  } ps;
+
+  class c1;
+    ps da1[$];
+  endclass
+
+  class c2;
+    static local c2 m_self;
+    c1 da2[$];
+    static function c2 self();
+      return m_self;
+    endfunction: self
+  endclass
+
+  task t;
+    ps da3[$];
+    foreach(c2::self().da2[t_id]) begin
+      da3 = {da3, c2::self().da2[t_id].da1};
+    end
+  endtask
+
+  typedef int Arr[4];
+  function automatic Arr get_arr(); endfunction
+  initial begin
+    foreach (get_arr()[i]) begin end
+  end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ForeachCallExpr);
+    CHECK(diags[1].code == diag::ForeachCallExpr);
+}
+
+TEST_CASE("foreach loop intermediate bracket followed by invocation") {
+    // Covers the OpenParenthesis branch in parseForeachArrayExpression's OpenBracket
+    // handler. Non-name foreach expressions emit ForeachCallExpr at parse time.
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    initial begin
+        foreach(f()[0]()[i]) begin
+        end
+    end
+endmodule
+)");
+
+    auto& diags = tree->diagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::ForeachCallExpr);
+}
+
 TEST_CASE("for loop expression error checking") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
@@ -1563,91 +1704,6 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Unrollable for loop drivers") {
-    auto tree = SyntaxTree::fromText(R"(
- module m;
-    int foo[10];
-    initial
-        for (int i = 1; i < 10; i += 2) begin : baz
-            foo[i] = 2;
-        end
-
-    for (genvar i = 0; i < 10; i += 2) begin
-        always_comb foo[i] = 1;
-    end
-
-    always_comb foo[1] = 1; // error
-
-    struct { int foo; int bar; } baz[3][2];
-    initial begin
-        while (1) begin
-            for (int i = 0; i < 3; i++) begin
-                for (int j = 0; j < 2; j++) begin
-                    forever begin
-                        if (i != 2 || j != 1)
-                            #1 baz[i][j].foo = 1;
-                    end
-                end
-            end
-        end
-    end
-    for (genvar i = 0; i < 3; i++) begin
-        always_comb baz[i][0].bar = 3;
-    end
-
-    always_comb baz[1][1].foo = 4; // error
-    always_comb baz[1][1].bar = 4;
-    always_comb baz[2][1].foo = 3;
-
-    struct { int foo; int bar; } arr[21474836];
-    initial begin
-        for (int i = 0; i < 2147483647; i++) begin
-            arr[i].foo = 1;
-        end
-    end
-    always_comb arr[0].bar = 2;
- endmodule
-)");
-
-    CompilationOptions options;
-    options.maxConstexprSteps = 10000;
-
-    Compilation compilation(options);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
-    CHECK(diags[0].code == diag::MultipleAlwaysAssigns);
-    CHECK(diags[1].code == diag::MultipleAlwaysAssigns);
-    CHECK(diags[2].code == diag::MultipleAlwaysAssigns);
-}
-
-TEST_CASE("Unrollable for loop drivers -- strict checking") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    int foo[10];
-    initial
-        for (int i = 1; i < 10; i += 2) begin : baz
-            foo[i] = 2;
-        end
-
-    for (genvar i = 0; i < 10; i += 2) begin
-        always_comb foo[i] = 1;
-    end
-endmodule
-)");
-
-    CompilationOptions options;
-    options.flags |= CompilationFlags::StrictDriverChecking;
-
-    Compilation compilation(options);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::MultipleAlwaysAssigns);
 }
 
 TEST_CASE("foreach shadowed variable regression") {
@@ -1710,6 +1766,98 @@ endmodule
     CHECK(diags[5].code == diag::EmptyBody);
 }
 
+TEST_CASE("Misleading indentation warnings") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    bit x;
+    int y;
+    initial begin
+        // if: warn when next stmt is at same column as body
+        if (x)
+            y = 1;
+            y = 2;
+
+        // if+else: warn when next stmt is at same column as else body
+        if (x)
+            y = 1;
+        else
+            y = 2;
+            y = 3;
+
+        // while: warn
+        while (x)
+            y = 1;
+            y = 2;
+
+        // for: warn
+        for (int i = 0; i < 10; i++)
+            y = i;
+            y = 0;
+
+        // No warning: next statement at different column
+        if (x)
+            y = 1;
+         y = 2;
+
+        // No warning: body uses begin/end
+        if (x) begin
+            y = 1;
+        end
+        y = 2;
+
+        // Warn: body and next stmt on same line (but body is on a new line from keyword)
+        if (x)
+            y = 1; y = 2;
+
+        // No warning: body and next stmt are on the same line as keyword
+        if (x) y = 1; y = 2;
+
+        // Warn with block comment + whitespace
+        if (x)
+            y = 1; /* foo
+        */  y = 2;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 6);
+    CHECK(diags[0].code == diag::MisleadingIndentation);
+    CHECK(diags[1].code == diag::MisleadingIndentation);
+    CHECK(diags[2].code == diag::MisleadingIndentation);
+    CHECK(diags[3].code == diag::MisleadingIndentation);
+    CHECK(diags[4].code == diag::MisleadingIndentation);
+    CHECK(diags[5].code == diag::MisleadingIndentation);
+}
+
+TEST_CASE("Misleading indentation -- foreach and forever") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int x;
+    int arr[] = {};
+    initial begin
+        foreach (arr[i])
+            x = 1;
+            x = 2;
+
+        forever
+            x = 1; x = 2;
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::MisleadingIndentation);
+    CHECK(diags[1].code == diag::MisleadingIndentation);
+}
+
 TEST_CASE("Conditional statement / expression pattern matching") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
@@ -1751,7 +1899,7 @@ module m;
     end
 
     initial begin
-        e = instr matches tagged Jmp tagged JmpC '{cc:.c,addr:.a} &&& foo > 1 ? a + 10'(c) : 0;
+        e = instr matches tagged Jmp tagged JmpC '{cc:.c,addr:.a} &&& foo > 1 ? 32'(a + 10'(c)) : 0;
     end
 endmodule
 )");
@@ -1990,7 +2138,7 @@ endclass
 TEST_CASE("Ref args in fork-join blocks") {
     auto options = optionsFor(LanguageVersion::v1800_2023);
     auto tree = SyntaxTree::fromText(R"(
-function automatic foo(ref a, ref static b);
+function automatic foo(ref int a, ref static int b);
     fork
         automatic int k = a;
         begin : foo
@@ -2008,4 +2156,295 @@ endfunction
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::RefArgForkJoin);
+}
+
+TEST_CASE("Pattern variable lookup from nested initializers") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int i;
+    initial begin
+        if (i matches .a) begin
+            begin
+                automatic int b = a;
+            end
+        end
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Procedural checker statement restrictions") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    checker c;
+    endchecker
+
+    function foo;
+        c c1();
+    endfunction
+
+    initial begin
+        fork
+            c c1();
+        join
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::CheckerNotInProc);
+    CHECK(diags[1].code == diag::CheckerInForkJoin);
+}
+
+TEST_CASE("Conditional statement with pattern and explicit block crash regress") {
+    auto tree = SyntaxTree::fromText(R"(
+always begin union instr:if(instr matches begin c T i:
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    compilation.getAllDiagnostics();
+}
+
+TEST_CASE("Concurrent assertions not allowed in tasks") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input clk, a);
+    task t;
+        assert property (@(posedge clk) a == 1);
+    endtask
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::ConcurrentAssertNotInProc);
+}
+
+TEST_CASE("Immediate assertions not allowed at module level -- GH #1789") {
+    auto tree = SyntaxTree::fromText(R"(
+module foo;
+    wire b;
+    assert(b);
+    assume(b);
+    cover(b);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::ImmediateAssertNotInProc);
+    CHECK(diags[1].code == diag::ImmediateAssertNotInProc);
+    CHECK(diags[2].code == diag::ImmediateAssertNotInProc);
+}
+
+TEST_CASE("Deferred assertions allowed at module level") {
+    auto tree = SyntaxTree::fromText(R"(
+module foo;
+    wire b;
+    assert #0 (b);
+    assume #0 (b);
+    cover #0 (b);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Non-blocking intra-assignment delays are allowed in always_comb") {
+    auto tree = SyntaxTree::fromText(R"(
+module M;
+    logic a,b;
+    always_comb
+        a <= #1ns b;
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Statement context error handling regress -- GH #1480") {
+    auto tree = SyntaxTree::fromText(R"(
+module mm;
+    struct {
+        bit [4:0] reg1, reg2, regd;
+    } Add;
+    union tagged {
+        bit [9:0] JmpU;
+        struct packed {
+            bit [0:1] cc;
+            bit [1667:1539] addr;
+        } JmpC;
+    } Jmp;
+    void Baz;
+} Instr;
+
+function automatic int f1;
+    if (e matches (tagged Jmp (tagged JmpC '{cc:.c,addr:.a}))
+        &&& (rf[c] % 0))
+        return int'(c + a);
+    else
+ CH_STX: :[[INE-1]]:72: unction automatic int f2;
+    Instr e = tagged Jmp tagged JmpC '{2, 137};
+    int rf[3] = '{0, 0, 1};
+    int i = 1;
+    struct { int a; real b; } asdf = '{1, 3.14};
+    case (e) matches
+        tagged Jmp tagged JmpC '{.a, .b} &&& rf[2] == 1: return int'(a + b & unsigned'(i));
+endfunction
+
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    // Just check that the build fails but doesn't crash.
+    CHECK(!compilation.getAllDiagnostics().empty());
+}
+
+TEST_CASE("Tagged pattern error handling regress -- GH #1483") {
+    auto tree = SyntaxTree::fromText(R"(
+typedef union tagged {
+    struct {
+        bit [4:0] reg1, reg2, regd;
+    } Add;
+    union tagged {
+        bit [9:0] JmpU;
+        struct packed {
+            bit [0:1] cc;
+            bit [753:191] addr;
+        } JmpC;
+    } Jmp;
+    void Baz;
+} Instr;
+function automatic int f1;
+    Instr e = tagged Jmp tagged JmpC '{2, 137};
+    int rf[3] = '{0, 0, 1};
+    if (e matches (tagged Jmp (tagged JmpC '{cc:.c,addr:.a}))
+        &&& (rf[c matches (tagged Jmp (tant'(c + a);
+    else
+        return 1;
+endfunction
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    // Just check that the build fails but doesn't crash.
+    CHECK(!compilation.getAllDiagnostics().empty());
+}
+
+TEST_CASE("More pattern error handling regress") {
+    auto tree = SyntaxTree::fromText(R"(
+always case(matches A j:case)matches
+a
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    // Just check that the build fails but doesn't crash.
+    CHECK(!compilation.getAllDiagnostics().empty());
+}
+
+TEST_CASE("More pattern error handling regress 2") {
+    auto tree = SyntaxTree::fromText(R"(
+always@for case matches(
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    // Just check that the build fails but doesn't crash.
+    CHECK(!compilation.getAllDiagnostics().empty());
+}
+
+TEST_CASE("Tagged pattern eval regress -- GH #1482") {
+    auto tree = SyntaxTree::fromText(R"(
+typedef union tagged {
+    struct {
+        bit [4:0] reg1, reg2, regd;
+    } Add;
+    union tagged {
+        bit [9:0] JmpU;
+        struct packed {
+            bit [0:1] cc;
+            bit [0:1] addr;
+        } JmpC;
+    } Jmp;
+    void Baz;
+} Instr;
+
+function automatic int f2;
+    parameter Instr e = tagged Jmp tagged JmpC '{2, 2'(137)};
+    int rf[3] = '{0, 0, 1};
+    return e matches (tagged Jmp (tagged JmpC '{cc:.c,addr:.a})) &&& rf[c] != 0 ? int'(c + a) : 1;
+endfunction
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Recursive function default arg crash regress -- GH #1485") {
+    auto tree = SyntaxTree::fromText(R"(
+function foo(int a, b = foo(1,));
+endfunction
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::RecursiveDefinition);
+}
+
+TEST_CASE("Dangling else warnings") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic a;
+    initial begin
+        // Dangling else: then-branch is bare if-else.
+        if (a)
+            if (a)
+                $display("A");
+            else
+                $display("B");
+
+        // No warning: inner if wrapped in begin/end.
+        if (a) begin
+            if (a)
+                $display("A");
+            else
+                $display("B");
+        end
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::DanglingElse);
 }

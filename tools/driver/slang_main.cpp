@@ -5,53 +5,155 @@
 // SPDX-FileCopyrightText: Michael Popoloski
 // SPDX-License-Identifier: MIT
 //------------------------------------------------------------------------------
-#include <fmt/color.h>
 #include <fstream>
 #include <iostream>
 
+#include "slang/analysis/AnalysisManager.h"
 #include "slang/ast/ASTSerializer.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
 #include "slang/driver/Driver.h"
+#include "slang/driver/MemoryStats.h"
+#include "slang/syntax/CSTSerializer.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/text/Json.h"
-#include "slang/util/String.h"
 #include "slang/util/TimeTrace.h"
 #include "slang/util/VersionInfo.h"
 
 using namespace slang;
 using namespace slang::ast;
+using namespace slang::syntax;
 using namespace slang::driver;
 
-void printJson(Compilation& compilation, const std::string& fileName,
-               const std::vector<std::string>& scopes, bool includeSourceInfo) {
+void printASTJson(Compilation& compilation, const std::string& fileName,
+                  const std::vector<std::string>& scopes, bool includeSourceInfo,
+                  bool detailedTypes) {
+    // Stream output directly to the destination. A single JsonWriter (and
+    // ASTSerializer) is kept alive for the entire run so that shared state
+    // such as the set of already-printed enum types remains consistent across
+    // the design root and all definition serializations. After each complete
+    // top-level value the buffer is flushed and cleared via flushTo(), keeping
+    // peak memory proportional to the largest single serialized object.
+    std::ofstream fileStream;
+    std::ostream* out;
+
+    if (fileName == "-") {
+        out = &std::cout;
+    }
+    else {
+        fileStream.open(fileName);
+        fileStream.exceptions(std::ios::failbit | std::ios::badbit);
+        out = &fileStream;
+    }
+
     JsonWriter writer;
     writer.setPrettyPrint(true);
 
     ASTSerializer serializer(compilation, writer);
     serializer.setIncludeSourceInfo(includeSourceInfo);
+    serializer.setDetailedTypeInfo(detailedTypes);
+    serializer.setTryConstantFold(false);
+
     if (scopes.empty()) {
         serializer.startObject();
         serializer.writeProperty("design");
         serializer.serialize(compilation.getRoot());
+        writer.flushTo(*out);
+
         serializer.writeProperty("definitions");
         serializer.startArray();
-        for (auto def : compilation.getDefinitions())
+        for (auto def : compilation.getDefinitions()) {
             serializer.serialize(*def);
+            writer.flushTo(*out);
+        }
         serializer.endArray();
         serializer.endObject();
     }
     else {
         for (auto& scopeName : scopes) {
             auto sym = compilation.getRoot().lookupName(scopeName);
-            if (sym)
+            if (sym) {
                 serializer.serialize(*sym);
+                writer.flushTo(*out);
+            }
         }
     }
 
+    // Write whatever remains in the buffer (closing brackets, final newline).
     writer.writeNewLine();
-    OS::writeFile(fileName, writer.view());
+    writer.flushTo(*out);
+}
+
+void printCSTJson(Driver& driver, const std::string& fileName,
+                  CSTJsonMode mode = CSTJsonMode::Full) {
+    // Stream output directly to the destination instead of accumulating the
+    // entire JSON tree in memory first. Each syntax tree is serialized into
+    // its own temporary JsonWriter buffer, written out immediately, and then
+    // discarded, keeping memory proportional to the largest single tree.
+    std::ofstream fileStream;
+    std::ostream* out;
+
+    if (fileName == "-") {
+        out = &std::cout;
+    }
+    else {
+        fileStream.open(fileName);
+        fileStream.exceptions(std::ios::failbit | std::ios::badbit);
+        out = &fileStream;
+    }
+
+    // Write the outer envelope header.
+    *out << "{\n  \"syntaxTrees\": [";
+
+    // Serialize each tree into a fresh writer and flush it immediately.
+    // setInitialIndent(4) makes each tree object open at the 4-space level
+    // so its contents are indented at 6 spaces.
+    bool first = true;
+    for (auto& tree : driver.syntaxTrees) {
+        JsonWriter treeWriter;
+        treeWriter.setPrettyPrint(true);
+        treeWriter.setInitialIndent(4);
+
+        CSTSerializer converter(treeWriter, mode);
+        converter.serialize(*tree);
+
+        auto sv = first ? "\n    "sv : ",\n    "sv;
+        out->write(sv.data(), (std::streamsize)sv.size());
+        first = false;
+
+        auto view = treeWriter.view();
+        out->write(view.data(), (std::streamsize)view.size());
+    }
+
+    *out << "\n  ]\n}\n";
+}
+
+void printTimeStats(const std::string& fileName) {
+    std::ofstream fileStream;
+    std::ostream* out;
+
+    if (fileName == "-") {
+        out = &std::cout;
+    }
+    else {
+        fileStream.open(fileName);
+        fileStream.exceptions(std::ios::failbit | std::ios::badbit);
+        out = &fileStream;
+    }
+
+    int64_t parseUs = TimeTrace::getDurationForKey("parseAllSources");
+    int64_t elabUs = TimeTrace::getDurationForKey("elaboration");
+    int64_t analysisUs = TimeTrace::getDurationForKey("semanticAnalysis");
+    uint64_t peakMemBytes = OS::getPeakMemoryBytes();
+
+    *out << fmt::format("{{\n"
+                        "  \"parse_time_us\": {},\n"
+                        "  \"elaborate_time_us\": {},\n"
+                        "  \"analysis_time_us\": {},\n"
+                        "  \"peak_memory_bytes\": {}\n"
+                        "}}\n",
+                        parseUs, elabUs, analysisUs, peakMemBytes);
 }
 
 template<typename TArgs>
@@ -73,28 +175,48 @@ int driverMain(int argc, TArgs argv) {
         std::optional<bool> onlyPreprocess;
         std::optional<bool> onlyParse;
         std::optional<bool> onlyMacros;
+        std::optional<bool> disableAnalysis;
+        std::optional<bool> groupMacrosByFile;
         driver.cmdLine.add("-E,--preprocess", onlyPreprocess,
                            "Only run the preprocessor (and print preprocessed files to stdout)");
         driver.cmdLine.add("--macros-only", onlyMacros, "Print a list of found macros and exit");
+        driver.cmdLine.add("--group-macros-by-file", groupMacrosByFile,
+                           "Group macro output by source file (used with --macros-only)");
         driver.cmdLine.add(
             "--parse-only", onlyParse,
             "Stop after parsing input files, don't perform elaboration or type checking");
+        driver.cmdLine.add("--disable-analysis", disableAnalysis,
+                           "Disables post-elaboration analysis passes,"
+                           "which prevents some diagnostics from being issued");
 
         std::optional<bool> includeComments;
         std::optional<bool> includeDirectives;
         std::optional<bool> obfuscateIds;
+        std::optional<bool> includeSource;
         driver.cmdLine.add("--comments", includeComments,
                            "Include comments in preprocessed output (with -E)");
         driver.cmdLine.add("--directives", includeDirectives,
                            "Include compiler directives in preprocessed output (with -E)");
         driver.cmdLine.add("--obfuscate-ids", obfuscateIds,
                            "Randomize all identifiers in preprocessed output (with -E)");
+        driver.cmdLine.add("--preprocess-source", includeSource,
+                           "Show source line information with preprocessor output");
 
         std::optional<std::string> astJsonFile;
         driver.cmdLine.add(
             "--ast-json", astJsonFile,
             "Dump the compiled AST in JSON format to the specified file, or '-' for stdout",
             "<file>", CommandLineFlags::FilePath);
+
+        std::optional<std::string> cstJsonFile;
+        driver.cmdLine.add(
+            "--cst-json", cstJsonFile,
+            "Dump the parsed syntax trees in JSON format to the specified file, or '-' for stdout",
+            "<file>", CommandLineFlags::FilePath);
+
+        std::optional<CSTJsonMode> cstJsonMode;
+        driver.cmdLine.addEnum<CSTJsonMode, CSTJsonMode_traits>("--cst-json-mode", cstJsonMode,
+                                                                "CST JSON output mode", "<mode>");
 
         std::vector<std::string> astJsonScopes;
         driver.cmdLine.add("--ast-json-scope", astJsonScopes,
@@ -106,11 +228,28 @@ int driverMain(int argc, TArgs argv) {
         driver.cmdLine.add("--ast-json-source-info", includeSourceInfo,
                            "When dumping AST to JSON, include source line and file information");
 
+        std::optional<bool> serializeDetailedTypes;
+        driver.cmdLine.add("--ast-json-detailed-types", serializeDetailedTypes,
+                           "When dumping AST to JSON, expand out all type information");
+
         std::optional<std::string> timeTrace;
         driver.cmdLine.add("--time-trace", timeTrace,
                            "Do performance profiling of the slang compiler and output "
                            "the results to the given file in Chrome Event Tracing JSON format",
                            "<path>");
+
+        std::optional<std::string> timeStats;
+        driver.cmdLine.add("--time-stats", timeStats,
+                           "Output a summary of compilation stage timings and peak memory usage "
+                           "to the given file as JSON, or '-' for stdout",
+                           "<path>");
+
+        std::optional<std::string> memoryStats;
+        driver.cmdLine.add(
+            "--memory-stats", memoryStats,
+            "Print a detailed breakdown of memory usage by category "
+            "(source files, CST, AST, analysis) to the given file, or '-' for stdout",
+            "<path>");
 
         if (!driver.parseCommandLine(argc, argv))
             return 1;
@@ -122,9 +261,7 @@ int driverMain(int argc, TArgs argv) {
         }
 
         if (showVersion == true) {
-            OS::print(fmt::format("slang version {}.{}.{}+{}\n", VersionInfo::getMajor(),
-                                  VersionInfo::getMinor(), VersionInfo::getPatch(),
-                                  VersionInfo::getHash()));
+            OS::print(fmt::format("slang version {}\n", VersionInfo::getVersionString()));
             return 0;
         }
 
@@ -134,48 +271,97 @@ int driverMain(int argc, TArgs argv) {
         if (onlyParse.has_value() + onlyPreprocess.has_value() + onlyMacros.has_value() +
                 driver.options.lintMode() >
             1) {
-            OS::printE(fg(driver.diagClient->errorColor), "error: ");
-            OS::printE("can only specify one of --preprocess, --macros-only, "
-                       "--parse-only, --lint-only");
+            driver.printError("can only specify one of --preprocess, --macros-only, "
+                              "--parse-only, --lint-only");
             return 3;
         }
 
-        if (timeTrace)
+        if ((onlyPreprocess || onlyMacros) &&
+            (driver.options.includeDepfile || driver.options.moduleDepfile ||
+             driver.options.allDepfile)) {
+            driver.printError(
+                "cannot use dependency file options with --preprocess or --macros-only");
+            return 3;
+        }
+
+        if (timeTrace || timeStats)
             TimeTrace::initialize();
+
+        auto runStages = [&]() {
+            bool ok = true;
+            if (onlyPreprocess == true) {
+                bitmask<PreprocessOutputFlags> flags;
+                if (includeComments == true)
+                    flags |= PreprocessOutputFlags::IncludeComments;
+                if (includeDirectives == true)
+                    flags |= PreprocessOutputFlags::IncludeDirectives;
+                if (obfuscateIds == true)
+                    flags |= PreprocessOutputFlags::ObfuscateIds;
+                if (includeSource == true)
+                    flags |= PreprocessOutputFlags::IncludeSourceInfo;
+
+                return driver.runPreprocessor(flags);
+            }
+
+            if (onlyMacros == true) {
+                driver.reportMacros(groupMacrosByFile == true);
+                return true;
+            }
+
+            {
+                TimeTraceScope timeScope("parseAllSources"sv, ""sv);
+                ok = driver.parseAllSources();
+            }
+
+            driver.optionallyWriteDepFiles();
+
+            if (cstJsonFile) {
+                TimeTraceScope timeScope("cstSerialization"sv, ""sv);
+                printCSTJson(driver, *cstJsonFile, cstJsonMode.value_or(CSTJsonMode::Full));
+            }
+
+            if (onlyParse == true) {
+                if (memoryStats) {
+                    printMemoryStats(*memoryStats, driver.sourceManager, driver.syntaxTrees,
+                                     nullptr, nullptr);
+                }
+                return ok && driver.reportParseDiags();
+            }
+
+            std::unique_ptr<Compilation> compilation;
+            {
+                TimeTraceScope timeScope("elaboration"sv, ""sv);
+                compilation = driver.createCompilation();
+                driver.reportCompilation(*compilation, quiet == true);
+            }
+
+            std::unique_ptr<analysis::AnalysisManager> analysisManager;
+            if (!disableAnalysis.value_or(false)) {
+                TimeTraceScope timeScope("semanticAnalysis"sv, ""sv);
+                analysisManager = driver.runAnalysis(*compilation);
+            }
+
+            ok &= driver.reportDiagnostics(quiet == true);
+
+            if (memoryStats) {
+                printMemoryStats(*memoryStats, driver.sourceManager, driver.syntaxTrees,
+                                 compilation.get(), analysisManager.get());
+            }
+
+            if (astJsonFile) {
+                TimeTraceScope timeScope("astSerialization"sv, ""sv);
+                printASTJson(*compilation, *astJsonFile, astJsonScopes, includeSourceInfo == true,
+                             serializeDetailedTypes == true);
+            }
+            return ok;
+        };
 
         bool ok = true;
         SLANG_TRY {
-            if (onlyPreprocess == true) {
-                ok = driver.runPreprocessor(includeComments == true, includeDirectives == true,
-                                            obfuscateIds == true);
-            }
-            else if (onlyMacros == true) {
-                driver.reportMacros();
-            }
-            else if (onlyParse == true) {
-                ok = driver.parseAllSources();
-                ok &= driver.reportParseDiags();
-            }
-            else {
-                {
-                    TimeTraceScope timeScope("parseAllSources"sv, ""sv);
-                    ok = driver.parseAllSources();
-                }
-
-                {
-                    TimeTraceScope timeScope("elaboration"sv, ""sv);
-                    auto compilation = driver.createCompilation();
-                    ok &= driver.reportCompilation(*compilation, quiet == true);
-                    if (astJsonFile)
-                        printJson(*compilation, *astJsonFile, astJsonScopes,
-                                  includeSourceInfo == true);
-                }
-            }
+            ok = runStages();
         }
         SLANG_CATCH(const std::exception& e) {
-#if __cpp_exceptions
-            OS::printE(fmt::format("internal compiler error: {}\n", e.what()));
-#endif
+            SLANG_REPORT_EXCEPTION(e, "internal compiler error: {}\n");
             return 4;
         }
 
@@ -188,14 +374,15 @@ int driverMain(int argc, TArgs argv) {
             }
         }
 
+        if (timeStats)
+            printTimeStats(*timeStats);
+
         return ok ? 0 : 5;
     }
     SLANG_CATCH(const std::exception& e) {
-#if __cpp_exceptions
-        OS::printE(fmt::format("{}\n", e.what()));
-#endif
-        return 6;
+        SLANG_REPORT_EXCEPTION(e, "{}\n");
     }
+    return 6;
 }
 
 #ifndef FUZZ_TARGET
@@ -220,7 +407,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     auto diagClient = std::make_shared<TextDiagnosticClient>();
     diagEngine.addClient(diagClient);
 
-    Compilation compilation;
+    CompilationOptions options;
+    options.maxInstanceDepth = 16;
+    options.maxCheckerInstanceDepth = 16;
+    options.maxDefParamSteps = 32;
+    options.maxDefParamBlocks = 1024;
+    options.maxGenerateSteps = 128;
+
+    Compilation compilation(options);
     compilation.addSyntaxTree(tree);
     for (auto& diag : compilation.getAllDiagnostics())
         diagEngine.issue(diag);

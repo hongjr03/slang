@@ -15,13 +15,11 @@
 #include <vector>
 
 #include "slang/text/CharInfo.h"
-#include "slang/util/Hash.h"
+#include "slang/util/FlatMap.h"
 
 using namespace std::chrono;
 
 namespace slang {
-
-std::unique_ptr<TimeTrace::Profiler> TimeTrace::profiler = nullptr;
 
 using DurationType = duration<steady_clock::rep, steady_clock::period>;
 
@@ -82,7 +80,7 @@ struct TimeTrace::Profiler {
 
         // Only include sections longer than 500us.
         if (duration_cast<microseconds>(entry.duration).count() > 500) {
-            std::scoped_lock lock(mut);
+            std::scoped_lock<std::mutex> lock(mut);
             entries.emplace_back(std::move(entry));
         }
 
@@ -91,7 +89,7 @@ struct TimeTrace::Profiler {
 
     void write(std::ostream& os) {
         SLANG_ASSERT(stack.empty());
-        std::scoped_lock lock(mut);
+        std::scoped_lock<std::mutex> lock(mut);
 
         // std::thread::id isn't convertible to an integer, so put it in
         // a table to generate nice ids for output.
@@ -127,14 +125,32 @@ struct TimeTrace::Profiler {
 
 thread_local std::vector<Entry> TimeTrace::Profiler::stack;
 
+std::unique_ptr<TimeTrace::Profiler> TimeTrace::profiler = nullptr;
+
 void TimeTrace::initialize() {
     SLANG_ASSERT(!profiler);
     profiler = std::make_unique<Profiler>();
 }
 
+void TimeTrace::destroy() {
+    profiler.reset();
+}
+
 void TimeTrace::write(std::ostream& os) {
     SLANG_ASSERT(profiler);
     profiler->write(os);
+}
+
+int64_t TimeTrace::getDurationForKey(std::string_view name) {
+    SLANG_ASSERT(profiler);
+
+    int64_t total = 0;
+    std::scoped_lock<std::mutex> lock(profiler->mut);
+    for (auto& entry : profiler->entries) {
+        if (entry.name == name)
+            total += duration_cast<microseconds>(entry.duration).count();
+    }
+    return total;
 }
 
 void TimeTrace::beginTrace(std::string_view name, std::string_view detail) {

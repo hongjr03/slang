@@ -2,17 +2,17 @@ slang - SystemVerilog Language Services
 =======================================
 ![](https://github.com/MikePopoloski/slang/workflows/CI%20Build/badge.svg)
 [![codecov](https://codecov.io/gh/MikePopoloski/slang/branch/master/graph/badge.svg)](https://codecov.io/gh/MikePopoloski/slang)
+[![PyPI](https://img.shields.io/pypi/v/pyslang.svg)](https://pypi.org/project/pyslang/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/MikePopoloski/slang/blob/master/LICENSE)
-[![Join the chat at https://gitter.im/MikePopoloski/slang](https://badges.gitter.im/MikePopoloski/slang.svg)](https://gitter.im/MikePopoloski/slang?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
-slang is a software library that provides various components for lexing, parsing, type checking, and elaborating SystemVerilog code. It comes with an executable tool that can compile and lint any SystemVerilog project, but it is also intended to be usable as a front end for synthesis tools, simulators, linters, code editors, and refactoring tools.
+slang is a software library that provides various components for lexing, parsing, type checking, and elaborating SystemVerilog code. It comes with an executable tool that can compile and statically analyze any SystemVerilog project, but it is also intended to be usable as a front end for synthesis tools, simulators, linters, code editors, and refactoring tools.
 
 slang is the fastest and most compliant SystemVerilog frontend (according to the open source [chipsalliance test suite](https://github.com/chipsalliance/sv-tests)).
 
 Full documentation is available on the website: https://sv-lang.com
 
 ### Features
--   Fully parse, analyze, and elaborate all SystemVerilog features - see [this page](https://sv-lang.com/language-support.html) for current status.
+-   Fully parse, elaborate, and analyze all SystemVerilog features.
 -   Be robust about compilation, no matter how broken the source text. This makes the compiler usable in editor highlighting and completion scenarios, where the code is likely to be broken because the user is still writing it.
 -   The parse tree should round trip back to the original source, making it easy to write refactoring and code generation tools.
 -   Provide great error messages, ala clang.
@@ -30,11 +30,25 @@ Some examples of things you can use slang for:
 
 ### Getting Started
 
-Instructions on building slang from source are [here](https://sv-lang.com/building.html).
+Pre-built binaries for Linux, macOS, and Windows are available on the [releases page](https://github.com/MikePopoloski/slang/releases).
+
+Instructions on building slang from source are [here](https://sv-lang.com/building.html). The tl;dr is:
+```
+git clone https://github.com/MikePopoloski/slang.git
+cd slang
+cmake -B build
+cmake --build build -j
+```
 
 The slang binary can be run on your code right out of the box; check out the [user manual](https://sv-lang.com/user-manual.html) for more information about how it works.
 
 If you're looking to use slang as a library, please read through the [developer guide](https://sv-lang.com/developer-guide.html).
+
+The project also includes Python bindings for the library, which can be installed via PyPI:
+```
+pip install pyslang
+```
+See the `pyslang` directory in this repository for tests and examples that show how to use the Python API.
 
 ### Try It Out
 
@@ -50,7 +64,7 @@ Contributions are welcome, whether they be in the form of bug reports, comments,
 
 slang is licensed under the MIT license:
 
->   Copyright (c) 2015-2024 Michael Popoloski
+>   Copyright (c) 2015-2026 Michael Popoloski
 >
 >   Permission is hereby granted, free of charge, to any person obtaining a copy
 >   of this software and associated documentation files (the "Software"), to deal

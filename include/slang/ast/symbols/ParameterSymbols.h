@@ -15,6 +15,7 @@ namespace slang::ast {
 
 class Compilation;
 
+/// A base class for parameter symbols, both type and value.
 class SLANG_EXPORT ParameterSymbolBase {
 public:
     const Symbol& symbol;
@@ -30,6 +31,9 @@ public:
                                 const syntax::ParameterDeclarationStatementSyntax& syntax,
                                 SmallVectorBase<Symbol*>& results);
 
+    static bool allMatching(std::ranges::range auto&& leftParams,
+                            std::ranges::range auto&& rightParams);
+
 protected:
     ParameterSymbolBase(const Symbol& symbol, bool isLocal, bool isPort) :
         symbol(symbol), isLocal(isLocal), isPort(isPort) {}
@@ -40,7 +44,7 @@ private:
 };
 
 /// Represents a parameter value.
-class SLANG_EXPORT ParameterSymbol : public ValueSymbol, public ParameterSymbolBase {
+class SLANG_EXPORT ParameterSymbol final : public ValueSymbol, public ParameterSymbolBase {
 public:
     ParameterSymbol(std::string_view name, SourceLocation loc, bool isLocal, bool isPort);
 
@@ -61,6 +65,8 @@ public:
     bool isFromGenvar() const { return isFromGv; }
     void setIsFromGenvar(bool newIsFromGenvar) { isFromGv = newIsFromGenvar; }
 
+    bool isEvaluating() const { return evaluating; }
+
     void serializeTo(ASTSerializer& serializer) const;
 
 private:
@@ -72,7 +78,8 @@ private:
     bool isFromGv = false;
 };
 
-class SLANG_EXPORT TypeParameterSymbol : public Symbol, public ParameterSymbolBase {
+/// Represents a type parameter.
+class SLANG_EXPORT TypeParameterSymbol final : public Symbol, public ParameterSymbolBase {
 public:
     DeclaredType targetType;
     ForwardTypeRestriction typeRestriction;
@@ -87,17 +94,18 @@ public:
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::TypeParameter; }
 
     const Type& getTypeAlias() const { return *typeAlias; }
+    void setTypeSyntax(const syntax::SyntaxNode& syntax);
     bool isOverridden() const;
     void checkTypeRestriction() const;
 
     void serializeTo(ASTSerializer& serializer) const;
 
 private:
-    const Type* typeAlias;
+    Type* typeAlias;
 };
 
 /// Represents a defparam directive.
-class SLANG_EXPORT DefParamSymbol : public Symbol {
+class SLANG_EXPORT DefParamSymbol final : public Symbol {
 public:
     explicit DefParamSymbol(SourceLocation loc) : Symbol(SymbolKind::DefParam, "", loc) {}
 
@@ -120,7 +128,7 @@ private:
 };
 
 /// Represents a specify parameter.
-class SLANG_EXPORT SpecparamSymbol : public ValueSymbol {
+class SLANG_EXPORT SpecparamSymbol final : public ValueSymbol {
 public:
     bool isPathPulse = false;
 
@@ -143,6 +151,8 @@ public:
         return pathDest;
     }
 
+    bool isEvaluating() const { return evaluating; }
+
     static void fromSyntax(const Scope& scope, const syntax::SpecparamDeclarationSyntax& syntax,
                            SmallVectorBase<const SpecparamSymbol*>& results);
 
@@ -162,5 +172,35 @@ private:
     mutable bool evaluating = false;
     mutable bool pathPulseResolved = false;
 };
+
+bool ParameterSymbolBase::allMatching(std::ranges::range auto&& leftParams,
+                                      std::ranges::range auto&& rightParams) {
+    if (leftParams.size() != rightParams.size())
+        return false;
+
+    for (auto li = leftParams.begin(), ri = rightParams.begin(); li != leftParams.end();
+         li++, ri++) {
+
+        auto& lp = **li;
+        auto& rp = **ri;
+        if (lp.kind != rp.kind)
+            return false;
+
+        if (lp.kind == SymbolKind::Parameter) {
+            auto& lv = lp.template as<ParameterSymbol>().getValue();
+            auto& rv = rp.template as<ParameterSymbol>().getValue();
+            if (lv != rv)
+                return false;
+        }
+        else {
+            auto& lt = lp.template as<TypeParameterSymbol>().targetType.getType();
+            auto& rt = rp.template as<TypeParameterSymbol>().targetType.getType();
+            if (!lt.isMatching(rt))
+                return false;
+        }
+    }
+
+    return true;
+}
 
 } // namespace slang::ast

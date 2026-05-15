@@ -6,13 +6,16 @@
 #include "TidyFactory.h"
 #include "fmt/color.h"
 
+#include "slang/analysis/AnalysisManager.h"
+#include "slang/analysis/ValueDriver.h"
 #include "slang/syntax/AllSyntax.h"
 
 using namespace slang;
 using namespace slang::ast;
+using namespace slang::analysis;
 
 namespace register_has_no_reset {
-struct AlwaysFFVisitor : public ASTVisitor<AlwaysFFVisitor, true, true> {
+struct AlwaysFFVisitor : public ASTVisitor<AlwaysFFVisitor, VisitFlags::AllCanonical> {
     explicit AlwaysFFVisitor(const std::string_view name, const std::string_view resetName,
                              const bool resetIsActiveHigh) :
         name(name), resetName(resetName), resetIsActiveHigh(resetIsActiveHigh) {};
@@ -87,19 +90,27 @@ private:
     std::optional<SourceLocation> errorLocation;
 };
 
-struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, true, true> {
-    explicit MainVisitor(Diagnostics& diagnostics) : TidyVisitor(diagnostics) {}
+struct MainVisitor : public TidyVisitor, ASTVisitor<MainVisitor, VisitFlags::AllCanonical> {
+    const AnalysisManager& analysisManager;
+
+    MainVisitor(Diagnostics& diagnostics, const AnalysisManager& analysisManager) :
+        TidyVisitor(diagnostics), analysisManager(analysisManager) {}
 
     void handle(const VariableSymbol& symbol) {
         NEEDS_SKIP_SYMBOL(symbol)
-        if (symbol.drivers().empty())
+
+        auto drivers = analysisManager.getDrivers(symbol);
+        if (drivers.empty())
             return;
 
-        auto firstDriver = *symbol.drivers().begin();
-        if (firstDriver && firstDriver->isInAlwaysFFBlock()) {
+        // Skip variables with automatic lifetime
+        if (symbol.lifetime == VariableLifetime::Automatic)
+            return;
+
+        if (drivers[0] && drivers[0]->source == DriverSource::AlwaysFF) {
             auto& configs = config.getCheckConfigs();
             AlwaysFFVisitor visitor(symbol.name, configs.resetName, configs.resetIsActiveHigh);
-            firstDriver->containingSymbol->visit(visitor);
+            drivers[0]->containingSymbol->visit(visitor);
             if (visitor.hasError()) {
                 diags.add(diag::RegisterNotAssignedOnReset,
                           visitor.getErrorLocation().value_or(symbol.location))
@@ -114,10 +125,11 @@ using namespace register_has_no_reset;
 
 class RegisterHasNoReset : public TidyCheck {
 public:
-    explicit RegisterHasNoReset(TidyKind kind) : TidyCheck(kind) {}
+    explicit RegisterHasNoReset(TidyKind kind, std::optional<slang::DiagnosticSeverity> severity) :
+        TidyCheck(kind, severity) {}
 
-    bool check(const RootSymbol& root) override {
-        MainVisitor visitor(diagnostics);
+    bool check(const RootSymbol& root, const AnalysisManager& analysisManager) override {
+        MainVisitor visitor(diagnostics, analysisManager);
         root.visit(visitor);
         return diagnostics.empty();
     }
@@ -130,7 +142,7 @@ public:
                "reset or set a value on reset";
     }
 
-    DiagnosticSeverity diagSeverity() const override { return DiagnosticSeverity::Warning; }
+    DiagnosticSeverity diagDefaultSeverity() const override { return DiagnosticSeverity::Warning; }
 
     std::string name() const override { return "RegisterHasNoReset"; }
 

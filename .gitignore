@@ -1,9 +1,17 @@
-.vs/
-.vscode/
+# Python ignores.
+.pytest_cache/
 .venv/
-.idea/
+venv/
 .cache/
 .DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+_version.py
+__init__.pyi
+
+# C and CMake ignores.
 build/
 install/
 compile_commands.json
@@ -14,7 +22,11 @@ prefix/
 CMakeLists.txt.user
 CMakeUserPresets.json
 .ccls
-_version.py
+
+# Editor ignores.
+.vscode/
+.idea/
+.vs/
 *.code-workspace
 
 # rust
@@ -25,3 +37,4 @@ Cargo.lock
 *.pdb
 tags
 generated.rs
+.claude

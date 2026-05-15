@@ -62,6 +62,7 @@ Statement::StatementContext::~StatementContext() {
         if (proc && proc->procedureKind == ProceduralBlockKind::AlwaysFF && !proc->getBody().bad())
             rootAstContext.addDiag(diag::AlwaysFFEventControl, proc->location);
     }
+    SLANG_ASSERT(blocks.empty());
 }
 
 const Statement* Statement::StatementContext::tryGetBlock(const ASTContext& context,
@@ -268,7 +269,7 @@ const Statement& Statement::bind(const StatementSyntax& syntax, const ASTContext
             break;
         case SyntaxKind::CheckerInstanceStatement:
             result = &ProceduralCheckerStatement::fromSyntax(
-                comp, syntax.as<CheckerInstanceStatementSyntax>(), context);
+                comp, syntax.as<CheckerInstanceStatementSyntax>(), context, stmtCtx);
             break;
         default:
             SLANG_UNREACHABLE;
@@ -329,15 +330,24 @@ const Statement& Statement::bindBlock(const StatementBlockSymbol& block, const S
         SmallVector<const Statement*> buffer;
         bindScopeInitializers(context, buffer);
 
-        auto& ss = syntax.as<StatementSyntax>();
-        auto& stmt = bind(ss, context, stmtCtx, /* inList */ false,
-                          /* labelHandled */ true);
+        const StatementSyntax* ss;
+        bool labelHandled;
+        if (syntax.kind == SyntaxKind::PatternCaseItem) {
+            ss = syntax.as<PatternCaseItemSyntax>().statement;
+            labelHandled = false;
+        }
+        else {
+            ss = &syntax.as<StatementSyntax>();
+            labelHandled = true;
+        }
+
+        auto& stmt = bind(*ss, context, stmtCtx, /* inList */ false, labelHandled);
         buffer.push_back(&stmt);
         anyBad |= stmt.bad();
 
         result = createBlockStatement(comp, buffer, syntax);
-        result->syntax = &ss;
-        context.setAttributes(*result, ss.attributes);
+        result->syntax = ss;
+        context.setAttributes(*result, ss->attributes);
     }
 
     result->blockSymbol = &block;
@@ -438,7 +448,8 @@ static void findBlocks(const Scope& scope, const StatementSyntax& syntax,
 
             for (auto item : block.items) {
                 // If we find any decls at all, this block gets its own scope.
-                if (!StatementSyntax::isKind(item->kind)) {
+                if (!StatementSyntax::isKind(item->kind) ||
+                    item->kind == SyntaxKind::CheckerInstanceStatement) {
                     results.push_back(&StatementBlockSymbol::fromSyntax(scope, block));
                     return;
                 }
@@ -456,7 +467,9 @@ static void findBlocks(const Scope& scope, const StatementSyntax& syntax,
                         recurse(&item->as<StandardCaseItemSyntax>().clause->as<StatementSyntax>());
                         break;
                     case SyntaxKind::PatternCaseItem:
-                        recurse(item->as<PatternCaseItemSyntax>().statement);
+                        // Pattern case items always create a block.
+                        results.push_back(&StatementBlockSymbol::fromSyntax(
+                            scope, item->as<PatternCaseItemSyntax>()));
                         break;
                     case SyntaxKind::DefaultCaseItem:
                         recurse(&item->as<DefaultCaseItemSyntax>().clause->as<StatementSyntax>());
@@ -468,7 +481,20 @@ static void findBlocks(const Scope& scope, const StatementSyntax& syntax,
             return;
         case SyntaxKind::ConditionalStatement: {
             auto& cond = syntax.as<ConditionalStatementSyntax>();
-            recurse(cond.statement);
+            bool hasPattern = false;
+            for (auto condSyntax : cond.predicate->conditions) {
+                if (condSyntax->matchesClause) {
+                    hasPattern = true;
+                    break;
+                }
+            }
+
+            // If any condition has a pattern, we need a block.
+            if (hasPattern)
+                results.push_back(&StatementBlockSymbol::fromSyntax(scope, cond));
+            else
+                recurse(cond.statement);
+
             if (cond.elseClause)
                 recurse(&cond.elseClause->clause->as<StatementSyntax>());
             return;
@@ -490,7 +516,7 @@ static void findBlocks(const Scope& scope, const StatementSyntax& syntax,
                 forLoop.initializers[0]->kind == SyntaxKind::ForVariableDeclaration) {
                 results.push_back(&StatementBlockSymbol::fromSyntax(scope, forLoop));
             }
-            else if (syntax.label) {
+            else if (syntax.label && !labelHandled) {
                 results.push_back(&StatementBlockSymbol::fromLabeledStmt(scope, syntax));
             }
             else {
@@ -585,8 +611,8 @@ std::span<const StatementBlockSymbol* const> Statement::createAndAddBlockItems(
                 scope.addMembers(*item);
                 break;
             case SyntaxKind::PortDeclaration:
-                if (item->previewNode)
-                    scope.addMembers(*item->previewNode);
+                if (auto preview = item->previewNode())
+                    scope.addMembers(*preview);
 
                 if (scope.asSymbol().kind == SymbolKind::Subroutine) {
                     SmallVector<const FormalArgumentSymbol*> args;
@@ -688,15 +714,14 @@ Statement& BlockStatement::fromSyntax(Compilation& comp, const BlockStatementSyn
     // forked processes are effectively not in that loop (and statements like
     // continue and break do not apply to the outer loop).
     auto guard = ScopeGuard([&stmtCtx, savedFlags = stmtCtx.flags] {
-        const auto savableFlags = StatementFlags::InLoop | StatementFlags::InForLoop |
-                                  StatementFlags::InForkJoin;
+        const auto savableFlags = StatementFlags::InLoop | StatementFlags::InForkJoin;
         stmtCtx.flags &= ~savableFlags;
         stmtCtx.flags |= savedFlags & savableFlags;
     });
 
     if (blockKind != StatementBlockKind::Sequential) {
         stmtCtx.flags |= StatementFlags::InForkJoin;
-        stmtCtx.flags &= ~(StatementFlags::InLoop | StatementFlags::InForLoop);
+        stmtCtx.flags &= ~StatementFlags::InLoop;
     }
 
     bool anyBad = false;
@@ -724,7 +749,7 @@ Statement& BlockStatement::fromSyntax(Compilation& comp, const BlockStatementSyn
     return *result;
 }
 
-Statement& BlockStatement::makeEmpty(Compilation& compilation) {
+BlockStatement& BlockStatement::makeEmpty(Compilation& compilation) {
     return *compilation.emplace<BlockStatement>(
         StatementList::makeEmpty(compilation), StatementBlockKind::Sequential,
         SourceRange(SourceLocation::NoLocation, SourceLocation::NoLocation));

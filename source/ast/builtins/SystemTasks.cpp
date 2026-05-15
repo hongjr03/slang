@@ -25,8 +25,8 @@ using namespace syntax;
 
 class SystemTaskBase : public SystemSubroutine {
 public:
-    explicit SystemTaskBase(const std::string& name) :
-        SystemSubroutine(name, SubroutineKind::Task) {}
+    explicit SystemTaskBase(KnownSystemName knownNameId) :
+        SystemSubroutine(knownNameId, SubroutineKind::Task) {}
 
     ConstantValue eval(EvalContext& context, const Args&, SourceRange range,
                        const CallExpression::SystemCallInfo&) const final {
@@ -37,10 +37,10 @@ public:
 
 class SimpleSystemTask : public SimpleSystemSubroutine {
 public:
-    SimpleSystemTask(const std::string& name, const Type& returnType, size_t requiredArgs = 0,
+    SimpleSystemTask(KnownSystemName knownNameId, const Type& returnType, size_t requiredArgs = 0,
                      const std::vector<const Type*>& argTypes = {}) :
-        SimpleSystemSubroutine(name, SubroutineKind::Task, requiredArgs, argTypes, returnType,
-                               false) {}
+        SimpleSystemSubroutine(knownNameId, SubroutineKind::Task, requiredArgs, argTypes,
+                               returnType, false) {}
 
     ConstantValue eval(EvalContext& context, const Args&, SourceRange range,
                        const CallExpression::SystemCallInfo&) const final {
@@ -53,8 +53,8 @@ class DisplayTask : public SystemTaskBase {
 public:
     LiteralBase defaultIntFmt;
 
-    DisplayTask(const std::string& name, LiteralBase defaultIntFmt) :
-        SystemTaskBase(name), defaultIntFmt(defaultIntFmt) {}
+    DisplayTask(KnownSystemName knownNameId, LiteralBase defaultIntFmt) :
+        SystemTaskBase(knownNameId), defaultIntFmt(defaultIntFmt) {}
 
     bool allowEmptyArgument(size_t) const final { return true; }
 
@@ -68,18 +68,14 @@ public:
     }
 };
 
-struct MonitorVisitor : public ASTVisitor<MonitorVisitor, true, true> {
-    const ASTContext& context;
-
-    MonitorVisitor(const ASTContext& context) : context(context) {}
-
-    void handle(const ValueExpressionBase& expr) {
-        if (VariableSymbol::isKind(expr.symbol.kind) &&
-            expr.symbol.as<VariableSymbol>().lifetime == VariableLifetime::Automatic) {
-            context.addDiag(diag::AutoVarTraced, expr.sourceRange) << expr.symbol.name;
+static void checkMonitorArg(const ASTContext& context, const Expression& expr) {
+    expr.visitSymbolReferences([&](const Expression&, const Symbol& sym) {
+        if (auto var = sym.as_if<VariableSymbol>();
+            var && var->lifetime == VariableLifetime::Automatic && var->kind != SymbolKind::Field) {
+            context.addDiag(diag::AutoVarTraced, expr.sourceRange) << sym.name;
         }
-    }
-};
+    });
+}
 
 class MonitorTask : public DisplayTask {
 public:
@@ -92,9 +88,8 @@ public:
             return result;
 
         // Additional restriction for monitor tasks: automatic variables cannot be referenced.
-        MonitorVisitor visitor(context);
         for (auto arg : args)
-            arg->visit(visitor);
+            checkMonitorArg(context, *arg);
 
         return result;
     }
@@ -104,16 +99,18 @@ class FinishControlTask : public SystemTaskBase {
 public:
     using SystemTaskBase::SystemTaskBase;
 
+    FinishControlTask(KnownSystemName knownNameId, bool isFinish) : SystemTaskBase(knownNameId) {
+        neverReturns = isFinish;
+    }
+
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
         auto& comp = context.getCompilation();
         if (!checkArgCount(context, false, args, range, 0, 1))
             return comp.getErrorType();
 
-        if (args.size() == 1) {
-            if (!FmtHelpers::checkFinishNum(context, *args[0]))
-                return comp.getErrorType();
-        }
+        if (args.size() == 1)
+            FmtHelpers::checkFinishNum(context, *args[0]);
 
         return comp.getVoidType();
     }
@@ -124,8 +121,8 @@ public:
 // in constant functions.
 class SeverityTask : public SystemSubroutine {
 public:
-    SeverityTask(const std::string& name, ElabSystemTaskKind taskKind) :
-        SystemSubroutine(name, SubroutineKind::Function), taskKind(taskKind) {}
+    SeverityTask(KnownSystemName knownNameId, ElabSystemTaskKind taskKind) :
+        SystemSubroutine(knownNameId, SubroutineKind::Function), taskKind(taskKind) {}
 
     bool allowEmptyArgument(size_t) const override { return true; }
 
@@ -175,7 +172,7 @@ public:
         // equivalently, a task, nothing will inspect the result, but we only want it to not
         // abort further evaluation for errors / fatals.
         if (taskKind == ElabSystemTaskKind::Info || taskKind == ElabSystemTaskKind::Warning)
-            return ConstantValue::NullPlaceholder{};
+            return NullConstant;
         return nullptr;
     }
 
@@ -185,7 +182,9 @@ private:
 
 class FatalTask : public SeverityTask {
 public:
-    FatalTask() : SeverityTask("$fatal", ElabSystemTaskKind::Fatal) {}
+    FatalTask() : SeverityTask(KnownSystemName::Fatal, ElabSystemTaskKind::Fatal) {
+        neverReturns = true;
+    }
 
     bool allowEmptyArgument(size_t index) const final { return index != 0; }
 
@@ -196,8 +195,7 @@ public:
             if (args[0]->bad())
                 return comp.getErrorType();
 
-            if (!FmtHelpers::checkFinishNum(context, *args[0]))
-                return comp.getErrorType();
+            FmtHelpers::checkFinishNum(context, *args[0]);
 
             if (!FmtHelpers::checkDisplayArgs(context, args.subspan(1)))
                 return comp.getErrorType();
@@ -209,7 +207,7 @@ public:
 
 class StaticAssertTask : public SystemSubroutine {
 public:
-    StaticAssertTask() : SystemSubroutine("$static_assert", SubroutineKind::Task) {}
+    StaticAssertTask() : SystemSubroutine(KnownSystemName::StaticAssert, SubroutineKind::Task) {}
 
     bool allowEmptyArgument(size_t index) const final { return index != 0; }
 
@@ -281,9 +279,8 @@ public:
             return result;
 
         // Additional restriction for monitor tasks: automatic variables cannot be referenced.
-        MonitorVisitor visitor(context);
         for (auto arg : args.subspan(1))
-            arg->visit(visitor);
+            checkMonitorArg(context, *arg);
 
         return result;
     }
@@ -291,7 +288,7 @@ public:
 
 class StringOutputTask : public SystemTaskBase {
 public:
-    explicit StringOutputTask(const std::string& name) : SystemTaskBase(name) {
+    explicit StringOutputTask(KnownSystemName knownNameId) : SystemTaskBase(knownNameId) {
         hasOutputArgs = true;
     }
 
@@ -325,7 +322,7 @@ public:
 
 class StringFormatTask : public SystemTaskBase {
 public:
-    explicit StringFormatTask(const std::string& name) : SystemTaskBase(name) {
+    explicit StringFormatTask(KnownSystemName knownNameId) : SystemTaskBase(knownNameId) {
         hasOutputArgs = true;
     }
 
@@ -359,8 +356,8 @@ public:
 
 class ReadWriteMemTask : public SystemTaskBase {
 public:
-    ReadWriteMemTask(const std::string& name, bool isInput) :
-        SystemTaskBase(name), isInput(isInput) {
+    ReadWriteMemTask(KnownSystemName knownNameId, bool isInput) :
+        SystemTaskBase(knownNameId), isInput(isInput) {
         hasOutputArgs = isInput;
     }
 
@@ -563,7 +560,9 @@ public:
 
 class CastTask : public SystemTaskBase {
 public:
-    explicit CastTask(const std::string& name) : SystemTaskBase(name) { hasOutputArgs = true; }
+    explicit CastTask(KnownSystemName knownNameId) : SystemTaskBase(knownNameId) {
+        hasOutputArgs = true;
+    }
 
     const Expression& bindArgument(size_t argIndex, const ASTContext& context,
                                    const ExpressionSyntax& syntax, const Args&) const final {
@@ -581,14 +580,60 @@ public:
         if (!checkArgCount(context, false, args, range, 2, 2))
             return comp.getErrorType();
 
+        // Warn when the result of $cast is statically deterministic.
+        auto& destType = *args[0]->type;
+        auto& srcType = *args[1]->type;
+
+        auto reportWarning = [&](bool succeed) {
+            auto& diag = context.addDiag(diag::DynamicCastConst, range) << srcType << destType;
+            diag << (succeed ? "succeed"sv : "fail"sv);
+        };
+
+        if (!destType.isError() && !srcType.isError()) {
+            if (!destType.isClass()) {
+                // For non-class types the LRM says:
+                // The assignment is invalid if the arguments are singular and not cast compatible
+                // or the arguments are not singular and not assignment compatible.
+                //
+                // There's also an exeptional case for enums -- integer to enum casts check whether
+                // the value is actually one of the enum members.
+                if (destType.isEnum() && srcType.isIntegral()) {
+                    if (auto cv = context.tryEval(*args[1]); cv && cv.isInteger()) {
+                        auto&& values = destType.getCanonicalType()
+                                            .as<EnumType>()
+                                            .membersOfType<EnumValueSymbol>();
+                        reportWarning(std::ranges::any_of(values, [&cv](const EnumValueSymbol& ev) {
+                            return ev.getValue() == cv;
+                        }));
+                    }
+                }
+                else if (destType.isSingular() && srcType.isSingular()) {
+                    reportWarning(destType.isCastCompatible(srcType));
+                }
+                else {
+                    reportWarning(destType.isAssignmentCompatible(srcType));
+                }
+            }
+            else if (destType.isAssignmentCompatible(srcType)) {
+                // Source is already statically a subtype of (or equal to) the destination,
+                // so the cast always succeeds.
+                reportWarning(true);
+            }
+            else if (srcType.isClass() && !srcType.isAssignmentCompatible(destType)) {
+                // Both types are class types and neither is in the other's hierarchy, so no
+                // object whose static type is srcType can ever satisfy the cast to destType.
+                reportWarning(false);
+            }
+        }
+
         return comp.getIntType();
     }
 };
 
 class AssertControlTask : public SystemTaskBase {
 public:
-    explicit AssertControlTask(const std::string& name) :
-        SystemTaskBase(name), isFullMethod(name == "$assertcontrol") {}
+    explicit AssertControlTask(KnownSystemName knownNameId) :
+        SystemTaskBase(knownNameId), isFullMethod(name == "$assertcontrol") {}
 
     const Expression& bindArgument(size_t argIndex, const ASTContext& context,
                                    const ExpressionSyntax& syntax, const Args& args) const final {
@@ -639,9 +684,10 @@ private:
 
 class StochasticTask : public SystemSubroutine {
 public:
-    StochasticTask(const std::string& name, SubroutineKind subroutineKind, size_t inputArgs,
+    StochasticTask(KnownSystemName knownNameId, SubroutineKind subroutineKind, size_t inputArgs,
                    size_t outputArgs) :
-        SystemSubroutine(name, subroutineKind), inputArgs(inputArgs), outputArgs(outputArgs) {
+        SystemSubroutine(knownNameId, subroutineKind), inputArgs(inputArgs),
+        outputArgs(outputArgs) {
         hasOutputArgs = outputArgs > 0;
     }
 
@@ -681,7 +727,7 @@ private:
 
 class SdfAnnotateTask : public SystemTaskBase {
 public:
-    SdfAnnotateTask() : SystemTaskBase("$sdf_annotate") {}
+    SdfAnnotateTask() : SystemTaskBase(KnownSystemName::SdfAnnotate) {}
 
     const Expression& bindArgument(size_t argIndex, const ASTContext& context,
                                    const ExpressionSyntax& syntax, const Args& args) const final {
@@ -727,7 +773,7 @@ public:
 
 class PlaTask : public SystemTaskBase {
 public:
-    PlaTask(const std::string& name) : SystemTaskBase(name) {};
+    PlaTask(KnownSystemName knownNameId) : SystemTaskBase(knownNameId) {};
 
     const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
                                const Expression*) const final {
@@ -783,8 +829,8 @@ private:
 
 class ScopeTask : public SystemTaskBase {
 public:
-    ScopeTask(const std::string& name, bool isOptional) :
-        SystemTaskBase(name), isOptional(isOptional) {}
+    ScopeTask(KnownSystemName knownNameId, bool isOptional) :
+        SystemTaskBase(knownNameId), isOptional(isOptional) {}
 
     const Expression& bindArgument(size_t argIndex, const ASTContext& context,
                                    const ExpressionSyntax& syntax, const Args& args) const final {
@@ -843,7 +889,9 @@ public:
 
 class SReadMemTask : public SystemTaskBase {
 public:
-    SReadMemTask(const std::string& name) : SystemTaskBase(name) { hasOutputArgs = true; }
+    SReadMemTask(KnownSystemName knownNameId) : SystemTaskBase(knownNameId) {
+        hasOutputArgs = true;
+    }
 
     const Expression& bindArgument(size_t argIndex, const ASTContext& context,
                                    const ExpressionSyntax& syntax, const Args&) const final {
@@ -876,157 +924,181 @@ public:
     }
 };
 
+class DepositTask : public SystemTaskBase {
+public:
+    DepositTask() : SystemTaskBase(KnownSystemName::Deposit) { hasOutputArgs = true; }
+
+    const Expression& bindArgument(size_t argIndex, const ASTContext& context,
+                                   const ExpressionSyntax& syntax, const Args& args) const final {
+        if (argIndex == 0)
+            return Expression::bindLValue(syntax, context);
+
+        if (argIndex == 1 && !args.empty()) {
+            return Expression::bindArgument(*args[0]->type, ArgumentDirection::In, {}, syntax,
+                                            context);
+        }
+
+        return SystemTaskBase::bindArgument(argIndex, context, syntax, args);
+    }
+
+    const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange range,
+                               const Expression*) const final {
+        auto& comp = context.getCompilation();
+        if (!checkArgCount(context, false, args, range, 2, 2))
+            return comp.getErrorType();
+
+        return comp.getVoidType();
+    }
+};
+
 void Builtins::registerSystemTasks() {
+    using parsing::KnownSystemName;
+
 #define REGISTER(type, name, base) addSystemSubroutine(std::make_shared<type>(name, base))
-    REGISTER(DisplayTask, "$display", LiteralBase::Decimal);
-    REGISTER(DisplayTask, "$displayb", LiteralBase::Binary);
-    REGISTER(DisplayTask, "$displayo", LiteralBase::Octal);
-    REGISTER(DisplayTask, "$displayh", LiteralBase::Hex);
-    REGISTER(DisplayTask, "$write", LiteralBase::Decimal);
-    REGISTER(DisplayTask, "$writeb", LiteralBase::Binary);
-    REGISTER(DisplayTask, "$writeo", LiteralBase::Octal);
-    REGISTER(DisplayTask, "$writeh", LiteralBase::Hex);
-    REGISTER(MonitorTask, "$strobe", LiteralBase::Decimal);
-    REGISTER(MonitorTask, "$strobeb", LiteralBase::Binary);
-    REGISTER(MonitorTask, "$strobeo", LiteralBase::Octal);
-    REGISTER(MonitorTask, "$strobeh", LiteralBase::Hex);
-    REGISTER(MonitorTask, "$monitor", LiteralBase::Decimal);
-    REGISTER(MonitorTask, "$monitorb", LiteralBase::Binary);
-    REGISTER(MonitorTask, "$monitoro", LiteralBase::Octal);
-    REGISTER(MonitorTask, "$monitorh", LiteralBase::Hex);
+    REGISTER(DisplayTask, KnownSystemName::Display, LiteralBase::Decimal);
+    REGISTER(DisplayTask, KnownSystemName::DisplayB, LiteralBase::Binary);
+    REGISTER(DisplayTask, KnownSystemName::DisplayO, LiteralBase::Octal);
+    REGISTER(DisplayTask, KnownSystemName::DisplayH, LiteralBase::Hex);
+    REGISTER(DisplayTask, KnownSystemName::Write, LiteralBase::Decimal);
+    REGISTER(DisplayTask, KnownSystemName::WriteB, LiteralBase::Binary);
+    REGISTER(DisplayTask, KnownSystemName::WriteO, LiteralBase::Octal);
+    REGISTER(DisplayTask, KnownSystemName::WriteH, LiteralBase::Hex);
+    REGISTER(MonitorTask, KnownSystemName::Strobe, LiteralBase::Decimal);
+    REGISTER(MonitorTask, KnownSystemName::StrobeB, LiteralBase::Binary);
+    REGISTER(MonitorTask, KnownSystemName::StrobeO, LiteralBase::Octal);
+    REGISTER(MonitorTask, KnownSystemName::StrobeH, LiteralBase::Hex);
+    REGISTER(MonitorTask, KnownSystemName::Monitor, LiteralBase::Decimal);
+    REGISTER(MonitorTask, KnownSystemName::MonitorB, LiteralBase::Binary);
+    REGISTER(MonitorTask, KnownSystemName::MonitorO, LiteralBase::Octal);
+    REGISTER(MonitorTask, KnownSystemName::MonitorH, LiteralBase::Hex);
 
 #undef REGISTER
 #define REGISTER(type, name) addSystemSubroutine(std::make_shared<type>(name))
-    REGISTER(FileDisplayTask, "$fdisplay");
-    REGISTER(FileDisplayTask, "$fdisplayb");
-    REGISTER(FileDisplayTask, "$fdisplayo");
-    REGISTER(FileDisplayTask, "$fdisplayh");
-    REGISTER(FileDisplayTask, "$fwrite");
-    REGISTER(FileDisplayTask, "$fwriteb");
-    REGISTER(FileDisplayTask, "$fwriteo");
-    REGISTER(FileDisplayTask, "$fwriteh");
-    REGISTER(FileMonitorTask, "$fstrobe");
-    REGISTER(FileMonitorTask, "$fstrobeb");
-    REGISTER(FileMonitorTask, "$fstrobeo");
-    REGISTER(FileMonitorTask, "$fstrobeh");
-    REGISTER(FileMonitorTask, "$fmonitor");
-    REGISTER(FileMonitorTask, "$fmonitorb");
-    REGISTER(FileMonitorTask, "$fmonitoro");
-    REGISTER(FileMonitorTask, "$fmonitorh");
+    REGISTER(FileDisplayTask, KnownSystemName::FDisplay);
+    REGISTER(FileDisplayTask, KnownSystemName::FDisplayB);
+    REGISTER(FileDisplayTask, KnownSystemName::FDisplayO);
+    REGISTER(FileDisplayTask, KnownSystemName::FDisplayH);
+    REGISTER(FileDisplayTask, KnownSystemName::FWrite);
+    REGISTER(FileDisplayTask, KnownSystemName::FWriteB);
+    REGISTER(FileDisplayTask, KnownSystemName::FWriteO);
+    REGISTER(FileDisplayTask, KnownSystemName::FWriteH);
+    REGISTER(FileMonitorTask, KnownSystemName::FStrobe);
+    REGISTER(FileMonitorTask, KnownSystemName::FStrobeB);
+    REGISTER(FileMonitorTask, KnownSystemName::FStrobeO);
+    REGISTER(FileMonitorTask, KnownSystemName::FStrobeH);
+    REGISTER(FileMonitorTask, KnownSystemName::FMonitor);
+    REGISTER(FileMonitorTask, KnownSystemName::FMonitorB);
+    REGISTER(FileMonitorTask, KnownSystemName::FMonitorO);
+    REGISTER(FileMonitorTask, KnownSystemName::FMonitorH);
 
-    REGISTER(StringOutputTask, "$swrite");
-    REGISTER(StringOutputTask, "$swriteb");
-    REGISTER(StringOutputTask, "$swriteo");
-    REGISTER(StringOutputTask, "$swriteh");
+    REGISTER(StringOutputTask, KnownSystemName::SWrite);
+    REGISTER(StringOutputTask, KnownSystemName::SWriteB);
+    REGISTER(StringOutputTask, KnownSystemName::SWriteO);
+    REGISTER(StringOutputTask, KnownSystemName::SWriteH);
 
-    REGISTER(FinishControlTask, "$finish");
-    REGISTER(FinishControlTask, "$stop");
+    REGISTER(StringFormatTask, KnownSystemName::SFormat);
 
-    REGISTER(StringFormatTask, "$sformat");
+    REGISTER(PrintTimeScaleTask, KnownSystemName::PrintTimeScale);
 
-    REGISTER(PrintTimeScaleTask, "$printtimescale");
+    REGISTER(DumpVarsTask, KnownSystemName::DumpVars);
+    REGISTER(DumpPortsTask, KnownSystemName::DumpPorts);
+    REGISTER(ShowVarsTask, KnownSystemName::ShowVars);
 
-    REGISTER(DumpVarsTask, "$dumpvars");
-    REGISTER(DumpPortsTask, "$dumpports");
-    REGISTER(ShowVarsTask, "$showvars");
-
-    REGISTER(CastTask, "$cast");
+    REGISTER(CastTask, KnownSystemName::Cast);
 
 #undef REGISTER
 #define REGISTER(type, name, kind) addSystemSubroutine(std::make_shared<type>(name, kind))
-    REGISTER(SeverityTask, "$info", ElabSystemTaskKind::Info);
-    REGISTER(SeverityTask, "$warning", ElabSystemTaskKind::Warning);
-    REGISTER(SeverityTask, "$error", ElabSystemTaskKind::Error);
+    REGISTER(SeverityTask, KnownSystemName::Info, ElabSystemTaskKind::Info);
+    REGISTER(SeverityTask, KnownSystemName::Warning, ElabSystemTaskKind::Warning);
+    REGISTER(SeverityTask, KnownSystemName::Error, ElabSystemTaskKind::Error);
+
+#undef REGISTER
+#define REGISTER(type, name, isFinish) addSystemSubroutine(std::make_shared<type>(name, isFinish))
+    REGISTER(FinishControlTask, KnownSystemName::Finish, true);
+    REGISTER(FinishControlTask, KnownSystemName::Stop, false);
 
 #undef REGISTER
 
-    addSystemSubroutine(std::make_shared<ReadWriteMemTask>("$readmemb", true));
-    addSystemSubroutine(std::make_shared<ReadWriteMemTask>("$readmemh", true));
-    addSystemSubroutine(std::make_shared<ReadWriteMemTask>("$writememb", false));
-    addSystemSubroutine(std::make_shared<ReadWriteMemTask>("$writememh", false));
-    addSystemSubroutine(std::make_shared<SReadMemTask>("$sreadmemb"));
-    addSystemSubroutine(std::make_shared<SReadMemTask>("$sreadmemh"));
-    addSystemSubroutine(std::make_shared<SimpleSystemTask>("$system", intType, 0,
+    addSystemSubroutine(std::make_shared<ReadWriteMemTask>(KnownSystemName::ReadMemB, true));
+    addSystemSubroutine(std::make_shared<ReadWriteMemTask>(KnownSystemName::ReadMemH, true));
+    addSystemSubroutine(std::make_shared<ReadWriteMemTask>(KnownSystemName::WriteMemB, false));
+    addSystemSubroutine(std::make_shared<ReadWriteMemTask>(KnownSystemName::WriteMemH, false));
+    addSystemSubroutine(std::make_shared<SReadMemTask>(KnownSystemName::SReadMemB));
+    addSystemSubroutine(std::make_shared<SReadMemTask>(KnownSystemName::SReadMemH));
+    addSystemSubroutine(std::make_shared<SimpleSystemTask>(KnownSystemName::System, intType, 0,
                                                            std::vector<const Type*>{&stringType}));
     addSystemSubroutine(std::make_shared<SdfAnnotateTask>());
     addSystemSubroutine(std::make_shared<StaticAssertTask>());
     addSystemSubroutine(std::make_shared<FatalTask>());
-    addSystemSubroutine(std::make_shared<ScopeTask>("$list", true));
-    addSystemSubroutine(std::make_shared<ScopeTask>("$scope", false));
+    addSystemSubroutine(std::make_shared<ScopeTask>(KnownSystemName::List, true));
+    addSystemSubroutine(std::make_shared<ScopeTask>(KnownSystemName::Scope, false));
+    addSystemSubroutine(std::make_shared<DepositTask>());
 
 #define TASK(name, required, ...)                                                    \
     addSystemSubroutine(std::make_shared<SimpleSystemTask>(name, voidType, required, \
                                                            std::vector<const Type*>{__VA_ARGS__}))
 
-    TASK("$exit", 0, );
+    TASK(KnownSystemName::Exit, 0, );
 
-    TASK("$timeformat", 0, &intType, &intType, &stringType, &intType);
+    TASK(KnownSystemName::TimeFormat, 0, &intType, &intType, &stringType, &intType);
 
-    TASK("$monitoron", 0, );
-    TASK("$monitoroff", 0, );
+    TASK(KnownSystemName::MonitorOn, 0, );
+    TASK(KnownSystemName::MonitorOff, 0, );
 
-    TASK("$dumpfile", 0, &stringType);
-    TASK("$dumpon", 0, );
-    TASK("$dumpoff", 0, );
-    TASK("$dumpall", 0, );
-    TASK("$dumplimit", 1, &intType);
-    TASK("$dumpflush", 0, );
-    TASK("$dumpportson", 0, &stringType);
-    TASK("$dumpportsoff", 0, &stringType);
-    TASK("$dumpportsall", 0, &stringType);
-    TASK("$dumpportslimit", 1, &intType, &stringType);
-    TASK("$dumpportsflush", 0, &stringType);
+    TASK(KnownSystemName::DumpFile, 0, &stringType);
+    TASK(KnownSystemName::DumpOn, 0, );
+    TASK(KnownSystemName::DumpOff, 0, );
+    TASK(KnownSystemName::DumpAll, 0, );
+    TASK(KnownSystemName::DumpLimit, 1, &intType);
+    TASK(KnownSystemName::DumpFlush, 0, );
+    TASK(KnownSystemName::DumpPortsOn, 0, &stringType);
+    TASK(KnownSystemName::DumpPortsOff, 0, &stringType);
+    TASK(KnownSystemName::DumpPortsAll, 0, &stringType);
+    TASK(KnownSystemName::DumpPortsLimit, 1, &intType, &stringType);
+    TASK(KnownSystemName::DumpPortsFlush, 0, &stringType);
 
-    TASK("$input", 1, &stringType);
-    TASK("$key", 0, &stringType);
-    TASK("$nokey", 0, );
-    TASK("$log", 0, &stringType);
-    TASK("$nolog", 0, );
-    TASK("$reset", 0, &intType, &intType, &intType);
-    TASK("$save", 1, &stringType);
-    TASK("$restart", 1, &stringType);
-    TASK("$incsave", 1, &stringType);
-    TASK("$showscopes", 0, &intType);
+    TASK(KnownSystemName::Input, 1, &stringType);
+    TASK(KnownSystemName::Key, 0, &stringType);
+    TASK(KnownSystemName::NoKey, 0, );
+    TASK(KnownSystemName::Log, 0, &stringType);
+    TASK(KnownSystemName::NoLog, 0, );
+    TASK(KnownSystemName::Reset, 0, &intType, &intType, &intType);
+    TASK(KnownSystemName::Save, 1, &stringType);
+    TASK(KnownSystemName::Restart, 1, &stringType);
+    TASK(KnownSystemName::IncSave, 1, &stringType);
+    TASK(KnownSystemName::ShowScopes, 0, &intType);
 
 #undef TASK
 
 #define ASSERTCTRL(name) addSystemSubroutine(std::make_shared<AssertControlTask>(name))
-    ASSERTCTRL("$assertcontrol");
-    ASSERTCTRL("$asserton");
-    ASSERTCTRL("$assertoff");
-    ASSERTCTRL("$assertkill");
-    ASSERTCTRL("$assertpasson");
-    ASSERTCTRL("$assertpassoff");
-    ASSERTCTRL("$assertfailon");
-    ASSERTCTRL("$assertfailoff");
-    ASSERTCTRL("$assertnonvacuouson");
-    ASSERTCTRL("$assertvacuousoff");
+    ASSERTCTRL(KnownSystemName::AssertControl);
+    ASSERTCTRL(KnownSystemName::AssertOn);
+    ASSERTCTRL(KnownSystemName::AssertOff);
+    ASSERTCTRL(KnownSystemName::AssertKill);
+    ASSERTCTRL(KnownSystemName::AssertPassOn);
+    ASSERTCTRL(KnownSystemName::AssertPassOff);
+    ASSERTCTRL(KnownSystemName::AssertFailOn);
+    ASSERTCTRL(KnownSystemName::AssertFailOff);
+    ASSERTCTRL(KnownSystemName::AssertNonvacuousOn);
+    ASSERTCTRL(KnownSystemName::AssertVacuousOff);
 
 #undef ASSERTCTRL
 
 #define TASK(name, kind, input, output) \
     addSystemSubroutine(std::make_shared<StochasticTask>(name, kind, input, output))
-    TASK("$q_initialize", SubroutineKind::Task, 3, 1);
-    TASK("$q_add", SubroutineKind::Task, 3, 1);
-    TASK("$q_remove", SubroutineKind::Task, 2, 2);
-    TASK("$q_exam", SubroutineKind::Task, 2, 2);
-    TASK("$q_full", SubroutineKind::Function, 1, 1);
+    TASK(KnownSystemName::QInitialize, SubroutineKind::Task, 3, 1);
+    TASK(KnownSystemName::QAdd, SubroutineKind::Task, 3, 1);
+    TASK(KnownSystemName::QRemove, SubroutineKind::Task, 2, 2);
+    TASK(KnownSystemName::QExam, SubroutineKind::Task, 2, 2);
+    TASK(KnownSystemName::QFull, SubroutineKind::Function, 1, 1);
 
 #undef TASK
 
-#define PLA_TASK(name) addSystemSubroutine(std::make_shared<PlaTask>(name))
-    for (auto& fmt : {"$array", "$plane"}) {
-        for (auto& gate : {"$and", "$or", "$nand", "$nor"}) {
-            for (auto& type : {"$async", "$sync"}) {
-                std::string name(type);
-                name.append(gate);
-                name.append(fmt);
-                PLA_TASK(name);
-            }
-        }
+    // There are 16 PLA tasks, with sequential enum values starting with $async$and$array
+    for (int i = 0; i < 16; i++) {
+        addSystemSubroutine(
+            std::make_shared<PlaTask>((KnownSystemName)((int)KnownSystemName::AsyncAndArray + i)));
     }
-
-#undef PLA_TASK
 }
 
 } // namespace slang::ast::builtins

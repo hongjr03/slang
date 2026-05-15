@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -462,7 +463,10 @@ protected:
     // This way we don't need a virtual destructor, or vtable at all.
     SmallVectorBase() noexcept = default;
     explicit SmallVectorBase(size_type capacity) noexcept : cap(capacity) {}
-    ~SmallVectorBase() { cleanup(); }
+    ~SmallVectorBase() {
+        if (!isSmall())
+            ::operator delete(data_);
+    }
 
     SmallVectorBase& operator=(const SmallVectorBase& rhs);
     SmallVectorBase& operator=(SmallVectorBase&& rhs);
@@ -608,6 +612,9 @@ public:
         this->append_range(range);
     }
 
+    /// Constructs the SmallVector from an initializer list.
+    SmallVector(std::initializer_list<T> list) { this->append(list.begin(), list.end()); }
+
     /// Copy constructs from another vector.
     SmallVector(const SmallVector& other) : SmallVector(static_cast<const Base&>(other)) {}
 
@@ -615,13 +622,15 @@ public:
     SmallVector(const Base& other) : Base(N) { this->append(other.begin(), other.end()); }
 
     /// Move constructs from another vector.
-    SmallVector(SmallVector&& other) : SmallVector(static_cast<Base&&>(other)) {}
+    SmallVector(SmallVector&& other) noexcept : SmallVector(static_cast<Base&&>(other)) {}
 
     /// Move constructs from another vector.
-    SmallVector(Base&& other) {
+    SmallVector(Base&& other) noexcept {
         if (other.isSmall()) {
             this->cap = N;
-            this->append(std::move_iterator(other.begin()), std::move_iterator(other.end()));
+            this->append(std::make_move_iterator(other.begin()),
+                         std::make_move_iterator(other.end()));
+            other.clear();
         }
         else {
             this->data_ = std::exchange(other.data_, nullptr);
@@ -629,6 +638,8 @@ public:
             this->cap = std::exchange(other.cap, 0);
         }
     }
+
+    ~SmallVector() { std::ranges::destroy(*this); }
 
     /// Copy assignment from another vector.
     SmallVector& operator=(const Base& rhs) {
@@ -680,25 +691,9 @@ inline bool operator==(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& 
     return std::ranges::equal(lhs, rhs);
 }
 
-// TODO: clean these up once minimum libc++ version has lexicographical_compare_three_way
 template<typename T>
-inline bool operator<(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& rhs) {
-    return std::ranges::lexicographical_compare(lhs, rhs);
-}
-
-template<typename T>
-inline bool operator>(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& rhs) {
-    return rhs < lhs;
-}
-
-template<typename T>
-inline bool operator<=(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& rhs) {
-    return !(lhs > rhs);
-}
-
-template<typename T>
-inline bool operator>=(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& rhs) {
-    return !(lhs < rhs);
+inline auto operator<=>(const SmallVectorBase<T>& lhs, const SmallVectorBase<T>& rhs) {
+    return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
 
 template<typename T>

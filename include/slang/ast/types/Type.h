@@ -15,6 +15,7 @@
 namespace slang::ast {
 
 class Compilation;
+class TypeProvider;
 struct LookupResult;
 enum class RandMode;
 
@@ -230,6 +231,10 @@ public:
     /// classes, events, chandles, virtual interfaces, and the null type.
     bool isHandleType() const;
 
+    /// Indicates whether this is a type that is a handle to some object that
+    /// contains accessible members (classes, covergroups, virtual interfaces).
+    bool isObjectHandleType() const;
+
     /// Indicates whether this is a type alias.
     /// Note that unlike other methods, this one does not unwrap to the canonical type.
     bool isAlias() const { return kind == SymbolKind::TypeAlias; }
@@ -268,6 +273,11 @@ public:
     /// interface class type, or if this is an interface class type that
     /// extends the given interface class type. Otherwise, returns false.
     bool implements(const Type& ifaceClass) const;
+
+    /// Determines whether the given type is a struct or union type that is
+    /// identical to this one, meaning they have the same fields with the
+    /// same names and types in the same order.
+    bool isIdenticalStructUnion(const Type& rhs) const;
 
     /// Gets a combination of flags for integral types; for non-integral types,
     /// this returns all zeros.
@@ -321,12 +331,12 @@ public:
     /// If this is an integral type, returns the same type converted
     /// to a signed integral type (properly descending through sub arrays).
     /// Otherwise returns `*this`.
-    const Type& makeSigned(Compilation& compilation) const;
+    const Type& makeSigned(const TypeProvider& typeProvider) const;
 
     /// If this is an integral type, returns the same type converted
     /// to an unsigned integral type (properly descending through sub arrays).
     /// Otherwise returns `*this`.
-    const Type& makeUnsigned(Compilation& compilation) const;
+    const Type& makeUnsigned(const TypeProvider& typeProvider) const;
 
     /// @returns a human-friendly string representation of the type.
     std::string toString() const;

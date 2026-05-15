@@ -9,9 +9,12 @@
 
 #include <expected.hpp>
 #include <memory>
+#include <vector>
 
 #include "slang/diagnostics/Diagnostics.h"
 #include "slang/parsing/ParserMetadata.h"
+#include "slang/parsing/Preprocessor.h"
+#include "slang/text/SourceLocation.h"
 #include "slang/util/Bag.h"
 #include "slang/util/BumpAllocator.h"
 
@@ -41,6 +44,7 @@ public:
     using TreeOrError =
         nonstd::expected<std::shared_ptr<SyntaxTree>, std::pair<std::error_code, std::string_view>>;
     using MacroList = std::span<const DefineDirectiveSyntax* const>;
+    using IncludeList = std::span<const parsing::IncludeMetadata>;
 
     /// Indicates whether this syntax tree represents a "library" compilation unit,
     /// which means that modules declared within it are not automatically instantiated.
@@ -55,6 +59,8 @@ public:
     /// Creates a syntax tree from a full compilation unit.
     /// @a path is the path to the source file on disk.
     /// @return the created and parsed syntax tree.
+    /// @note The returned tree will use the source manager returned
+    ///       by @a getDefaultSourceManager().
     static TreeOrError fromFile(std::string_view path);
 
     /// Creates a syntax tree from a full compilation unit.
@@ -70,6 +76,8 @@ public:
     /// @a paths is the list of paths to the source files on disk.
     /// @return the created and parsed syntax tree on success, or an OS error
     ///         code if the file fails to load.
+    /// @note The returned tree will use the source manager returned
+    ///       by @a getDefaultSourceManager().
     static TreeOrError fromFiles(std::span<const std::string_view> paths);
 
     /// Creates a syntax tree by concatenating several files loaded from disk.
@@ -86,6 +94,8 @@ public:
     /// @a name is an optional name to give to the loaded source buffer.
     /// @a path is an optional path to give to the loaded source buffer.
     /// @return the created and parsed syntax tree.
+    /// @note The returned tree will use the source manager returned
+    ///       by @a getDefaultSourceManager().
     static std::shared_ptr<SyntaxTree> fromText(std::string_view text,
                                                 std::string_view name = "source",
                                                 std::string_view path = "");
@@ -96,6 +106,8 @@ public:
     /// @a name is an optional name to give to the loaded source buffer.
     /// @a path is an optional path to give to the loaded source buffer.
     /// @return the created and parsed syntax tree.
+    /// @note The returned tree will use the source manager returned
+    ///       by @a getDefaultSourceManager().
     static std::shared_ptr<SyntaxTree> fromText(std::string_view text, const Bag& options,
                                                 std::string_view name = "source"sv,
                                                 std::string_view path = "");
@@ -210,6 +222,20 @@ public:
     /// Gets the list of macros that were defined at the end of the loaded source file.
     MacroList getDefinedMacros() const { return macros; }
 
+    /// Gets the list of include directives that were encountered while parsing.
+    IncludeList getIncludeDirectives() const { return includes; }
+
+    /// Gets the list of source buffer IDs that this syntax tree was created from.
+    std::span<const BufferID> getSourceBufferIds() const { return sourceBufferIds; }
+
+    /// Checks that the syntax tree is valid, in the sense that it round trips
+    /// through text and back again to an equivalent tree.
+    ///
+    /// The parser will always create a valid syntax tree. It's possible to
+    /// create an invalid syntax tree by manipulating the tree structure directly
+    /// or with the help of a SyntaxRewriter.
+    bool validate() const;
+
     /// This is a shared default source manager for cases where the user doesn't
     /// care about managing the lifetime of loaded source. Note that all of
     /// the source loaded by this thing will live in memory for the lifetime of
@@ -219,7 +245,9 @@ public:
 private:
     SyntaxTree(SyntaxNode* root, const SourceLibrary* library, SourceManager& sourceManager,
                BumpAllocator&& alloc, Diagnostics&& diagnostics, parsing::ParserMetadata&& metadata,
-               std::vector<const DefineDirectiveSyntax*>&& macros, Bag options);
+               std::vector<const DefineDirectiveSyntax*>&& macros,
+               std::vector<parsing::IncludeMetadata>&& includes,
+               std::vector<BufferID>&& sourceBufferIds, Bag options);
 
     static std::shared_ptr<SyntaxTree> create(SourceManager& sourceManager,
                                               std::span<const SourceBuffer> source,
@@ -234,6 +262,8 @@ private:
     Bag options_;
     std::unique_ptr<parsing::ParserMetadata> metadata;
     std::vector<const DefineDirectiveSyntax*> macros;
+    std::vector<parsing::IncludeMetadata> includes;
+    std::vector<BufferID> sourceBufferIds;
 };
 
 } // namespace slang::syntax

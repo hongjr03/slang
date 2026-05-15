@@ -3,6 +3,12 @@
 
 #include "Test.h"
 
+#include "slang/ast/EvalContext.h"
+#include "slang/ast/ValuePath.h"
+#include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/LiteralExpressions.h"
+#include "slang/ast/expressions/OperatorExpressions.h"
+#include "slang/ast/expressions/SelectExpressions.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
@@ -155,7 +161,7 @@ module m6(I.bar bar); endmodule
     checkIfacePort("m0", "a", "I", "");
     checkIfacePort("m0", "b", "I", "");
     checkWirePort("m0", "c", In, wire, "logic");
-    checkWirePort("m1", "j", InOut, wire, "struct{logic f;}J");
+    checkWirePort("m1", "j", InOut, wire, "J");
     checkIfacePort("m3", "k", "K", "");
     checkWirePort("m3", "w", InOut, wire, "logic");
     checkWirePort("m4", "v", Out, nullptr, "logic");
@@ -385,14 +391,15 @@ endmodule
     CHECK((it++)->code == diag::UsedBeforeDeclared);
     CHECK((it++)->code == diag::UsedBeforeDeclared);
     CHECK((it++)->code == diag::UsedBeforeDeclared);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
     CHECK((it++)->code == diag::MixingOrderedAndNamedPorts);
     CHECK((it++)->code == diag::DuplicateWildcardPortConnection);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
-    CHECK((it++)->code == diag::UnconnectedNamedPort);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
+    CHECK((it++)->code == diag::EmptyInputPortConn);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
+    CHECK((it++)->code == diag::UnconnectedInputPort);
     CHECK((it++)->code == diag::DuplicatePortConnection);
     CHECK((it++)->code == diag::InterfacePortNotConnected);
     CHECK((it++)->code == diag::InterfacePortInvalidExpression);
@@ -446,6 +453,41 @@ endmodule
     Compilation compilation;
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Instance array packed port slicing") {
+    auto tree = SyntaxTree::fromText(R"(
+module top(output logic [1:0][2:0] d6);
+    sub sub6 [2:0] (.d(d6));
+endmodule
+module sub (output logic [1:0] d);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& arr = compilation.getRoot().lookupName<InstanceArraySymbol>("top.sub6");
+    REQUIRE(arr.elements.size() == 3);
+
+    // sub6[1] maps to flat bit range {3,2}, spanning d6[0][2] and d6[1][0].
+    // the port connection expression for the middle instance should be 2 bits,
+    // not 3 (which was the bug: the right-partial element was over-selected).
+    auto& midInst = arr.elements[1]->as<InstanceSymbol>();
+    auto* connExpr = midInst.getPortConnections()[0]->getExpression();
+    REQUIRE(connExpr);
+    // for an output port, the expression is an assignment; the LHS is the
+    // sliced destination in the parent scope (the concatenation of d6 slices).
+    auto& assign = connExpr->as<AssignmentExpression>();
+    auto& lhs = assign.left();
+    CHECK(lhs.kind == ExpressionKind::Concatenation);
+    CHECK(lhs.type->getBitWidth() == 2);
+    auto& concat = lhs.as<ConcatenationExpression>();
+    bitwidth_t totalWidth = 0;
+    for (auto op : concat.operands())
+        totalWidth += op->type->getBitWidth();
+    CHECK(totalWidth == 2);
 }
 
 TEST_CASE("Instance array port connection errors") {
@@ -712,9 +754,11 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::UnconnectedUnnamedPort);
-    CHECK(diags[1].code == diag::NullPortExpression);
+    REQUIRE(diags.size() == 4);
+    CHECK(diags[0].code == diag::NullPort);
+    CHECK(diags[1].code == diag::NullPort);
+    CHECK(diags[2].code == diag::UnconnectedUnnamedPort);
+    CHECK(diags[3].code == diag::NullPortExpression);
 }
 
 TEST_CASE("Clocking blocks in modports") {
@@ -727,7 +771,7 @@ interface A_Bus( input logic clk );
         input gnt;
         output req, addr;
         inout data;
-        property p1; gnt ##[1:3] data; endproperty
+        property p1; gnt ##[1:3] data > 0; endproperty
     endclocking
 
     modport DUT ( input clk, req, addr,
@@ -1110,10 +1154,12 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
+    REQUIRE(diags.size() == 5);
     CHECK(diags[0].code == diag::ExpressionNotAssignable);
-    CHECK(diags[1].code == diag::InvalidRefArg);
-    CHECK(diags[2].code == diag::NullPortExpression);
+    CHECK(diags[1].code == diag::ExpressionNotAssignable);
+    CHECK(diags[2].code == diag::InvalidRefArg);
+    CHECK(diags[3].code == diag::NullPortExpression);
+    CHECK(diags[4].code == diag::EmptyInputPortConn);
 }
 
 TEST_CASE("Ansi port initializers") {
@@ -1138,7 +1184,25 @@ endmodule
     REQUIRE(diags.size() == 3);
     CHECK(diags[0].code == diag::ConstEvalNonConstVariable);
     CHECK(diags[1].code == diag::AnsiIfacePortDefault);
-    CHECK(diags[2].code == diag::UnconnectedNamedPort);
+    CHECK(diags[2].code == diag::UnconnectedOutputPort);
+}
+
+TEST_CASE("Unconnected inout port warning") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(inout wire w);
+endmodule
+
+module top;
+    m m1();
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::UnconnectedInOutPort);
 }
 
 TEST_CASE("Implicit named port connection directions") {
@@ -1300,54 +1364,6 @@ endmodule
     CHECK(diags[14].code == diag::PortDoesNotExist);
 }
 
-TEST_CASE("Inconsistent port collapsing") {
-    auto tree = SyntaxTree::fromText(R"(
-module m (input .a({b, {c[1:0], d}}), input uwire [2:1] f);
-    wand b;
-    wand [3:0] c;
-    supply0 d;
-endmodule
-
-module n ({b[1:0], a});
-    input tri0 a;
-    input tri1 [3:0] b;
-endmodule
-
-module x(input trireg in);
-    y y(.in);
-    y y1(in);
-    y y2(.in(in));
-endmodule
-
-module y(input wor in);
-endmodule
-
-module top;
-    wand a;
-    wor b;
-    trireg [1:0] c;
-
-    m m1({a, b, c}, c);
-    n n1({{a, a}, c[0]});
-    x x1(b);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 8);
-    CHECK(diags[0].code == diag::ImplicitConnNetInconsistent);
-    CHECK(diags[1].code == diag::NetInconsistent);
-    CHECK(diags[2].code == diag::NetInconsistent);
-    CHECK(diags[3].code == diag::NetRangeInconsistent);
-    CHECK(diags[4].code == diag::NetRangeInconsistent);
-    CHECK(diags[5].code == diag::NetInconsistent);
-    CHECK(diags[6].code == diag::NetRangeInconsistent);
-    CHECK(diags[7].code == diag::NetInconsistent);
-}
-
 TEST_CASE("Inout port conn to variable") {
     auto tree = SyntaxTree::fromText(R"(
 module m(logic a);
@@ -1393,58 +1409,6 @@ endmodule
     CHECK(diags[1].code == diag::RefPortUnconnected);
 }
 
-TEST_CASE("User-defined nettype port connection errors") {
-    auto tree = SyntaxTree::fromText(R"(
-nettype integer nt1;
-
-module m(nt1 foo, bar, input nt1 baz);
-endmodule
-
-module n(input signed foo);
-endmodule
-
-module o(nt1 a);
-endmodule
-
-module p({a, b});
-    input nt1 a, b;
-endmodule
-
-module top;
-    wire signed [5:0] a;
-    wire integer b;
-
-    m m1(a, b, b);
-
-    nettype logic signed[5:0] nt2;
-    nt2 c;
-    n n1(c);
-
-    o o1(c);
-
-    p p1({c, c});
-
-    nt1 d;
-    p p2({d, d});
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 9);
-    CHECK(diags[0].code == diag::MismatchedUserDefPortConn);
-    CHECK(diags[1].code == diag::PortWidthTruncate);
-    CHECK(diags[2].code == diag::MismatchedUserDefPortDir);
-    CHECK(diags[3].code == diag::MismatchedUserDefPortConn);
-    CHECK(diags[4].code == diag::PortWidthTruncate);
-    CHECK(diags[5].code == diag::UserDefPortTwoSided);
-    CHECK(diags[6].code == diag::PortWidthTruncate);
-    CHECK(diags[7].code == diag::UserDefPortMixedConcat);
-    CHECK(diags[8].code == diag::PortWidthExpand);
-}
-
 TEST_CASE("inout uwire port errors") {
     auto tree = SyntaxTree::fromText(R"(
 module m(a);
@@ -1480,61 +1444,6 @@ endmodule
     CHECK(diags[3].code == diag::InOutUWireConn);
 }
 
-TEST_CASE("Assigning to input ports") {
-    auto tree = SyntaxTree::fromText(R"(
-module m(input .a(a), input int b, output int c);
-    int a;
-    assign a = 1;
-    assign b = 2;
-endmodule
-
-module n(a[1:0]);
-    input var [3:0] a;
-    assign a[2:1] = 1;
-    assign a[3] = 1;
-endmodule
-
-module o;
-    int a, b, c = 1;
-    m m1(.a, .b, .c);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::InputPortAssign);
-    CHECK(diags[1].code == diag::InputPortAssign);
-    CHECK(diags[2].code == diag::InputPortAssign);
-    CHECK(diags[3].code == diag::MixedVarAssigns);
-}
-
-TEST_CASE("Net port coercion") {
-    auto tree = SyntaxTree::fromText(R"(
-module top;
-    wire in1, out1;
-    m m(in1, out1);
-    assign out1 = 1'b1;
-endmodule
-
-module m (in1, out1);
-    input in1;
-    output out1;        // out1 is driven outside the module and thus used as an input
-    assign in1 = 1'b0 ; // in1 is driven within the module and thus used as an output
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::OutputPortCoercion);
-    CHECK(diags[1].code == diag::InputPortCoercion);
-}
-
 TEST_CASE("Interconnect ports") {
     auto tree = SyntaxTree::fromText(R"(
 module m(interconnect a, b = 1);
@@ -1564,16 +1473,10 @@ module o({a, b});
     input b;
 endmodule
 
-module p(input interconnect a);
-endmodule
-
 module q(input int b);
 endmodule
 
 module top;
-    logic a;
-    p p1(.a);
-
     interconnect b;
     q q1(.b);
 endmodule
@@ -1583,12 +1486,11 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 5);
+    REQUIRE(diags.size() == 4);
     CHECK(diags[0].code == diag::InterconnectInitializer);
     CHECK(diags[1].code == diag::InterconnectTypeSyntax);
     CHECK(diags[2].code == diag::InterconnectMultiPort);
-    CHECK(diags[3].code == diag::InterconnectPortVar);
-    CHECK(diags[4].code == diag::InterconnectReference);
+    CHECK(diags[3].code == diag::InterconnectReference);
 }
 
 TEST_CASE("More interconnect ports") {
@@ -1713,36 +1615,6 @@ interface I(.;input interface I
     compilation.getAllDiagnostics();
 }
 
-TEST_CASE("Inout ports are treated as readers and writers") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    wire integer i;
-    modport m(inout i);
-endinterface
-
-module m(inout wire a);
-    wire local_a;
-    pullup(local_a);
-    tranif1(a, local_a, 1'b1);
-endmodule
-
-module top;
-    I i();
-
-    wire a;
-    m m1(.*);
-    m m2(.*);
-endmodule
-)");
-
-    CompilationOptions options;
-    options.flags &= ~CompilationFlags::SuppressUnused;
-
-    Compilation compilation(options);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
 TEST_CASE("Ansi duplicate port compatibility option") {
     auto tree = SyntaxTree::fromText(R"(
 module m(input a, output b);
@@ -1763,4 +1635,263 @@ endmodule
     Compilation compilation(options);
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Unpacked port connection regress -- GH #1315") {
+    auto tree = SyntaxTree::fromText(R"(
+module subm(input h);
+endmodule
+
+module top();
+	wire g [1:0];
+	subm inst[2:3](.h(g));
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& inst = compilation.getRoot().lookupName<InstanceArraySymbol>("top.inst");
+    REQUIRE(inst.elements.size() == 2);
+
+    auto getHierName = [&](size_t index) { return inst.elements[index]->getHierarchicalPath(); };
+    auto getSelectIdx = [&](size_t index) {
+        return inst.elements[index]
+            ->as<InstanceSymbol>()
+            .getPortConnections()[0]
+            ->getExpression()
+            ->as<ElementSelectExpression>()
+            .selector()
+            .as<IntegerLiteral>()
+            .getValue();
+    };
+
+    CHECK(getHierName(0) == "top.inst[2]");
+    CHECK(getSelectIdx(0) == 1);
+    CHECK(getHierName(1) == "top.inst[3]");
+    CHECK(getSelectIdx(1) == 0);
+}
+
+TEST_CASE("Iface port connection with reversed range regress") {
+    auto tree = SyntaxTree::fromText(R"(
+interface bus(input clk);
+	logic a;
+endinterface
+
+module m1(bus intf [0:1]);
+	wire w = intf[0].a;
+endmodule
+
+module top(input logic clk);
+	bus top_bus[1:0](clk);
+	m1 m1i(top_bus);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& w = compilation.getRoot().lookupName<NetSymbol>("top.m1i.w");
+    auto target = w.getInitializer()->getSymbolReference();
+    REQUIRE(target);
+    CHECK(target->getHierarchicalPath() == "top.top_bus[1].a");
+}
+
+TEST_CASE("Allow use before declare with wildcard connections") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input logic a);
+endmodule
+
+module n;
+    m m1(.*);
+    logic a;
+endmodule
+)");
+
+    CompilationOptions options;
+    options.flags |= CompilationFlags::AllowUseBeforeDeclare;
+
+    Compilation compilation(options);
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("More detailed port slicing tests") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input logic[8:0] p);
+endmodule
+
+module top;
+  logic [2:4][6:1] a;
+  m marr [2] (a);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto getConnStr = [&](std::string_view path) {
+        auto& inst = compilation.getRoot().lookupName<InstanceSymbol>(path);
+
+        EvalContext evalCtx(inst);
+        return ValuePath(*inst.getPortConnections()[0]->getExpression(), evalCtx).toString(evalCtx);
+    };
+
+    auto marr0 = getConnStr("top.marr[0]");
+    CHECK(marr0 == "{a[2], a[3][6:4]}");
+
+    auto marr1 = getConnStr("top.marr[1]");
+    CHECK(marr1 == "{a[3][3:1], a[4]}");
+}
+
+TEST_CASE("inout ports cannot have defaults") {
+    auto tree = SyntaxTree::fromText(R"(
+module M (
+  inout [31:0] x, y = 1 // inout ports do not support default values
+);
+  initial begin
+    $display("FAILED");
+  end
+endmodule
+
+module test;
+  wire [31:0] x, y;
+
+  M i_m (
+    .x(x),
+    .y(y)
+  );
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::DisallowedPortDefault);
+}
+
+TEST_CASE("Additional implicit port type mismatch checking") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input a, output b);
+endmodule
+
+module top;
+    logic [3:0] a, b;
+    m m1(.a, .*);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 4);
+    CHECK(diags[0].code == diag::ImplicitNamedPortTypeMismatch);
+    CHECK(diags[1].code == diag::PortWidthTruncate);
+    CHECK(diags[2].code == diag::ImplicitNamedPortTypeMismatch);
+    CHECK(diags[3].code == diag::PortWidthExpand);
+}
+
+TEST_CASE("Additional explicit port expression checks") {
+    auto tree = SyntaxTree::fromText(R"(
+logic [2:0] foo;
+
+module m(input int a, output .b(foo[a]), input .c(foo));
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ConstEvalNonConstVariable);
+    CHECK(diags[1].code == diag::PortExprMemberParent);
+}
+
+TEST_CASE("Wildcard port connection diagnostic locations") {
+    auto tree = SyntaxTree::fromText(R"(
+module A(
+    output logic [5:0][31:0] sig
+);
+endmodule
+
+module B;
+    logic [191:0] sig;
+
+    A a(
+        .*
+    );
+
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    CHECK("\n" + report(diags) == R"(
+source:11:9: warning: implicit conversion from 'logic[5:0][31:0]' to 'logic[191:0]' [-Wpacked-array-conv]
+        .*
+        ^~
+source:3:30: note: for connection to port 'sig'
+    output logic [5:0][31:0] sig
+                             ^
+)");
+}
+
+TEST_CASE("Explicit empty port connection warnings") {
+    auto tree = SyntaxTree::fromText(R"(
+module n(input logic a, input logic b = 1, output logic c, inout logic d);
+endmodule
+
+module m;
+    // .a() warns: input, no default
+    // .b() warns with note: input, has default
+    // .c() warns: output
+    // .d() warns: inout
+    n n1(.a(), .b(), .c(), .d());
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 4);
+    CHECK(diags[0].code == diag::EmptyInputPortConn);
+    CHECK(diags[1].code == diag::EmptyInputPortConn);
+    // diags[1] should have a note about the default value expression
+    REQUIRE(diags[1].notes.size() == 1);
+    CHECK(diags[1].notes[0].code == diag::EmptyInputPortConnDefault);
+    CHECK(diags[2].code == diag::EmptyOutputPortConn);
+    CHECK(diags[3].code == diag::EmptyInOutPortConn);
+}
+
+TEST_CASE("Explicit empty port connection vs truly unconnected") {
+    // Truly-unconnected ports fire UnconnectedInputPort, not an empty-connection warning.
+    auto tree = SyntaxTree::fromText(R"(
+module n(input logic a, output logic b, inout logic c);
+endmodule
+
+module m;
+    // a omitted: UnconnectedInputPort
+    // .b() and .c() explicitly connected to nothing: output/inout warnings
+    n n1(.b(), .c());
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::UnconnectedInputPort);
+    CHECK(diags[1].code == diag::EmptyOutputPortConn);
+    CHECK(diags[2].code == diag::EmptyInOutPortConn);
 }

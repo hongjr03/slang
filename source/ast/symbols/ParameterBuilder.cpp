@@ -142,12 +142,12 @@ const ParameterSymbolBase& ParameterBuilder::createParam(
         // via the preview nodes; for parameter decl members,
         // we need to look at the parent, and for port lists we
         // should just look at the param itself.
-        if (syntax.previewNode)
-            newScope.addMembers(*syntax.previewNode);
+        if (auto preview = syntax.previewNode())
+            newScope.addMembers(*preview);
 
-        if (syntax.parent->kind == SyntaxKind::ParameterDeclarationStatement &&
-            syntax.parent->previewNode) {
-            newScope.addMembers(*syntax.parent->previewNode);
+        if (syntax.parent->kind == SyntaxKind::ParameterDeclarationStatement) {
+            if (auto preview = syntax.parent->previewNode())
+                newScope.addMembers(*preview);
         }
     };
 
@@ -169,8 +169,11 @@ const ParameterSymbolBase& ParameterBuilder::createParam(
 
         if (decl.hasSyntax) {
             handlePreviewNodes(*decl.typeSyntax);
-            if (decl.typeDecl && decl.typeDecl->assignment)
-                param->defaultValSyntax = decl.typeDecl->assignment->type;
+            if (decl.typeDecl) {
+                param->setTypeSyntax(*decl.typeDecl);
+                if (decl.typeDecl->assignment)
+                    param->defaultValSyntax = decl.typeDecl->assignment->type;
+            }
         }
 
         auto& tt = param->targetType;
@@ -179,10 +182,8 @@ const ParameterSymbolBase& ParameterBuilder::createParam(
             // a type parameter, so fix it up into a NamedTypeSyntax to get a type from it.
             tt.addFlags(DeclaredTypeFlags::TypeOverridden);
             if (NameSyntax::isKind(newInitializer->kind)) {
-                // const_cast is ugly but safe here, we're only going to refer to it
-                // by const reference everywhere down.
-                auto& nameSyntax = const_cast<NameSyntax&>(newInitializer->as<NameSyntax>());
-                auto namedType = comp.emplace<NamedTypeSyntax>(nameSyntax);
+                auto nameSyntax = deepClone(newInitializer->as<NameSyntax>(), comp);
+                auto namedType = comp.emplace<NamedTypeSyntax>(*nameSyntax);
 
                 tt.setTypeSyntax(*namedType);
             }
@@ -275,8 +276,19 @@ const ParameterSymbolBase& ParameterBuilder::createParam(
         if (auto paramSyntax = param->getSyntax(); overrideNode && paramSyntax && !isFromConfig) {
             if (auto it = overrideNode->paramOverrides.find(paramSyntax);
                 it != overrideNode->paramOverrides.end()) {
-                param->setValue(comp, it->second.first, /* needsCoercion */ true);
-                return *param;
+
+                // If there is an expression tree here use that as the initializer syntax.
+                // Otherwise we expect the value to override is already evaluated.
+                if (!it->second.expr) {
+                    param->setValue(comp, it->second.cv,
+                                    /* needsCoercion */ it->second.defparam == nullptr);
+                    return *param;
+                }
+
+                // Fall through to the logic below that will evaluate the initializer.
+                newInitializer = it->second.expr;
+                param->setInitializerSyntax(*newInitializer,
+                                            newInitializer->getFirstToken().location());
             }
         }
 

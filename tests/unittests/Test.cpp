@@ -11,14 +11,17 @@
 #include "slang/parsing/Preprocessor.h"
 #include "slang/text/SourceManager.h"
 
-std::string findTestDir() {
-    auto path = fs::current_path();
-    while (!fs::exists(path / "tests")) {
-        path = path.parent_path();
-        SLANG_ASSERT(!path.empty());
-    }
+#ifndef TEST_DATA_DIR
+#    error "TEST_DATA_DIR is not defined. Please configure with CMake."
+#endif
 
-    return (path / "tests/unittests/data/").string();
+static std::string findTestDirInternal() {
+    return TEST_DATA_DIR;
+}
+
+std::string findTestDir() {
+    static auto path = findTestDirInternal();
+    return path;
 }
 
 void setupSourceManager(SourceManager& sourceManager) {
@@ -88,8 +91,9 @@ Token lexToken(std::string_view text, LanguageVersion languageVersion) {
 
 Token lexRawToken(std::string_view text) {
     diagnostics.clear();
-    auto buffer = getSourceManager().assignText(text);
-    Lexer lexer(buffer, alloc, diagnostics);
+    auto& sm = getSourceManager();
+    auto buffer = sm.assignText(text);
+    Lexer lexer(buffer, alloc, diagnostics, sm);
 
     Token token = lexer.lex();
     REQUIRE(token);

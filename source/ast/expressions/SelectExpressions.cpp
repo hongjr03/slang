@@ -10,6 +10,8 @@
 #include "slang/ast/ASTSerializer.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
+#include "slang/ast/Lookup.h"
+#include "slang/ast/TypeProvider.h"
 #include "slang/ast/expressions/CallExpression.h"
 #include "slang/ast/expressions/LiteralExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
@@ -28,19 +30,20 @@ namespace slang::ast {
 
 using namespace syntax;
 
-static const Type& getIndexedType(Compilation& compilation, const ASTContext& context,
+template<typename TTypeProvider>
+static const Type& getIndexedType(TTypeProvider& typeProvider, const ASTContext& context,
                                   const Type& valueType, SourceRange exprRange,
                                   SourceRange valueRange, bool isRangeSelect) {
     const Type& ct = valueType.getCanonicalType();
     if (ct.isArray()) {
         auto& elemType = *ct.getArrayElementType();
         if (valueType.kind == SymbolKind::PackedArrayType && valueType.isSigned())
-            return elemType.makeUnsigned(compilation);
+            return elemType.makeUnsigned(typeProvider);
 
         return elemType;
     }
     else if (ct.kind == SymbolKind::StringType && !isRangeSelect) {
-        return compilation.getByteType();
+        return typeProvider.getByteType();
     }
     else if (!ct.isIntegral()) {
         if (!ct.isError()) {
@@ -49,36 +52,37 @@ static const Type& getIndexedType(Compilation& compilation, const ASTContext& co
             diag << valueRange;
             diag << valueType;
         }
-        return compilation.getErrorType();
+        return typeProvider.getErrorType();
     }
     else if (ct.isScalar()) {
+        // Some tools allow bit-select on a scalar; the result is the scalar's element
+        // type. The diagnostic can be downgraded for compatibility.
         auto& diag = context.addDiag(diag::CannotIndexScalar, exprRange);
         diag << valueRange;
-        return compilation.getErrorType();
+        return ct.isFourState() ? typeProvider.getLogicType() : typeProvider.getBitType();
     }
     else if (ct.isFourState()) {
-        return compilation.getLogicType();
+        return typeProvider.getLogicType();
     }
     else {
-        return compilation.getBitType();
+        return typeProvider.getBitType();
     }
 }
 
 static void checkForVectoredSelect(const Expression& value, SourceRange range,
                                    const ASTContext& context) {
-    if (value.kind != ExpressionKind::NamedValue && value.kind != ExpressionKind::HierarchicalValue)
-        return;
+    if (auto sym = value.getSymbolReference();
+        sym && sym->kind == SymbolKind::Net &&
+        sym->as<NetSymbol>().expansionHint == NetSymbol::Vectored) {
 
-    const Symbol& sym = value.as<ValueExpressionBase>().symbol;
-    if (sym.kind == SymbolKind::Net && sym.as<NetSymbol>().expansionHint == NetSymbol::Vectored) {
         auto& diag = context.addDiag(diag::SelectOfVectoredNet, range);
-        diag.addNote(diag::NoteDeclarationHere, sym.location);
+        diag.addNote(diag::NoteDeclarationHere, sym->location);
     }
 }
 
 template<typename T>
 bool requireLValueHelper(const T& expr, const ASTContext& context, SourceLocation location,
-                         bitmask<AssignFlags> flags, const Expression* longestStaticPrefix) {
+                         bitmask<AssignFlags> flags) {
     auto& val = expr.value();
     if (val.kind == ExpressionKind::Concatenation || val.kind == ExpressionKind::Streaming) {
         // Selects of concatenations are not allowed to be lvalues.
@@ -90,16 +94,15 @@ bool requireLValueHelper(const T& expr, const ASTContext& context, SourceLocatio
         return false;
     }
 
-    if (ValueExpressionBase::isKind(val.kind)) {
-        auto& sym = val.template as<ValueExpressionBase>().symbol;
-        if (sym.kind == SymbolKind::Net) {
-            if (sym.template as<NetSymbol>().netType.netKind == NetType::UserDefined) {
-                context.addDiag(diag::UserDefPartialDriver, expr.sourceRange) << sym.name;
-                return false;
-            }
+    if (auto sym = val.getSymbolReference(); sym && sym->isValue()) {
+        if (auto net = sym->template as_if<NetSymbol>();
+            net && net->netType.netKind == NetType::UserDefined) {
+            context.addDiag(diag::UserDefPartialDriver, expr.sourceRange) << sym->name;
+            return false;
         }
 
-        if (flags.has(AssignFlags::NonBlocking) && sym.getType().isDynamicallySizedArray()) {
+        if (flags.has(AssignFlags::NonBlocking) &&
+            sym->template as<ValueSymbol>().getType().isDynamicallySizedArray()) {
             if (!location)
                 location = expr.sourceRange.start();
 
@@ -117,22 +120,9 @@ bool requireLValueHelper(const T& expr, const ASTContext& context, SourceLocatio
             if (!context.eval(expr.selector()))
                 return false;
         }
-
-        if (!longestStaticPrefix)
-            longestStaticPrefix = &expr;
-    }
-    else {
-        EvalContext evalCtx(context, EvalFlags::CacheResults);
-        if (expr.isConstantSelect(evalCtx)) {
-            if (!longestStaticPrefix)
-                longestStaticPrefix = &expr;
-        }
-        else {
-            longestStaticPrefix = nullptr;
-        }
     }
 
-    return val.requireLValue(context, location, flags, longestStaticPrefix);
+    return val.requireLValue(context, location, flags);
 }
 
 Expression& ElementSelectExpression::fromSyntax(Compilation& compilation, Expression& value,
@@ -196,24 +186,23 @@ Expression& ElementSelectExpression::fromSyntax(Compilation& compilation, Expres
     }
     else if (context.flags.has(ASTFlags::NonProcedural)) {
         context.addDiag(diag::DynamicNotProcedural, fullRange);
-        return badExpr(compilation, result);
     }
 
     return *result;
 }
 
-Expression& ElementSelectExpression::fromConstant(Compilation& compilation, Expression& value,
-                                                  int32_t index, const ASTContext& context) {
-    Expression* indexExpr = &IntegerLiteral::fromConstant(compilation, index);
-    selfDetermined(context, indexExpr);
+Expression& ElementSelectExpression::fromConstant(const TypeProvider& typeProvider,
+                                                  Expression& value, int32_t index,
+                                                  const ASTContext& context) {
+    auto& indexExpr = IntegerLiteral::fromConstant(typeProvider, index);
+    auto& resultType = getIndexedType(typeProvider, context, *value.type, indexExpr.sourceRange,
+                                      value.sourceRange, false);
 
-    const Type& resultType = getIndexedType(compilation, context, *value.type,
-                                            indexExpr->sourceRange, value.sourceRange, false);
-
-    auto result = compilation.emplace<ElementSelectExpression>(resultType, value, *indexExpr,
-                                                               value.sourceRange);
-    if (value.bad() || indexExpr->bad() || result->bad())
-        return badExpr(compilation, result);
+    auto& alloc = typeProvider.alloc;
+    auto result = alloc.emplace<ElementSelectExpression>(resultType, value, indexExpr,
+                                                         value.sourceRange);
+    if (value.bad() || indexExpr.bad() || result->bad())
+        return badExpr(alloc, result);
 
     return *result;
 }
@@ -243,8 +232,11 @@ ConstantValue ElementSelectExpression::evalImpl(EvalContext& context) const {
         // For fixed types, we know we will always be in range, so just do the selection.
         if (valType.isUnpackedArray())
             return cv.elements()[size_t(range->left)];
-        else
-            return cv.integer().slice(range->left, range->right);
+        else {
+            cv = cv.integer().slice(range->left, range->right);
+            // Make sure sign and four-statedness are correct.
+            return cv.convertToInt(type->getBitWidth(), type->isSigned(), type->isFourState());
+        }
     }
 
     // Handling for associative arrays.
@@ -394,24 +386,12 @@ std::optional<ConstantRange> ElementSelectExpression::evalIndex(EvalContext& con
 }
 
 bool ElementSelectExpression::requireLValueImpl(const ASTContext& context, SourceLocation location,
-                                                bitmask<AssignFlags> flags,
-                                                const Expression* longestStaticPrefix) const {
-    return requireLValueHelper(*this, context, location, flags, longestStaticPrefix);
+                                                bitmask<AssignFlags> flags) const {
+    return requireLValueHelper(*this, context, location, flags);
 }
 
-void ElementSelectExpression::getLongestStaticPrefixesImpl(
-    SmallVector<std::pair<const ValueSymbol*, const Expression*>>& results,
-    EvalContext& evalContext, const Expression* longestStaticPrefix) const {
-
-    if (isConstantSelect(evalContext)) {
-        if (!longestStaticPrefix)
-            longestStaticPrefix = this;
-    }
-    else {
-        longestStaticPrefix = nullptr;
-    }
-
-    value().getLongestStaticPrefixes(results, evalContext, longestStaticPrefix);
+bool ElementSelectExpression::isEquivalentImpl(const ElementSelectExpression& rhs) const {
+    return value().isEquivalentTo(rhs.value()) && selector().isEquivalentTo(rhs.selector());
 }
 
 void ElementSelectExpression::serializeTo(ASTSerializer& serializer) const {
@@ -428,7 +408,7 @@ static bool checkRangeOverflow(ConstantRange range, TContext& context, SourceRan
     return false;
 }
 
-Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expression& value,
+Expression& RangeSelectExpression::fromSyntax(Compilation& comp, Expression& value,
                                               const RangeSelectSyntax& syntax,
                                               SourceRange fullRange, const ASTContext& context) {
     // Left and right are either the extents of a part-select, in which case they must
@@ -451,7 +431,7 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
 
     if (!value.bad() && value.type->isAssociativeArray()) {
         context.addDiag(diag::RangeSelectAssociative, fullRange);
-        return badExpr(compilation, nullptr);
+        return badExpr(comp, nullptr);
     }
 
     // Selection expressions don't need to be const if we're selecting from a queue.
@@ -468,36 +448,34 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
     auto& left = bind(*syntax.left, selectorCtx, extraFlags);
     auto& right = bind(*syntax.right, selectorCtx, extraFlags);
 
-    auto result = compilation.emplace<RangeSelectExpression>(selectionKind,
-                                                             compilation.getErrorType(), value,
-                                                             left, right, fullRange);
+    auto result = comp.emplace<RangeSelectExpression>(selectionKind, comp.getErrorType(), value,
+                                                      left, right, fullRange);
 
     if (value.bad() || left.bad() || right.bad())
-        return badExpr(compilation, result);
+        return badExpr(comp, result);
 
     if (!left.type->isUnbounded() && !context.requireIntegral(left))
-        return badExpr(compilation, result);
+        return badExpr(comp, result);
 
     if (!right.type->isUnbounded() && !context.requireIntegral(right))
-        return badExpr(compilation, result);
+        return badExpr(comp, result);
 
     const Type& valueType = *value.type;
-    const Type& elementType = getIndexedType(compilation, context, valueType, syntax.sourceRange(),
+    const Type& elementType = getIndexedType(comp, context, valueType, syntax.sourceRange(),
                                              value.sourceRange, true);
     if (elementType.isError())
-        return badExpr(compilation, result);
+        return badExpr(comp, result);
 
     // Selects of vectored nets are disallowed.
     checkForVectoredSelect(value, fullRange, context);
 
     if (!valueType.hasFixedRange() && context.flags.has(ASTFlags::NonProcedural)) {
         context.addDiag(diag::DynamicNotProcedural, fullRange);
-        return badExpr(compilation, result);
     }
 
     // If this is selecting from a queue, the result is always a queue.
     if (isQueue) {
-        result->type = compilation.emplace<QueueType>(elementType, 0u);
+        result->type = comp.emplace<QueueType>(elementType, 0u);
         return *result;
     }
 
@@ -507,14 +485,14 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
     if (context.flags.has(ASTFlags::StreamingWithRange)) {
         if (context.inUnevaluatedBranch() || !context.tryEval(right) ||
             (selectionKind == RangeSelectionKind::Simple && !context.tryEval(left))) {
-            result->type = compilation.emplace<QueueType>(elementType, 0u);
+            result->type = comp.emplace<QueueType>(elementType, 0u);
             return *result;
         }
     }
 
     std::optional<int32_t> rv = context.evalInteger(right);
     if (!rv)
-        return badExpr(compilation, result);
+        return badExpr(comp, result);
 
     // If the array type has a fixed range, validate that the range we're selecting is allowed.
     SourceRange errorRange{left.sourceRange.start(), right.sourceRange.end()};
@@ -536,17 +514,20 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
         if (selectionKind == RangeSelectionKind::Simple) {
             std::optional<int32_t> lv = context.evalInteger(left);
             if (!lv)
-                return badExpr(compilation, result);
+                return badExpr(comp, result);
 
             selectionRange = {*lv, *rv};
             if (checkRangeOverflow(selectionRange, context, errorRange))
-                return badExpr(compilation, result);
+                return badExpr(comp, result);
 
-            if (selectionRange.isLittleEndian() != valueRange.isLittleEndian() &&
-                selectionRange.width() > 1) {
-                auto& diag = context.addDiag(diag::SelectEndianMismatch, errorRange);
-                diag << valueType;
-                return badExpr(compilation, result);
+            if (selectionRange.isDescending() != valueRange.isDescending() &&
+                selectionRange.width() > 1 && valueRange.width() > 1) {
+                if (!context.inUnevaluatedBranch()) {
+                    auto& diag = context.addDiag(diag::RangeSelectReversed, errorRange);
+                    diag << selectionRange.left << selectionRange.right;
+                    diag << valueType;
+                }
+                return badExpr(comp, result);
             }
 
             if (!context.inUnevaluatedBranch())
@@ -554,7 +535,7 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
         }
         else {
             if (!context.requireGtZero(rv, right.sourceRange))
-                return badExpr(compilation, result);
+                return badExpr(comp, result);
 
             // If the lhs is a known constant, we can check that now too.
             ConstantValue leftVal;
@@ -564,15 +545,15 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
                     auto& diag = context.addDiag(diag::IndexValueInvalid, left.sourceRange);
                     diag << leftVal;
                     diag << valueType;
-                    return badExpr(compilation, result);
+                    return badExpr(comp, result);
                 }
 
-                auto range =
-                    ConstantRange::getIndexedRange(*index, *rv, valueRange.isLittleEndian(),
-                                                   selectionKind == RangeSelectionKind::IndexedUp);
+                auto range = ConstantRange::getIndexedRange(*index, *rv, valueRange.isDescending(),
+                                                            selectionKind ==
+                                                                RangeSelectionKind::IndexedUp);
                 if (!range) {
                     context.addDiag(diag::RangeWidthOverflow, errorRange);
-                    return badExpr(compilation, result);
+                    return badExpr(comp, result);
                 }
 
                 selectionRange = *range;
@@ -582,12 +563,12 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
                 // Otherwise, the resulting range will start with the fixed lower bound of the type.
                 int32_t l = selectionKind == RangeSelectionKind::IndexedUp ? valueRange.lower()
                                                                            : valueRange.upper();
-                auto range = ConstantRange::getIndexedRange(l, *rv, valueRange.isLittleEndian(),
+                auto range = ConstantRange::getIndexedRange(l, *rv, valueRange.isDescending(),
                                                             selectionKind ==
                                                                 RangeSelectionKind::IndexedUp);
                 if (!range) {
                     context.addDiag(diag::RangeWidthOverflow, errorRange);
-                    return badExpr(compilation, result);
+                    return badExpr(comp, result);
                 }
 
                 selectionRange = *range;
@@ -603,78 +584,85 @@ Expression& RangeSelectExpression::fromSyntax(Compilation& compilation, Expressi
         // At this point, all expressions are good, ranges have been validated and
         // we know the final width of the selection, so pick the result type and we're done.
         if (valueType.isUnpackedArray()) {
-            result->type = &FixedSizeUnpackedArrayType::fromDim(*context.scope, elementType,
+            result->type = &FixedSizeUnpackedArrayType::fromDim(comp, context, elementType,
                                                                 selectionRange, errorRange);
         }
         else {
-            result->type = &PackedArrayType::fromDim(*context.scope, elementType, selectionRange,
+            result->type = &PackedArrayType::fromDim(comp, context, elementType, selectionRange,
                                                      errorRange);
         }
     }
     else {
         // Otherwise, this is a dynamic array so we can't validate much. We should check that
-        // the selection endianness is correct for simple ranges -- dynamic arrays only
-        // permit big endian [0..N] ordering.
+        // the selection order is correct for simple ranges -- dynamic arrays only permit
+        // ascending [0..N] ordering.
         ConstantRange selectionRange;
         if (selectionKind == RangeSelectionKind::Simple) {
             std::optional<int32_t> lv = context.evalInteger(left);
             if (!lv)
-                return badExpr(compilation, result);
+                return badExpr(comp, result);
 
             selectionRange = {*lv, *rv};
-            if (selectionRange.isLittleEndian() && selectionRange.width() > 1) {
-                auto& diag = context.addDiag(diag::SelectEndianDynamic, errorRange);
-                diag << selectionRange.left << selectionRange.right;
-                diag << valueType;
-                return badExpr(compilation, result);
+            if (selectionRange.isDescending() && selectionRange.width() > 1) {
+                if (!context.inUnevaluatedBranch()) {
+                    auto& diag = context.addDiag(diag::RangeSelectReversed, errorRange);
+                    diag << selectionRange.left << selectionRange.right;
+                    diag << valueType;
+                }
+                return badExpr(comp, result);
             }
         }
         else {
             if (!context.requireGtZero(rv, right.sourceRange))
-                return badExpr(compilation, result);
+                return badExpr(comp, result);
 
             selectionRange.left = 0;
             selectionRange.right = *rv - 1;
         }
 
-        result->type = &FixedSizeUnpackedArrayType::fromDim(*context.scope, elementType,
+        result->type = &FixedSizeUnpackedArrayType::fromDim(comp, context, elementType,
                                                             selectionRange, errorRange);
     }
 
     return *result;
 }
 
-Expression& RangeSelectExpression::fromConstant(Compilation& compilation, Expression& value,
-                                                ConstantRange range, const ASTContext& context) {
-    Expression* left = &IntegerLiteral::fromConstant(compilation, range.left);
-    selfDetermined(context, left);
+Expression& RangeSelectExpression::fromConstant(const TypeProvider& typeProvider, Expression& value,
+                                                ConstantRange range, const ASTContext& context,
+                                                RangeSelectionKind selectionKind) {
+    auto& left = IntegerLiteral::fromConstant(typeProvider, range.left);
+    auto& right = IntegerLiteral::fromConstant(typeProvider, range.right);
 
-    Expression* right = &IntegerLiteral::fromConstant(compilation, range.right);
-    selfDetermined(context, right);
-
-    auto result = compilation.emplace<RangeSelectExpression>(RangeSelectionKind::Simple,
-                                                             compilation.getErrorType(), value,
-                                                             *left, *right, value.sourceRange);
-    if (value.bad() || left->bad() || right->bad())
-        return badExpr(compilation, result);
+    auto& alloc = typeProvider.alloc;
+    auto result = alloc.emplace<RangeSelectExpression>(selectionKind, typeProvider.getErrorType(),
+                                                       value, left, right, value.sourceRange);
+    if (value.bad() || left.bad() || right.bad())
+        return badExpr(alloc, result);
 
     const Type& valueType = *value.type;
-    const Type& elementType = getIndexedType(compilation, context, valueType, value.sourceRange,
+    const Type& elementType = getIndexedType(typeProvider, context, valueType, value.sourceRange,
                                              value.sourceRange, true);
 
     if (elementType.isError())
-        return badExpr(compilation, result);
+        return badExpr(alloc, result);
+
+    const auto valueRange = valueType.getFixedRange();
+    if (selectionKind != RangeSelectionKind::Simple) {
+        range = ConstantRange::getIndexedRange(range.left, range.right, valueRange.isDescending(),
+                                               selectionKind == RangeSelectionKind::IndexedUp)
+                    .value();
+    }
 
     // This method is only called on expressions with a fixed range type.
-    SLANG_ASSERT(range.isLittleEndian() == valueType.getFixedRange().isLittleEndian());
+    SLANG_ASSERT(range.isDescending() == valueRange.isDescending());
     SLANG_ASSERT(valueType.hasFixedRange());
 
     if (valueType.isUnpackedArray()) {
-        result->type = &FixedSizeUnpackedArrayType::fromDim(*context.scope, elementType, range,
+        result->type = &FixedSizeUnpackedArrayType::fromDim(alloc, context, elementType, range,
                                                             result->sourceRange);
     }
     else {
-        result->type = &PackedArrayType::fromDim(*context.scope, elementType, range,
+        result->type = &PackedArrayType::fromDim(alloc, context, elementType, range,
                                                  result->sourceRange);
     }
 
@@ -694,9 +682,9 @@ ConstantValue RangeSelectExpression::evalImpl(EvalContext& context) const {
     if (!range)
         return nullptr;
 
-    // If this is a queue, we didn't verify the endianness of the selection.
+    // If this is a queue, we didn't verify the ordering of the selection.
     // Check if it's reversed here and issue a warning if so.
-    if (value().type->isQueue() && range->isLittleEndian() && range->left != range->right) {
+    if (value().type->isQueue() && range->isDescending() && range->left != range->right) {
         context.addDiag(diag::ConstEvalQueueRange, sourceRange) << range->left << range->right;
         return value().type->getDefaultValue();
     }
@@ -759,11 +747,11 @@ std::optional<ConstantRange> RangeSelectExpression::evalRange(EvalContext& conte
             return std::nullopt;
     }
     else {
-        bool isLittleEndian = false;
+        bool isDescending = false;
         if (valueType.hasFixedRange())
-            isLittleEndian = valueType.getFixedRange().isLittleEndian();
+            isDescending = valueType.getFixedRange().isDescending();
 
-        auto range = ConstantRange::getIndexedRange(*li, *ri, isLittleEndian,
+        auto range = ConstantRange::getIndexedRange(*li, *ri, isDescending,
                                                     selectionKind == RangeSelectionKind::IndexedUp);
         if (!range) {
             context.addDiag(diag::RangeWidthOverflow, sourceRange);
@@ -837,24 +825,13 @@ std::optional<ConstantRange> RangeSelectExpression::evalRange(EvalContext& conte
 }
 
 bool RangeSelectExpression::requireLValueImpl(const ASTContext& context, SourceLocation location,
-                                              bitmask<AssignFlags> flags,
-                                              const Expression* longestStaticPrefix) const {
-    return requireLValueHelper(*this, context, location, flags, longestStaticPrefix);
+                                              bitmask<AssignFlags> flags) const {
+    return requireLValueHelper(*this, context, location, flags);
 }
 
-void RangeSelectExpression::getLongestStaticPrefixesImpl(
-    SmallVector<std::pair<const ValueSymbol*, const Expression*>>& results,
-    EvalContext& evalContext, const Expression* longestStaticPrefix) const {
-
-    if (isConstantSelect(evalContext)) {
-        if (!longestStaticPrefix)
-            longestStaticPrefix = this;
-    }
-    else {
-        longestStaticPrefix = nullptr;
-    }
-
-    value().getLongestStaticPrefixes(results, evalContext, longestStaticPrefix);
+bool RangeSelectExpression::isEquivalentImpl(const RangeSelectExpression& rhs) const {
+    return value().isEquivalentTo(rhs.value()) && getSelectionKind() == rhs.getSelectionKind() &&
+           left().isEquivalentTo(rhs.left()) && right().isEquivalentTo(rhs.right());
 }
 
 void RangeSelectExpression::serializeTo(ASTSerializer& serializer) const {
@@ -888,14 +865,14 @@ static Expression* tryBindSpecialMethod(Compilation& compilation, const Expressi
 }
 
 Expression& MemberAccessExpression::fromSelector(
-    Compilation& compilation, Expression& expr, const LookupResult::MemberSelector& selector,
+    Compilation& comp, Expression& expr, const LookupResult::MemberSelector& selector,
     const InvocationExpressionSyntax* invocation,
     const ArrayOrRandomizeMethodExpressionSyntax* withClause, const ASTContext& context,
-    bool isFromLookupChain) {
+    bool isFromLookupChain, bool isDottedAccess) {
 
     // If the selector name is invalid just give up early.
     if (selector.name.empty())
-        return badExpr(compilation, &expr);
+        return badExpr(comp, &expr);
 
     // The source range of the entire member access starts from the value being selected.
     SourceRange range{expr.sourceRange.start(), selector.nameRange.end()};
@@ -908,9 +885,8 @@ Expression& MemberAccessExpression::fromSelector(
         if (symKind == SymbolKind::Iterator) {
             auto& iter = sym.as<IteratorSymbol>();
             if (iter.indexMethodName == selector.name) {
-                auto result = CallExpression::fromBuiltInMethod(compilation, symKind, expr,
-                                                                "index"sv, invocation, withClause,
-                                                                context);
+                auto result = CallExpression::fromBuiltInMethod(comp, symKind, expr, "index"sv,
+                                                                invocation, withClause, context);
                 if (result)
                     return *result;
             }
@@ -923,12 +899,9 @@ Expression& MemberAccessExpression::fromSelector(
         context.addDiag(diag::ChainedMethodParens, range);
     }
 
-    auto errorIfNotProcedural = [&] {
-        if (context.flags.has(ASTFlags::NonProcedural)) {
+    auto warnIfNotProcedural = [&] {
+        if (context.flags.has(ASTFlags::NonProcedural))
             context.addDiag(diag::DynamicNotProcedural, range);
-            return true;
-        }
-        return false;
     };
     auto errorIfAssertion = [&] {
         if (context.flags.has(ASTFlags::AssertionExpr)) {
@@ -951,7 +924,7 @@ Expression& MemberAccessExpression::fromSelector(
         case SymbolKind::ClassType: {
             auto& ct = type.as<ClassType>();
             if (auto base = ct.getBaseClass(); base && base->isError())
-                return badExpr(compilation, &expr);
+                return badExpr(comp, &expr);
 
             scope = &ct;
             break;
@@ -967,16 +940,16 @@ Expression& MemberAccessExpression::fromSelector(
         case SymbolKind::QueueType:
         case SymbolKind::EventType:
         case SymbolKind::SequenceType: {
-            if (auto result = tryBindSpecialMethod(compilation, expr, selector, invocation,
-                                                   withClause, context)) {
+            if (auto result = tryBindSpecialMethod(comp, expr, selector, invocation, withClause,
+                                                   context)) {
                 return *result;
             }
 
-            return CallExpression::fromSystemMethod(compilation, expr, selector, invocation,
-                                                    withClause, context);
+            return CallExpression::fromSystemMethod(comp, expr, selector, invocation, withClause,
+                                                    context);
         }
         case SymbolKind::ErrorType:
-            return badExpr(compilation, &expr);
+            return badExpr(comp, &expr);
         case SymbolKind::VoidType:
             if (auto sym = expr.getSymbolReference()) {
                 if (sym->kind == SymbolKind::Coverpoint) {
@@ -990,8 +963,8 @@ Expression& MemberAccessExpression::fromSelector(
             }
             [[fallthrough]];
         default: {
-            if (auto result = tryBindSpecialMethod(compilation, expr, selector, invocation,
-                                                   withClause, context)) {
+            if (auto result = tryBindSpecialMethod(comp, expr, selector, invocation, withClause,
+                                                   context)) {
                 return *result;
             }
 
@@ -999,70 +972,72 @@ Expression& MemberAccessExpression::fromSelector(
             diag << expr.sourceRange;
             diag << selector.nameRange;
             diag << *expr.type;
-            return badExpr(compilation, &expr);
+            return badExpr(comp, &expr);
         }
     }
 
     const Symbol* member = scope->find(selector.name);
     if (!member) {
-        if (auto result = tryBindSpecialMethod(compilation, expr, selector, invocation, withClause,
+        if (auto result = tryBindSpecialMethod(comp, expr, selector, invocation, withClause,
                                                context)) {
             return *result;
         }
 
-        auto& diag = context.addDiag(diag::UnknownMember, selector.nameRange.start());
+        auto& diag = context.addDiag(diag::UnknownMember, selector.nameRange);
         diag << expr.sourceRange;
         diag << selector.name;
         diag << *expr.type;
-        return badExpr(compilation, &expr);
+        Lookup::addTypoCorrectionNote(diag, selector.name, *scope);
+        return badExpr(comp, &expr);
     }
 
     switch (member->kind) {
         case SymbolKind::Field: {
             auto& field = member->as<FieldSymbol>();
-            return *compilation.emplace<MemberAccessExpression>(field.getType(), expr, field,
-                                                                range);
+            return *comp.emplace<MemberAccessExpression>(field.getType(), expr, field, range);
         }
         case SymbolKind::ClassProperty: {
             Lookup::ensureVisible(*member, context, selector.nameRange);
             auto& prop = member->as<ClassPropertySymbol>();
-            if (prop.lifetime == VariableLifetime::Automatic &&
-                (errorIfNotProcedural() || errorIfAssertion())) {
-                return badExpr(compilation, &expr);
+            if (prop.lifetime == VariableLifetime::Automatic) {
+                if (errorIfAssertion())
+                    return badExpr(comp, &expr);
+
+                warnIfNotProcedural();
             }
 
-            return *compilation.emplace<MemberAccessExpression>(prop.getType(), expr, prop, range);
+            // We need to note the reference to the property here.
+            context.noteReference(prop, isDottedAccess);
+
+            return *comp.emplace<MemberAccessExpression>(prop.getType(), expr, prop, range);
         }
         case SymbolKind::Subroutine: {
             Lookup::ensureVisible(*member, context, selector.nameRange);
             auto& sub = member->as<SubroutineSymbol>();
-            if (!sub.flags.has(MethodFlags::Static) &&
-                (errorIfNotProcedural() || errorIfAssertion())) {
-                return badExpr(compilation, &expr);
-            }
+            if (!sub.flags.has(MethodFlags::Static)) {
+                if (errorIfAssertion())
+                    return badExpr(comp, &expr);
 
-            return CallExpression::fromLookup(compilation, &sub, &expr, invocation, withClause,
-                                              range, context);
+                warnIfNotProcedural();
+            }
+            return CallExpression::fromLookup(comp, &sub, &expr, invocation, withClause, range,
+                                              context);
         }
         case SymbolKind::ConstraintBlock:
         case SymbolKind::Coverpoint:
         case SymbolKind::CoverCross:
         case SymbolKind::CoverageBin: {
-            if (errorIfNotProcedural())
-                return badExpr(compilation, &expr);
-            return *compilation.emplace<MemberAccessExpression>(compilation.getVoidType(), expr,
-                                                                *member, range);
+            warnIfNotProcedural();
+            return *comp.emplace<MemberAccessExpression>(comp.getVoidType(), expr, *member, range);
         }
         case SymbolKind::EnumValue:
             // The thing being selected from doesn't actually matter, since the
             // enum value is a constant.
-            return ValueExpressionBase::fromSymbol(context, *member, /* isHierarchical */ false,
-                                                   range);
+            return ValueExpressionBase::fromSymbol(context, *member, nullptr, range);
         default: {
             if (member->isValue()) {
                 auto& value = member->as<ValueSymbol>();
-                return *compilation.emplace<MemberAccessExpression>(value.getType(), expr, value,
-                                                                    range);
+                return *comp.emplace<MemberAccessExpression>(value.getType(), expr, value, range);
             }
 
             auto& diag = context.addDiag(diag::InvalidClassAccess, selector.dotLocation);
@@ -1070,7 +1045,7 @@ Expression& MemberAccessExpression::fromSelector(
             diag << expr.sourceRange;
             diag << selector.name;
             diag << *expr.type;
-            return badExpr(compilation, &expr);
+            return badExpr(comp, &expr);
         }
     }
 }
@@ -1091,7 +1066,7 @@ Expression& MemberAccessExpression::fromSyntax(
     selector.nameRange = syntax.name.range();
 
     auto& result = fromSelector(compilation, lhs, selector, invocation, withClause, context,
-                                /* isFromLookupChain */ false);
+                                /* isFromLookupChain */ false, /* isDottedAccess */ false);
 
     if (result.kind != ExpressionKind::Call && !result.bad()) {
         if (invocation) {
@@ -1351,22 +1326,14 @@ static bool isWithinCovergroup(const Symbol& field, const Scope& usageScope) {
 }
 
 bool MemberAccessExpression::requireLValueImpl(const ASTContext& context, SourceLocation location,
-                                               bitmask<AssignFlags> flags,
-                                               const Expression* longestStaticPrefix) const {
+                                               bitmask<AssignFlags> flags) const {
     // If this is a selection of a class or covergroup member, assignability depends only
     // on the selected member and not on the handle itself. Otherwise, the opposite is true.
     auto& valueType = value().type->getCanonicalType();
-    if (valueType.isClass() || valueType.isCovergroup() || valueType.isVoid()) {
-        if (VariableSymbol::isKind(member.kind)) {
-            if (!longestStaticPrefix)
-                longestStaticPrefix = this;
-
-            auto& var = member.as<VariableSymbol>();
-            context.addDriver(var, *longestStaticPrefix, flags);
-
-            return ValueExpressionBase::checkVariableAssignment(context,
-                                                                member.as<VariableSymbol>(), flags,
-                                                                location, sourceRange);
+    if (valueType.isObjectHandleType() || valueType.isVoid()) {
+        if (member.isValue()) {
+            return ValueExpressionBase::checkLValue(context, member.as<ValueSymbol>(), flags,
+                                                    location, sourceRange);
         }
 
         if (!location)
@@ -1391,19 +1358,11 @@ bool MemberAccessExpression::requireLValueImpl(const ASTContext& context, Source
             context.addDiag(diag::UserDefPartialDriver, sourceRange) << net.name;
     }
 
-    if (!longestStaticPrefix)
-        longestStaticPrefix = this;
-
-    return value().requireLValue(context, location, flags, longestStaticPrefix);
+    return value().requireLValue(context, location, flags);
 }
 
-void MemberAccessExpression::getLongestStaticPrefixesImpl(
-    SmallVector<std::pair<const ValueSymbol*, const Expression*>>& results,
-    EvalContext& evalContext, const Expression* longestStaticPrefix) const {
-
-    if (!longestStaticPrefix)
-        longestStaticPrefix = this;
-    return value().getLongestStaticPrefixes(results, evalContext, longestStaticPrefix);
+bool MemberAccessExpression::isEquivalentImpl(const MemberAccessExpression& rhs) const {
+    return value().isEquivalentTo(rhs.value()) && &member == &rhs.member;
 }
 
 void MemberAccessExpression::serializeTo(ASTSerializer& serializer) const {

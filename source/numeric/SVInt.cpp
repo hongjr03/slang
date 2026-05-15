@@ -14,7 +14,7 @@
 #include <stdexcept>
 
 #include "slang/text/CharInfo.h"
-#include "slang/util/Hash.h"
+#include "slang/util/FlatMap.h"
 #include "slang/util/String.h"
 
 static const double log2_10 = log2(10.0);
@@ -640,14 +640,14 @@ std::ostream& operator<<(std::ostream& os, const SVInt& rhs) {
 }
 
 std::string SVInt::toString(bitwidth_t abbreviateThresholdBits, bool exactUnknowns) const {
-    // guess the base to use
-    // unknown bits require binary base for lossless representation
+    // Guess the base to use based on some heuristics.
+    const bool isAllXOrAllZ = unknownFlag && (countXs() == bitWidth || countZs() == bitWidth);
     LiteralBase base;
     if ((bitWidth < 8 && !signFlag) || (unknownFlag && exactUnknowns) ||
-        (unknownFlag && bitWidth <= 64)) {
+        (unknownFlag && bitWidth <= 64 && !isAllXOrAllZ)) {
         base = LiteralBase::Binary;
     }
-    else if (bitWidth <= 32 || signFlag) {
+    else if (bitWidth <= 32 || signFlag || isAllXOrAllZ) {
         base = LiteralBase::Decimal;
     }
     else {
@@ -1339,7 +1339,7 @@ SVInt SVInt::operator/(const SVInt& rhs) const {
     }
 
     // otherwise, just do the division
-    return udiv(*this, rhs, false);
+    return udiv(*this, rhs, bothSigned);
 }
 
 SVInt SVInt::operator%(const SVInt& rhs) const {

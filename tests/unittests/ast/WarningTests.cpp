@@ -3,638 +3,6 @@
 
 #include "Test.h"
 
-TEST_CASE("Diagnose unused modules / interfaces") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-endinterface
-
-interface J;
-endinterface
-
-module bar (I i);
-endmodule
-
-module top;
-endmodule
-
-module top2({a[1:0], a[3:2]});
-    ref int a;
-endmodule
-
-module top3(ref int a);
-    assign a = 1;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::UnusedDefinition);
-    CHECK(diags[1].code == diag::TopModuleIfacePort);
-    CHECK(diags[2].code == diag::TopModuleUnnamedRefPort);
-    CHECK(diags[3].code == diag::TopModuleRefPort);
-}
-
-TEST_CASE("Unused nets and vars") {
-    auto tree = SyntaxTree::fromText(R"(
-module m #(int foo)(input baz, output bar);
-    int i;
-    if (foo > 1) assign i = 0;
-
-    int x = 1;
-    int z;
-    int y = x + z;
-
-    wire j = 1;
-    wire k;
-    wire l = k;
-    wire m;
-
-    assign m = 1;
-endmodule
-
-module n(ref boz, inout buz, inout biz, inout bxz);
-    assign biz = 1;
-    (* maybe_unused *) logic n = bxz;
-endmodule
-
-module o(ref .a(boz), inout .b(buz), inout .c(biz), inout .d(bxz));
-    int boz;
-    wire buz,biz,bxz;
-
-    assign biz = 1;
-    (* maybe_unused *) logic n = bxz;
-endmodule
-
-module top;
-    logic baz,bar;
-    m #(1) m1(.*);
-    m #(2) m2(bar, baz);
-    m #(3) m3(a, b);
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags &= ~CompilationFlags::SuppressUnused;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto diags = compilation.getAllDiagnostics().filter(
-        {diag::StaticInitOrder, diag::StaticInitValue});
-
-    REQUIRE(diags.size() == 19);
-    CHECK(diags[0].code == diag::UnusedPort);
-    CHECK(diags[1].code == diag::UndrivenPort);
-    CHECK(diags[2].code == diag::UnusedButSetVariable);
-    CHECK(diags[3].code == diag::UnassignedVariable);
-    CHECK(diags[4].code == diag::UnusedVariable);
-    CHECK(diags[5].code == diag::UnusedNet);
-    CHECK(diags[6].code == diag::UndrivenNet);
-    CHECK(diags[7].code == diag::UnusedNet);
-    CHECK(diags[8].code == diag::UnusedButSetNet);
-    CHECK(diags[9].code == diag::UnusedPort);
-    CHECK(diags[10].code == diag::UnusedPort);
-    CHECK(diags[11].code == diag::UnusedButSetPort);
-    CHECK(diags[12].code == diag::UndrivenPort);
-    CHECK(diags[13].code == diag::UnusedPort);
-    CHECK(diags[14].code == diag::UnusedPort);
-    CHECK(diags[15].code == diag::UnusedButSetPort);
-    CHECK(diags[16].code == diag::UndrivenPort);
-    CHECK(diags[17].code == diag::UnusedImplicitNet);
-    CHECK(diags[18].code == diag::UnusedImplicitNet);
-}
-
-TEST_CASE("Unused nets and vars false positives regress") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I(input clk);
-    logic baz;
-    modport m(input clk, baz);
-    modport n(output baz);
-endinterface
-
-module m(output v);
-    wire clk = 1;
-    I i(clk);
-
-    int x,z;
-    if (0) begin
-        assign x = 1;
-        always_ff @(posedge clk) v <= x;
-
-        assign z = 1;
-    end
-    else begin
-        assign z = 1;
-    end
-
-    wire integer y = z;
-    initial $dumpvars(m.y);
-
-    event e[4];
-    initial begin
-       for (int i = 0; i < 4; i++) begin
-           ->e[i];
-       end
-       @ e[0] begin end
-    end
-
-    initial begin
-        int b[$];
-        static int q = 1;
-        string s1;
-        s1.itoa(q);
-        b.push_back(1);
-    end
-endmodule
-
-(* unused *) module n #(parameter int i)(input x, output y, output z);
-    logic [i-1:0] a = 1;
-    assign y = a[x];
-endmodule
-
-package p;
-    int i;
-endpackage
-
-module q(
-    output logic [7:0] lhs,
-    input  logic [7:0] rhs,
-    input  logic [2:0] lhs_lsb,
-    input  logic [2:0] rhs_lsb
-);
-   always_comb begin
-       lhs = 0;
-       lhs[lhs_lsb +: 2] = rhs[rhs_lsb +: 2];
-   end
-
-   wire w, x;
-   tranif1(w, x, 1'b1);
-endmodule
-
-class C;
-    extern function int foo(int a);
-    virtual function bar(int b);
-        int c[$];
-        c.push_back(1);
-    endfunction
-endclass
-
-function int C::foo(int a);
-    return a;
-endfunction
-
-import "DPI-C" function void dpi_func(int i);
-
-class D;
-    int s1[$];
-    int s2[int];
-    function void f();
-        int i = 0;
-        foreach (s2[j]) begin
-            int k = j * 4;
-            s1[i++] = k;
-        end
-    endfunction
-endclass
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Ref args are considered used") {
-    auto tree = SyntaxTree::fromText(R"(
-class C;
-    function void f1(ref bit [3:0] a);
-        a = 4'hF;
-    endfunction
-
-    function int unsigned f2();
-        bit [3:0] a;
-        f1(a);
-    endfunction
-endclass
-
-module top;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("'unused' warnings with clock vars") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    logic clk;
-    logic a;
-
-    clocking cb @(posedge clk);
-        input a;
-    endclocking
-endinterface
-
-class TB;
-    virtual I intf;
-    task run();
-        @(intf.cb);
-        if (intf.cb.a) begin
-            $display("error!");
-        end
-    endtask
-endclass
-
-module M(
-    input logic clk,
-    output logic a
-);
-   always_ff @(posedge clk) begin
-       a <= 1'b1;
-   end
-endmodule
-
-module top;
-    logic a;
-    logic clk;
-    I i();
-
-    M m(.*);
-
-    assign i.clk = clk;
-    assign i.a = a;
-
-    initial begin
-        clk = 0;
-        forever begin
-            #1ns;
-            clk = ~clk;
-        end
-    end
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("'unassigned' warnings with clockvar outputs") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    logic clk;
-    logic a;
-
-    clocking cb_driver @(posedge clk);
-        output a;
-    endclocking
-endinterface
-
-class C;
-    virtual I i;
-    task drive();
-        @(i.cb_driver);
-        i.cb_driver.a <= 1'b0;
-    endtask
-
-    logic q = i.a;
-endclass
-
-module top;
-   I i();
-   C c;
-   initial begin
-       i.clk = 0;
-       forever begin
-           #1ns i.clk = ~i.clk;
-       end
-   end
-   initial begin
-       c = new();
-       c.i = i;
-       c.drive();
-   end
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Unused function args") {
-    auto tree = SyntaxTree::fromText(R"(
-function foo(input x, output y);
-    y = 1;
-endfunction
-
-module m;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::UnusedArgument);
-}
-
-TEST_CASE("System function args count as outputs") {
-    auto tree = SyntaxTree::fromText(R"(
-class C;
-    function bit f();
-        bit a;
-        int rc = std::randomize(a);
-        assert(rc != 0);
-        return a;
-    endfunction
-endclass
-
-module m;
-    int i;
-    string a = "foo", s = "a 3";
-    int b = 0;
-    initial begin
-        $cast(i, i);
-        void'($sscanf(s, "%s %d", a, b));
-    end
-
-    (* unused *) int q = b + a.len;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Class handle access 'unused' warnings") {
-    auto tree = SyntaxTree::fromText(R"(
-class A;
-    int i;
-endclass
-
-class C;
-    task t1(A a);
-        a.i = 3;
-    endtask
-
-    task t2(A a);
-        A a1 = a;
-        a1.i = 3;
-    endtask
-endclass
-
-module m;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Virtual interface handle access 'unused' warnings") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    logic clk;
-endinterface
-
-class C;
-    event sys_clk;
-
-    virtual I i;
-    function virtual I get_intf();
-        return i;
-    endfunction
-
-    task t();
-        virtual I intf = get_intf();
-        @(intf.clk);
-        ->sys_clk;
-    endtask
-endclass
-
-module top;
-    I intf();
-    initial begin
-        intf.clk = 0;
-        forever begin
-            #1ns;
-            intf.clk = ~intf.clk;
-        end
-    end
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Exclude 'unused' warnings based on attributes, underscore name") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    int _;
-    (* maybe_unused *) int foo;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Unused parameters") {
-    auto tree = SyntaxTree::fromText(R"(
-module m #(parameter p = 1, q = 2, parameter type t = int, u = real);
-    (* unused *) u r = 3.14;
-    (* unused *) int i = q;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::UnusedParameter);
-    CHECK(diags[1].code == diag::UnusedTypeParameter);
-}
-
-TEST_CASE("Unused typedefs") {
-    auto tree = SyntaxTree::fromText(R"(
-class C;
-    parameter p = 1;
-endclass
-
-module m;
-    typedef struct { int a, b; } asdf;
-    typedef enum { A, B } foo;
-
-    (* unused *) foo f = A;
-
-    typedef C D;
-    (* unused *) parameter p = D::p;
-
-    typedef enum { E, F } bar;
-
-    (* unused *) parameter q = E;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::UnusedTypedef);
-}
-
-TEST_CASE("Covergroups and class handles are 'used' if constructed") {
-    auto tree = SyntaxTree::fromText(R"(
-interface I;
-    logic a = 1;
-    covergroup cg;
-        a: coverpoint a;
-    endgroup
-
-    cg cov = new();
-endinterface
-
-class C;
-    function new; $display("Hello!"); endfunction
-endclass
-
-module m;
-    I i();
-    C c1 = new;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Unused genvars") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    genvar g;
-    genvar h;
-    for (g = 0; g < 3; g++) begin end
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::UnusedGenvar);
-}
-
-TEST_CASE("Unused assertion decls") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    sequence s1; 1; endsequence
-    property p1; 1; endproperty
-    let l1 = 1;
-
-    sequence s2; 1; endsequence
-    property p2; 1; endproperty
-    let l2 = 1;
-
-    assert property (s2);
-    assert property (p2);
-    (* unused *) int i = l2();
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
-    CHECK(diags[0].code == diag::UnusedAssertionDecl);
-    CHECK(diags[1].code == diag::UnusedAssertionDecl);
-    CHECK(diags[2].code == diag::UnusedAssertionDecl);
-}
-
-TEST_CASE("Unused imports") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    int a;
-endpackage
-
-module m;
-    import p::a;
-    import p::*;
-endmodule
-)");
-
-    CompilationOptions coptions;
-    coptions.flags = CompilationFlags::None;
-
-    Compilation compilation(coptions);
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::UnusedImport);
-    CHECK(diags[1].code == diag::UnusedWildcardImport);
-}
-
 TEST_CASE("Implicit conversions with constants") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
@@ -743,6 +111,7 @@ module m;
     logic signed [1:0] l = (2'd3:2'd1:-3);
     logic signed m = (2'd1 == 2'd1);
     logic signed [1:0] n = 2'd1 << 1;
+    logic signed [1:0] o = +2'd3;
 endmodule
 )");
 
@@ -750,10 +119,11 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
+    REQUIRE(diags.size() == 4);
     CHECK(diags[0].code == diag::SignConversion);
-    CHECK(diags[0].code == diag::SignConversion);
-    CHECK(diags[0].code == diag::SignConversion);
+    CHECK(diags[1].code == diag::SignConversion);
+    CHECK(diags[2].code == diag::SignConversion);
+    CHECK(diags[3].code == diag::SignConversion);
 }
 
 TEST_CASE("Edge of multibit type") {
@@ -783,21 +153,29 @@ module m;
     initial if (i || r) begin end
 
     // These don't warn
-    initial if (i >> 2) begin end
+    initial if (i >>> 2) begin end
     initial if (i & 2) begin end
     initial if (i ^ 2) begin end
 endmodule
+
+class C;
+    int a;
+    constraint c {
+        if (a) {}
+    }
+endclass
 )");
 
     Compilation compilation;
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
+    REQUIRE(diags.size() == 5);
     CHECK(diags[0].code == diag::FloatBoolConv);
     CHECK(diags[1].code == diag::IntBoolConv);
     CHECK(diags[2].code == diag::IntBoolConv);
     CHECK(diags[3].code == diag::FloatBoolConv);
+    CHECK(diags[4].code == diag::IntBoolConv);
 }
 
 TEST_CASE("Useless cast warnings") {
@@ -834,7 +212,7 @@ module m;
     // Not useless.
     localparam width = 32;
     logic [1:0][width-1:0] c;
-    for (genvar i = 0; i < 2; i++) begin
+    for (genvar i = 0; i < 2; i++) begin : blk
         always_comb c[i] = $bits(c[i])'(i);
     end
 endmodule
@@ -874,6 +252,193 @@ endfunction
     CHECK(diags[4].code == diag::SignConversion);
 }
 
+TEST_CASE("Signed logical shift warning") {
+    auto tree = SyntaxTree::fromText(R"(
+// Should warn: logical shift of signed variable
+function automatic int f1(int i);
+    return i >> 5;
+endfunction
+
+// Should NOT warn: signed but known non-negative constant
+function automatic int f2();
+    return 42 >> 1;
+endfunction
+
+// Should NOT warn: unsigned variable
+function automatic int unsigned f3(int unsigned i);
+    return i >> 5;
+endfunction
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::SignedLogicalShift);
+}
+
+TEST_CASE("Shift count overflow warning") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic [2:0] v;
+    int i;
+    logic [3:0] r;
+
+    initial begin
+        r = v << 4;     // warn: shift by 4 == width (4 bits)
+        r = v << 5;     // warn: shift by 5 > width
+        r = v >> 4;     // warn: shift by 4 == width
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::ShiftCountOverflow);
+    CHECK(diags[1].code == diag::ShiftCountOverflow);
+    CHECK(diags[2].code == diag::ShiftCountOverflow);
+}
+
+TEST_CASE("Shift count overflow - valid cases") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic [2:0] v;
+    int i;
+    logic [3:0] r;
+
+    initial begin
+        r = v << 3;     // ok: shift by 3 < width
+        r = v << i;     // ok: non-constant shift amount
+        r = v >> 0;     // ok: shift by 0
+    end
+    if (0) begin
+        assign r = v << 4;  // ok: unevaluated branch
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Shift count overflow warning - arithmetic shifts") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int v;          // signed 32-bit
+    int r;
+
+    initial begin
+        r = v >>> 32;   // warn: shift by 32 == width
+        r = v >>> 31;   // ok: shift by 31 < width
+        r = v <<< 32;   // warn: shift by 32 == width
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ShiftCountOverflow);
+    CHECK(diags[1].code == diag::ShiftCountOverflow);
+}
+
+TEST_CASE("Shift count negative warning") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic [7:0] v;
+    logic [7:0] r;
+    int i;
+
+    initial begin
+        r = v << -1;    // warn: negative shift amount
+        r = v >> -2;    // warn: negative shift amount
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ShiftCountNegative);
+    CHECK(diags[1].code == diag::ShiftCountNegative);
+}
+
+TEST_CASE("Shift count negative warning -- valid cases") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic [7:0] v;
+    logic [7:0] r;
+    int i;
+
+    initial begin
+        r = v << i;     // ok: non-constant shift amount
+        r = v << 0;     // ok: zero is valid
+    end
+    if (0) begin
+        assign r = v << -1;  // ok: unevaluated branch
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Division by zero warning") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int r;
+    real fr;
+
+    initial begin
+        r = 10 / 0;         // warn: integer divide by zero
+        r = 10 % 0;         // warn: modulo by zero
+        fr = 1.0 / 0.0;     // warn: real divide by zero
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::DivisionByZero);
+    CHECK(diags[1].code == diag::DivisionByZero);
+    CHECK(diags[2].code == diag::DivisionByZero);
+}
+
+TEST_CASE("Division by zero warning -- valid cases") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int r;
+    int v;
+
+    initial begin
+        r = 10 / 1;         // ok: divisor is not zero
+        r = 10 / v;         // ok: divisor is not a compile-time constant
+    end
+    if (0) begin
+        assign r = 10 / 0;  // ok: unevaluated branch
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
 TEST_CASE("Indeterminate variable initialization order") {
     auto tree = SyntaxTree::fromText(R"(
 package p;
@@ -900,6 +465,43 @@ endmodule
     CHECK(diags[0].code == diag::StaticInitValue);
     CHECK(diags[1].code == diag::StaticInitOrder);
     CHECK(diags[2].code == diag::StaticInitValue);
+}
+
+TEST_CASE("Init-self warning") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int i = i;
+    int j = j + 1;
+    int k = $bits(k);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::InitSelf);
+    CHECK(diags[1].code == diag::InitSelf);
+}
+
+TEST_CASE("Init-self warning -- no false positives") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int a = 1;
+    int b = a;
+    int c = $bits(c);
+    int d = $size(d);
+    typedef enum { P, Q, R } my_e;
+    my_e e0 = e0.first();
+    my_e e1 = e1.last();
+    my_e e2 = e2.num() > 0 ? P : Q;
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
 }
 
 TEST_CASE("Float conversion warnings") {
@@ -945,7 +547,7 @@ module m;
 
     localparam int unsigned NUM_PORTS = 3;
     genvar g;
-    for (g = 0; g < NUM_PORTS; g++) begin end
+    for (g = 0; g < NUM_PORTS; g++) begin : blk end
 endmodule
 
 class C;
@@ -968,7 +570,7 @@ module top;
     logic [7:0] b;
 
     // No warning for sign comparison of genvars.
-    for (genvar i = 0; i < 8; i++) begin
+    for (genvar i = 0; i < 8; i++) begin : blk
         always_comb a[i] = valid && i == b;
     end
 endmodule
@@ -1014,17 +616,19 @@ module m;
     int unsigned flags;
     logic a, b, c;
     int unsigned d, e;
+    logic [3:0] f;
     initial begin
         if (flags & 'h1 == 'h1) begin end
         if (a & b | c) begin end
         if (a | b ^ c) begin end
         if (a || b && c) begin end
-        if (a << 1 + 1) begin end
+        if ((f << 1 + 1) == 2) begin end
         if (!d < e) begin end
         if (!d & e) begin end
         if ((a + b ? 1 : 2) == 2) begin end
         if (a < b < c) begin end
         c |= a & b;
+        if (!a inside {0, 1, 0}) begin end
     end
 endmodule
 )");
@@ -1033,7 +637,7 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 10);
+    REQUIRE(diags.size() == 11);
     CHECK(diags[0].code == diag::BitwiseRelPrecedence);
     CHECK(diags[1].code == diag::BitwiseOpParentheses);
     CHECK(diags[2].code == diag::BitwiseOpParentheses);
@@ -1044,6 +648,7 @@ endmodule
     CHECK(diags[7].code == diag::BitwiseOpMismatch);
     CHECK(diags[8].code == diag::ConditionalPrecedence);
     CHECK(diags[9].code == diag::ConsecutiveComparison);
+    CHECK(diags[10].code == diag::LogicalNotParentheses);
 }
 
 TEST_CASE("Case statement type warnings") {
@@ -1115,50 +720,31 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 8);
+    REQUIRE(diags.size() == 7);
     CHECK(diags[0].code == diag::CaseOutsideRange);
     CHECK(diags[1].code == diag::CaseTypeMismatch);
     CHECK(diags[2].code == diag::CaseTypeMismatch);
     CHECK(diags[3].code == diag::CaseTypeMismatch);
-    CHECK(diags[4].code == diag::CaseOverlap);
-    CHECK(diags[5].code == diag::CaseOutsideRange);
+    CHECK(diags[4].code == diag::CaseOutsideRange);
+    CHECK(diags[5].code == diag::CaseTypeMismatch);
     CHECK(diags[6].code == diag::CaseTypeMismatch);
-    CHECK(diags[7].code == diag::CaseTypeMismatch);
 }
 
-TEST_CASE("Case statement missing enum values") {
+TEST_CASE("Case unique/priority defaults") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
-    enum {A,B,C,D,E} e;
+    logic [2:0] a;
     initial begin
-        case (e)
-            A, B, C, D:;
-            default;
-        endcase
-        case (e)
-            A, B, C:;
-            default;
-        endcase
-        case (e)
-            A, B:;
-            default;
-        endcase
-        case (e)
-            A:;
-            default;
+        unique case (a)
+            1:;
+            2:;
+            // No warning for missing default since we assert unique
         endcase
 
-        case (e)
-            A, B, C, D:;
-        endcase
-        case (e)
-            A, B, C:;
-        endcase
-        case (e)
-            A, B:;
-        endcase
-        case (e)
-            A:;
+        unique case (a)
+            1:;
+            2:;
+            default; // Warning for default
         endcase
     end
 endmodule
@@ -1168,38 +754,19 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 12);
-    CHECK(diags[0].code == diag::CaseEnumExplicit);
-    CHECK(diags[1].code == diag::CaseEnumExplicit);
-    CHECK(diags[2].code == diag::CaseEnumExplicit);
-    CHECK(diags[3].code == diag::CaseEnumExplicit);
-    CHECK(diags[4].code == diag::CaseDefault);
-    CHECK(diags[5].code == diag::CaseEnum);
-    CHECK(diags[6].code == diag::CaseDefault);
-    CHECK(diags[7].code == diag::CaseEnum);
-    CHECK(diags[8].code == diag::CaseDefault);
-    CHECK(diags[9].code == diag::CaseEnum);
-    CHECK(diags[10].code == diag::CaseDefault);
-    CHECK(diags[11].code == diag::CaseEnum);
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::CaseRedundantDefault);
 }
 
-TEST_CASE("Case statement dups") {
+TEST_CASE("Case wildcard 2-state") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
-    int i;
-    event e;
-    initial begin
-        case (i)
-            1, 2:;
-            3, 1:;
-            default;
-        endcase
-        case (e)
-            null:;
-            null:;
-            default;
-        endcase
-    end
+    bit [2:0] a;
+    initial casex (a)
+        3'd0:;
+        3'd1:;
+        default;
+    endcase
 endmodule
 )");
 
@@ -1207,64 +774,49 @@ endmodule
     compilation.addSyntaxTree(tree);
 
     auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::CaseDup);
-    CHECK(diags[1].code == diag::CaseDup);
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::CaseWildcard2State);
 }
 
-TEST_CASE("Case statement overlap") {
+TEST_CASE("Conversion warnings in conditional operator") {
     auto tree = SyntaxTree::fromText(R"(
-module m;
-    logic [65:0] a;
-    initial begin
-        casex (a)
-            65'bx1011z:;
-            65'b10111:;
-            65'b11011:;
-            65'b1101x:;
-            65'b110?1:;
-            default;
-        endcase
-        casez (a)
-            65'bx1111:;
-            65'b1x111:;
-            65'b1?111:;
-            65'b?1111:;
-            65'b?0111:;
-            default;
-        endcase
-    end
+module test;
+  initial begin
+    static int a = 3;
+    static int b = 5;
+    static bit cond = 1;
+    static longint result = 7;
+    result = cond ? a : b;
+  end
 endmodule
-)");
 
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
+module test2;
+  initial begin
+    static int a = 3;
+    static int b = 5;
+    static bit cond = 1;
+    static longint result = 7;
+    bit c, d;
 
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 7);
-    CHECK(diags[0].code == diag::CaseOverlap);
-    CHECK(diags[1].code == diag::CaseOverlap);
-    CHECK(diags[2].code == diag::CaseOverlap);
-    CHECK(diags[3].code == diag::CaseZWithX);
-    CHECK(diags[4].code == diag::CaseZWithX);
-    CHECK(diags[5].code == diag::CaseOverlap);
-    CHECK(diags[6].code == diag::CaseOverlap);
-}
+    result = cond ? a : longint'(b);
 
-TEST_CASE("Case items with unknowns that are not wildcards") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    logic [3:0] a;
-    initial begin
-        case (a)
-            4'b?10:;
-            4'bx10:;
-            default;
-        endcase
-        casez (a)
-            4'bx10:;
-            default;
-        endcase
+    // This should not warn.
+    c = cond ? d : 0;
+  end
+endmodule
+
+module test3;
+    localparam int unsigned SIZE = 16;
+
+    logic a;
+    logic [7:0] b, c;
+    logic [SIZE-1:0] d, e, f, g;
+
+    always_comb begin
+        d = SIZE'( a ? b : c);
+        e = SIZE'(b);
+        f = a ? SIZE'(b) : SIZE'(c);
+        g = SIZE'( (a == 0) ? f : c);
     end
 endmodule
 )");
@@ -1274,7 +826,166 @@ endmodule
 
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 3);
-    CHECK(diags[0].code == diag::CaseNotWildcard);
-    CHECK(diags[1].code == diag::CaseNotWildcard);
-    CHECK(diags[2].code == diag::CaseZWithX);
+    CHECK(diags[0].code == diag::WidthExpand);
+    CHECK(diags[1].code == diag::WidthExpand);
+    CHECK(diags[2].code == diag::WidthExpand);
+}
+
+TEST_CASE("Unnamed generate warnings") {
+    auto tree = SyntaxTree::fromText(R"(
+module a;
+    parameter L = 0;
+    if (L) begin    // warning here
+    end else begin  // warning here
+    end
+endmodule
+
+module top;
+    for (genvar i = 0; i < 8; i++) begin   // warning here
+        a a_inst();
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 3);
+    CHECK(diags[0].code == diag::UnnamedGenerate);
+    CHECK(diags[1].code == diag::UnnamedGenerate);
+    CHECK(diags[2].code == diag::UnnamedGenerate);
+}
+
+TEST_CASE("Array concat width warning regress -- GH #1519") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+    localparam bit [4:0][7:0] A = {
+        6'd2,
+        6'd4,
+        6'd9,
+        6'd24,
+        6'd24
+    };
+
+    localparam bit [4:0][7:0] B = {
+        8'd2,
+        8'd4,
+        8'd9,
+        8'd24,
+        8'd24
+    };
+
+    logic [4:0][7:0] b;
+
+    always_comb begin
+        b = {
+            6'd2,
+            6'd4,
+            6'd9,
+            6'd24,
+            6'd24
+        };
+
+        b = {
+            8'd2,
+            8'd4,
+            8'd9,
+            8'd24,
+            8'd24
+        };
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::PackedArrayConv);
+    CHECK(diags[1].code == diag::PackedArrayConv);
+}
+
+TEST_CASE("Single dim array conv warning regress -- GH #1601") {
+    auto tree = SyntaxTree::fromText(R"(
+module testA;
+    typedef struct packed {
+        logic a;
+        logic b;
+    } data_t;
+
+    data_t data_in, data_out;
+
+    testB #(
+         .data_t(data_t),
+         .Width(1)
+    ) i_testB (
+        .data_i(data_in),
+        .data_o(data_out)
+    );
+endmodule
+
+module testB #(
+    parameter type data_t = logic,
+    parameter int unsigned Width = 1
+) (
+    input data_t [Width-1:0] data_i,
+    output data_t [Width-1:0] data_o
+);
+    assign data_o = data_i;
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Comparison mismatch with unpacked array selects -- GH #1637") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic [3:0] current_num [16];
+    logic comps [8];
+    genvar i;
+    generate for (genvar i=0; i < 8; i++) begin : g_COMP_BLOCKS
+        assign comps[i] = current_num[0 +: i+1]==current_num[i+1 +: i+1];
+    end endgenerate
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Increment/decrement of 1-bit operand") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    bit b;
+    logic l;
+    logic [3:0] v;
+    int i;
+
+    initial begin
+        b++;   // warn
+        ++b;   // warn
+        l--;   // warn
+        --l;   // warn
+        v++;   // ok
+        i++;   // ok
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 4);
+    CHECK(diags[0].code == diag::IncDecBit);
+    CHECK(diags[1].code == diag::IncDecBit);
+    CHECK(diags[2].code == diag::IncDecBit);
+    CHECK(diags[3].code == diag::IncDecBit);
 }

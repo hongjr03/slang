@@ -310,11 +310,24 @@ pub mod generator {
         }
 
         let (syntax_kinds, syntax_debug_arms) = {
-            let kinds = kind_map.keys().map(|kind| kind.to_string());
-            let list_kinds = ["Unknown", "SyntaxList", "TokenList", "SeparatedList"]
-                .into_iter()
-                .map(String::from);
-            let (syntax_kinds, syntax_debug_arms) = generate_kinds::<u16>(list_kinds.chain(kinds));
+            let kinds = std::iter::once("Unknown".to_owned())
+                .chain(kind_map.keys().map(|kind| kind.to_string()));
+            let (mut syntax_kinds, mut syntax_debug_arms) = generate_kinds::<u16>(kinds);
+
+            for (kind, id) in [
+                ("SyntaxList", u16::MAX - 2),
+                ("TokenList", u16::MAX - 1),
+                ("SeparatedList", u16::MAX),
+            ] {
+                let kind_name = format_ident!("{}", kind.to_screaming_snake_case());
+                syntax_kinds.push(quote! {
+                    pub const #kind_name: Self = Self(#id);
+                });
+                syntax_debug_arms.push(quote! {
+                    Self::#kind_name => #kind,
+                });
+            }
+
             (syntax_kinds.into_iter(), syntax_debug_arms.into_iter())
         };
 

@@ -16,6 +16,7 @@
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/TimingControl.h"
+#include "slang/ast/ValuePath.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
@@ -169,22 +170,28 @@ ModportPortSymbol& ModportPortSymbol::fromSyntax(const ASTContext& context,
     auto name = syntax.name;
     auto result = comp.emplace<ModportPortSymbol>(name.valueText(), name.location(), direction);
     result->setSyntax(syntax);
-    result->internalSymbol = Lookup::unqualifiedAt(*context.scope, name.valueText(),
-                                                   context.getLocation(), name.range(),
-                                                   LookupFlags::NoParentScope);
 
-    if (result->internalSymbol) {
-        if (result->internalSymbol->kind == SymbolKind::Subroutine) {
+    auto symbol = Lookup::unqualifiedAt(*context.scope, name.valueText(), context.getLocation(),
+                                        name.range());
+
+    if (symbol) {
+        if (symbol->getParentScope() != context.scope) {
+            auto& diag = context.addDiag(diag::ModportMemberParent, name.range());
+            diag << name.valueText();
+            diag.addNote(diag::NoteDeclarationHere, symbol->location);
+        }
+        else if (symbol->kind == SymbolKind::Subroutine) {
             auto& diag = context.addDiag(diag::ExpectedImportExport, name.range());
             diag << name.valueText();
-            diag.addNote(diag::NoteDeclarationHere, result->internalSymbol->location);
-            result->internalSymbol = nullptr;
+            diag.addNote(diag::NoteDeclarationHere, symbol->location);
         }
-        else if (!SemanticFacts::isAllowedInModport(result->internalSymbol->kind)) {
+        else if (!SemanticFacts::isAllowedInModport(symbol->kind)) {
             auto& diag = context.addDiag(diag::NotAllowedInModport, name.range());
             diag << name.valueText();
-            diag.addNote(diag::NoteDeclarationHere, result->internalSymbol->location);
-            result->internalSymbol = nullptr;
+            diag.addNote(diag::NoteDeclarationHere, symbol->location);
+        }
+        else {
+            result->internalSymbol = symbol;
         }
     }
 
@@ -193,13 +200,14 @@ ModportPortSymbol& ModportPortSymbol::fromSyntax(const ASTContext& context,
         return *result;
     }
 
-    auto sourceType = result->internalSymbol->getDeclaredType();
+    auto sourceType = symbol->getDeclaredType();
     SLANG_ASSERT(sourceType);
     result->getDeclaredType()->setLink(*sourceType);
 
     // Perform checking on the connected symbol to make sure it's allowed
-    // given the modport's direction.
-    ASTContext checkCtx = context.resetFlags(ASTFlags::NonProcedural | ASTFlags::NotADriver);
+    // given the modport's direction. NoReference keeps the declaration
+    // from counting as a use of the underlying signal.
+    ASTContext checkCtx = context.resetFlags(ASTFlags::NonProcedural | ASTFlags::NoReference);
     if (direction != ArgumentDirection::In) {
         checkCtx.flags |= ASTFlags::LValue;
         if (direction == ArgumentDirection::InOut)
@@ -207,19 +215,19 @@ ModportPortSymbol& ModportPortSymbol::fromSyntax(const ASTContext& context,
     }
 
     auto loc = result->location;
-    auto& expr = ValueExpressionBase::fromSymbol(checkCtx, *result->internalSymbol, false,
+    auto& expr = ValueExpressionBase::fromSymbol(checkCtx, *result->internalSymbol, nullptr,
                                                  {loc, loc + result->name.length()});
 
-    Expression::checkConnectionDirection(expr, direction, checkCtx, loc);
+    if (Expression::checkConnectionDirection(expr, direction, checkCtx, loc))
+        result->connExpr = &expr;
 
-    result->connExpr = &expr;
     return *result;
 }
 
 ModportPortSymbol& ModportPortSymbol::fromSyntax(const ASTContext& parentContext,
                                                  ArgumentDirection direction,
                                                  const ModportExplicitPortSyntax& syntax) {
-    ASTContext context = parentContext.resetFlags(ASTFlags::NonProcedural | ASTFlags::NotADriver);
+    ASTContext context = parentContext.resetFlags(ASTFlags::NonProcedural | ASTFlags::NoReference);
     auto& comp = context.getCompilation();
     auto name = syntax.name;
     auto result = comp.emplace<ModportPortSymbol>(name.valueText(), name.location(), direction);
@@ -240,14 +248,34 @@ ModportPortSymbol& ModportPortSymbol::fromSyntax(const ASTContext& parentContext
     auto& expr = Expression::bind(*syntax.expr, context, extraFlags);
     result->explicitConnection = &expr;
     result->connExpr = &expr;
-    if (expr.bad()) {
+    result->setType(*expr.type);
+
+    if (expr.bad() ||
+        !Expression::checkConnectionDirection(expr, direction, context, result->location)) {
         result->setType(comp.getErrorType());
         return *result;
     }
 
-    result->setType(*expr.type);
+    expr.visitSymbolReferences([&](const Expression& refExpr, const Symbol& symbol) {
+        if (refExpr.kind == ExpressionKind::MemberAccess)
+            return;
 
-    Expression::checkConnectionDirection(expr, direction, context, result->location);
+        // "Hierarchical" is ok if it's actually via an interface / modport port
+        // on the parent interface itself.
+        auto hierVal = refExpr.as_if<HierarchicalValueExpression>();
+        if (hierVal) {
+            auto& ref = hierVal->ref;
+            if (ref.isViaIfacePort() && ref.path[0].symbol->getParentScope() == context.scope)
+                return;
+        }
+
+        if (hierVal || symbol.getParentScope() != context.scope) {
+            auto& diag = context.addDiag(diag::ModportMemberParent, refExpr.sourceRange);
+            diag << symbol.name;
+            diag.addNote(diag::NoteDeclarationHere, symbol.location);
+            result->setType(comp.getErrorType());
+        }
+    });
 
     return *result;
 }
@@ -271,14 +299,23 @@ ModportClockingSymbol& ModportClockingSymbol::fromSyntax(const ASTContext& conte
     auto result = comp.emplace<ModportClockingSymbol>(name.valueText(), name.location());
     result->setSyntax(syntax);
 
-    result->target = Lookup::unqualifiedAt(*context.scope, name.valueText(), context.getLocation(),
-                                           name.range(), LookupFlags::NoParentScope);
+    auto symbol = Lookup::unqualifiedAt(*context.scope, name.valueText(), context.getLocation(),
+                                        name.range());
 
-    if (result->target && result->target->kind != SymbolKind::ClockingBlock) {
-        auto& diag = context.addDiag(diag::NotAClockingBlock, name.range());
-        diag << name.valueText();
-        diag.addNote(diag::NoteDeclarationHere, result->target->location);
-        result->target = nullptr;
+    if (symbol) {
+        if (symbol->getParentScope() != context.scope) {
+            auto& diag = context.addDiag(diag::ModportMemberParent, name.range());
+            diag << name.valueText();
+            diag.addNote(diag::NoteDeclarationHere, symbol->location);
+        }
+        else if (symbol->kind != SymbolKind::ClockingBlock) {
+            auto& diag = context.addDiag(diag::NotAClockingBlock, name.range());
+            diag << name.valueText();
+            diag.addNote(diag::NoteDeclarationHere, symbol->location);
+        }
+        else {
+            result->target = symbol;
+        }
     }
 
     return *result;
@@ -338,8 +375,8 @@ void ModportSymbol::fromSyntax(const ASTContext& context, const ModportDeclarati
                         modport->hasExports = true;
 
                     for (auto subPort : portList.ports) {
-                        if (subPort->previewNode)
-                            modport->addMembers(*subPort->previewNode);
+                        if (auto preview = subPort->previewNode())
+                            modport->addMembers(*preview);
 
                         switch (subPort->kind) {
                             case SyntaxKind::ModportNamedPort: {
@@ -438,31 +475,6 @@ const Expression& ContinuousAssignSymbol::getAssignment() const {
     return *assign;
 }
 
-struct ExpressionVarVisitor {
-    bool anyVars = false;
-
-    template<typename T>
-    void visit(const T& expr) {
-        if constexpr (std::is_base_of_v<Expression, T>) {
-            switch (expr.kind) {
-                case ExpressionKind::NamedValue:
-                case ExpressionKind::HierarchicalValue: {
-                    if (auto sym = expr.getSymbolReference()) {
-                        if (VariableSymbol::isKind(sym->kind))
-                            anyVars = true;
-                    }
-                    break;
-                }
-                default:
-                    if constexpr (HasVisitExprs<T, ExpressionVarVisitor>) {
-                        expr.visitExprs(*this);
-                    }
-                    break;
-            }
-        }
-    }
-};
-
 const TimingControl* ContinuousAssignSymbol::getDelay() const {
     if (delay)
         return *delay;
@@ -491,9 +503,14 @@ const TimingControl* ContinuousAssignSymbol::getDelay() const {
             auto& expr = getAssignment();
             if (expr.kind == ExpressionKind::Assignment) {
                 auto& left = expr.as<AssignmentExpression>().left();
-                ExpressionVarVisitor visitor;
-                left.visit(visitor);
-                if (visitor.anyVars)
+
+                bool anyVars = false;
+                left.visitSymbolReferences([&](const Expression&, const Symbol& sym) {
+                    if (VariableSymbol::isKind(sym.kind))
+                        anyVars = true;
+                });
+
+                if (anyVars)
                     context.addDiag(diag::Delay3OnVar, left.sourceRange);
             }
         }
@@ -610,9 +627,8 @@ std::optional<std::string_view> ElabSystemTaskSymbol::getMessage() const {
     if (!argSpan.empty()) {
         if (taskKind == ElabSystemTaskKind::Fatal) {
             // If this is a $fatal task, check the finish number. We don't use this
-            // for anything, but enforce that it's 0, 1, or 2.
-            if (!FmtHelpers::checkFinishNum(astCtx, *argSpan[0]))
-                return {};
+            // for anything, but verify that it's 0, 1, or 2.
+            FmtHelpers::checkFinishNum(astCtx, *argSpan[0]);
 
             argSpan = argSpan.subspan(1);
         }
@@ -681,8 +697,8 @@ static void reduceComparison(const BinaryExpression& expr, Diagnostic& result) {
 
     auto opToken = syntax->as<BinaryExpressionSyntax>().operatorToken;
 
-    auto lc = expr.left().constant;
-    auto rc = expr.right().constant;
+    auto lc = expr.left().getConstant();
+    auto rc = expr.right().getConstant();
     SLANG_ASSERT(lc && rc);
 
     auto& note = result.addNote(diag::NoteComparisonReduces, opToken.location());
@@ -693,9 +709,9 @@ static void reduceComparison(const BinaryExpression& expr, Diagnostic& result) {
 void ElabSystemTaskSymbol::reportStaticAssert(const Scope& scope, SourceLocation loc,
                                               std::string_view message,
                                               const Expression* condition) {
-    if (condition && condition->constant) {
+    if (condition && condition->getConstant()) {
         // Issue no diagnostic if the assert condition is true.
-        if (condition->constant->isTrue())
+        if (condition->getConstant()->isTrue())
             return;
     }
 
@@ -715,6 +731,9 @@ void ElabSystemTaskSymbol::issueDiagnostic() const {
     if (!msg)
         return;
 
+    if (scope->isUninstantiated())
+        return;
+
     DiagCode code;
     switch (taskKind) {
         case ElabSystemTaskKind::Fatal:
@@ -732,8 +751,6 @@ void ElabSystemTaskSymbol::issueDiagnostic() const {
         case ElabSystemTaskKind::StaticAssert:
             reportStaticAssert(*scope, location, *msg, assertCondition);
             return;
-        default:
-            SLANG_UNREACHABLE;
     }
 
     scope->addDiag(code, location).addStringAllowEmpty(std::string(*msg));
@@ -832,7 +849,7 @@ private:
         auto advance = [&](char c) {
             SmallVector<TNode*> nextNodes;
             for (auto node : nodes)
-                node->nextNodesFor(c, nextNodes, std::forward<TCallback>(callback));
+                node->nextNodesFor(c, nextNodes, callback);
             nodes = std::move(nextNodes);
         };
 
@@ -1457,11 +1474,11 @@ PrimitiveSymbol& PrimitiveSymbol::fromSyntax(const Scope& scope,
                 if (expr.kind == ExpressionKind::IntegerLiteral &&
                     (expr.type->getBitWidth() == 1 || expr.isUnsizedInteger())) {
                     context.eval(expr);
-                    if (expr.constant) {
-                        auto& val = expr.constant->integer();
+                    if (expr.getConstant()) {
+                        auto& val = expr.getConstant()->integer();
                         if (val == 0 || val == 1 ||
                             (val.getBitWidth() == 1 && exactlyEqual(val[0], logic_t::x))) {
-                            prim->initVal = expr.constant;
+                            prim->initVal = expr.getConstant();
                         }
                     }
                 }
@@ -1528,8 +1545,8 @@ void AssertionPortSymbol::buildPorts(Scope& scope, const AssertionItemPortListSy
     std::optional<ArgumentDirection> lastDir;
 
     for (auto item : syntax.ports) {
-        if (item->previewNode)
-            scope.addMembers(*item->previewNode);
+        if (auto preview = item->previewNode())
+            scope.addMembers(*preview);
 
         auto port = comp.emplace<AssertionPortSymbol>(item->name.valueText(),
                                                       item->name.location());
@@ -1698,91 +1715,6 @@ void LetDeclSymbol::makeDefaultInstance() const {
     AssertionInstanceExpression::makeDefault(*this);
 }
 
-CheckerSymbol::CheckerSymbol(Compilation& compilation, std::string_view name, SourceLocation loc) :
-    Symbol(SymbolKind::Checker, name, loc), Scope(compilation, this) {
-}
-
-CheckerSymbol& CheckerSymbol::fromSyntax(const Scope& scope,
-                                         const CheckerDeclarationSyntax& syntax) {
-    auto& comp = scope.getCompilation();
-    auto result = comp.emplace<CheckerSymbol>(comp, syntax.name.valueText(),
-                                              syntax.name.location());
-    result->setSyntax(syntax);
-    result->setAttributes(scope, syntax.attributes);
-
-    SmallVector<const AssertionPortSymbol*> ports;
-    if (syntax.portList) {
-        // Checker port symbols differ enough in their rules that we
-        // don't try to reuse buildPorts here.
-        auto& untyped = comp.getType(SyntaxKind::Untyped);
-        const DataTypeSyntax* lastType = nullptr;
-        ArgumentDirection lastDir = ArgumentDirection::In;
-
-        for (auto item : syntax.portList->ports) {
-            if (item->previewNode)
-                result->addMembers(*item->previewNode);
-
-            auto port = comp.emplace<AssertionPortSymbol>(item->name.valueText(),
-                                                          item->name.location());
-            port->setSyntax(*item);
-            port->setAttributes(scope, item->attributes);
-
-            if (!item->dimensions.empty())
-                port->declaredType.setDimensionSyntax(item->dimensions);
-
-            if (item->local)
-                scope.addDiag(diag::LocalNotAllowed, item->local.range());
-
-            if (item->direction) {
-                port->direction = SemanticFacts::getDirection(item->direction.kind);
-
-                // If we have a direction we can never inherit the previous type.
-                lastType = nullptr;
-            }
-            else {
-                port->direction = lastDir;
-            }
-
-            if (isEmptyType(*item->type)) {
-                if (lastType)
-                    port->declaredType.setTypeSyntax(*lastType);
-                else {
-                    port->declaredType.setType(untyped);
-                    if (!item->dimensions.empty()) {
-                        scope.addDiag(diag::InvalidArrayElemType, item->dimensions.sourceRange())
-                            << untyped;
-                    }
-
-                    if (item->direction)
-                        scope.addDiag(diag::CheckerPortDirectionType, item->direction.range());
-                }
-            }
-            else {
-                port->declaredType.setTypeSyntax(*item->type);
-                lastType = item->type;
-
-                auto itemKind = item->type->kind;
-                if (port->direction == ArgumentDirection::Out &&
-                    (itemKind == SyntaxKind::PropertyType || itemKind == SyntaxKind::SequenceType ||
-                     itemKind == SyntaxKind::Untyped)) {
-                    scope.addDiag(diag::CheckerOutputBadType, item->type->sourceRange());
-                    port->declaredType.setType(comp.getErrorType());
-                }
-            }
-
-            lastDir = *port->direction;
-            if (item->defaultValue)
-                port->defaultValueSyntax = item->defaultValue->expr;
-
-            result->addMember(*port);
-            ports.push_back(port);
-        }
-    }
-    result->ports = ports.copy(comp);
-
-    return *result;
-}
-
 ClockingBlockSymbol::ClockingBlockSymbol(Compilation& compilation, std::string_view name,
                                          SourceLocation loc) :
     Symbol(SymbolKind::ClockingBlock, name, loc), Scope(compilation, this) {
@@ -1795,10 +1727,14 @@ ClockingBlockSymbol& ClockingBlockSymbol::fromSyntax(const Scope& scope,
                                                     syntax.blockName.location());
     result->setSyntax(syntax);
 
-    if (syntax.globalOrDefault.kind == TokenKind::DefaultKeyword)
+    if (syntax.globalOrDefault.kind == TokenKind::DefaultKeyword) {
         comp.noteDefaultClocking(scope, *result, syntax.clocking.range());
+        result->isDefault = true;
+    }
     else if (syntax.globalOrDefault.kind == TokenKind::GlobalKeyword) {
         comp.noteGlobalClocking(scope, *result, syntax.clocking.range());
+        result->isGlobal = true;
+
         if (scope.asSymbol().kind == SymbolKind::GenerateBlock)
             scope.addDiag(diag::GlobalClockingGenerate, syntax.clocking.range());
     }
@@ -1892,6 +1828,10 @@ ClockingSkew ClockingBlockSymbol::getDefaultOutputSkew() const {
 
 void ClockingBlockSymbol::serializeTo(ASTSerializer& serializer) const {
     serializer.write("event", getEvent());
+    if (isDefault)
+        serializer.write("isDefault", isDefault);
+    if (isGlobal)
+        serializer.write("isGlobal", isGlobal);
 
     if (auto skew = getDefaultInputSkew(); skew.hasValue()) {
         serializer.writeProperty("defaultInputSkew");
@@ -1927,15 +1867,15 @@ RandSeqProductionSymbol& RandSeqProductionSymbol::fromSyntax(const Scope& scope,
         result->declaredReturnType.setType(comp.getVoidType());
 
     if (syntax.portList) {
-        SmallVector<const FormalArgumentSymbol*> args;
+        SmallVector<FormalArgumentSymbol*> args;
         SubroutineSymbol::buildArguments(*result, scope, *syntax.portList,
                                          VariableLifetime::Automatic, args);
         result->arguments = args.copy(comp);
     }
 
     for (auto rule : syntax.rules) {
-        if (rule->previewNode)
-            result->addMembers(*rule->previewNode);
+        if (auto preview = rule->previewNode())
+            result->addMembers(*preview);
 
         auto& ruleBlock = StatementBlockSymbol::fromSyntax(*result, *rule);
         result->addMember(ruleBlock);
@@ -1991,7 +1931,7 @@ RandSeqProductionSymbol::ProdItem RandSeqProductionSymbol::createProdItem(
 
     SmallVector<const Expression*> args;
     CallExpression::bindArgs(syntax.argList, symbol->arguments, symbol->name, syntax.sourceRange(),
-                             context, args, /* isBuiltInMethod */ false);
+                             context, args);
 
     return ProdItem(symbol, args.copy(context.getCompilation()));
 }
@@ -2199,6 +2139,8 @@ void RandSeqProductionSymbol::createRuleVariables(const RsRuleSyntax& syntax, co
     }
 
     auto& comp = scope.getCompilation();
+    ASTContext context(scope, LookupLocation::max);
+
     for (auto [symbol, count] : prodMap) {
         auto var = comp.emplace<VariableSymbol>(symbol->name, syntax.getFirstToken().location(),
                                                 VariableLifetime::Automatic);
@@ -2209,8 +2151,8 @@ void RandSeqProductionSymbol::createRuleVariables(const RsRuleSyntax& syntax, co
         }
         else {
             ConstantRange range{1, int32_t(count)};
-            var->setType(
-                FixedSizeUnpackedArrayType::fromDim(scope, symbol->getReturnType(), range, syntax));
+            var->setType(FixedSizeUnpackedArrayType::fromDim(comp, context, symbol->getReturnType(),
+                                                             range, syntax));
         }
 
         results.push_back(var);
@@ -2292,8 +2234,6 @@ void RandSeqProductionSymbol::serializeTo(ASTSerializer& serializer) const {
                     serializer.endArray();
                     break;
                 }
-                default:
-                    SLANG_UNREACHABLE;
             }
             serializer.endObject();
         }
@@ -2361,7 +2301,7 @@ NetAliasSymbol& NetAliasSymbol::fromSyntax(const ASTContext& parentContext,
 struct NetAlias {
     not_null<const ValueSymbol*> sym;
     not_null<const Expression*> expr;
-    DriverBitRange bounds;
+    Compilation::AliasBitRange bounds;
 };
 
 struct NetAliasVisitor {
@@ -2388,10 +2328,9 @@ struct NetAliasVisitor {
                         }
                         else {
                             auto& netSym = sym->template as<NetSymbol>();
-                            if (auto bounds = ValueDriver::getBounds(expr, evalCtx,
-                                                                     netSym.getType())) {
-                                netAliases.push_back({&netSym, &expr, *bounds});
-                            }
+                            ValuePath path(expr, evalCtx);
+                            if (path.lsp)
+                                netAliases.push_back({&netSym, &expr, path.lspBounds});
 
                             auto& nt = netSym.netType;
                             if (!commonNetType) {
@@ -2420,6 +2359,8 @@ struct NetAliasVisitor {
     }
 };
 
+using BitRange = std::pair<uint64_t, uint64_t>;
+
 std::span<const Expression* const> NetAliasSymbol::getNetReferences() const {
     if (netRefs)
         return *netRefs;
@@ -2429,8 +2370,7 @@ std::span<const Expression* const> NetAliasSymbol::getNetReferences() const {
     SLANG_ASSERT(scope && syntax);
 
     SmallVector<const Expression*> buffer;
-    ASTContext context(*scope, LookupLocation::after(*this),
-                       ASTFlags::NonProcedural | ASTFlags::NotADriver);
+    ASTContext context(*scope, LookupLocation::after(*this), ASTFlags::NonProcedural);
     EvalContext evalCtx(context);
     NetAliasVisitor visitor(context, evalCtx);
     SmallVector<SmallVector<NetAlias>> netAliases;
@@ -2481,7 +2421,7 @@ std::span<const Expression* const> NetAliasSymbol::getNetReferences() const {
             // to the corresponding elements on the right hand side. The individual
             // elements can differ in width, so consume bits from the larger side
             // and only advance when a side has been consumed.
-            std::optional<std::pair<DriverBitRange, bool>> remainder;
+            std::optional<std::pair<BitRange, bool>> remainder;
             while (firstIt != firstEnd && secondIt != secondEnd) {
                 auto& firstAlias = *firstIt;
                 auto& secondAlias = *secondIt;
@@ -2502,8 +2442,8 @@ std::span<const Expression* const> NetAliasSymbol::getNetReferences() const {
                 uint64_t width;
                 if (firstWidth < secondWidth) {
                     width = firstWidth;
-                    remainder = std::pair(
-                        DriverBitRange(secondRange.first, secondRange.second - width), false);
+                    remainder = std::pair(BitRange(secondRange.first, secondRange.second - width),
+                                          false);
                     firstIt++;
                 }
                 else {
@@ -2513,8 +2453,8 @@ std::span<const Expression* const> NetAliasSymbol::getNetReferences() const {
                     if (firstWidth == secondWidth)
                         firstIt++;
                     else {
-                        remainder = std::pair(
-                            DriverBitRange(firstRange.first, firstRange.second - width), true);
+                        remainder = std::pair(BitRange(firstRange.first, firstRange.second - width),
+                                              true);
                     }
                 }
 

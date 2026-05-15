@@ -55,6 +55,8 @@ Statement& ConditionalStatement::fromSyntax(Compilation& comp,
     bool isTrue = true;
     SmallVector<Condition> conditions;
     ASTContext trueContext = context;
+    const StatementBlockSymbol* currBlock = nullptr;
+    const Statement* ifTrue = nullptr;
 
     for (auto condSyntax : syntax.predicate->conditions) {
         auto& cond = Expression::bind(*condSyntax->expr, trueContext);
@@ -62,17 +64,46 @@ Statement& ConditionalStatement::fromSyntax(Compilation& comp,
 
         const Pattern* pattern = nullptr;
         if (condSyntax->matchesClause) {
-            Pattern::VarMap patternVarMap;
-            pattern = &Pattern::bind(*condSyntax->matchesClause->pattern, *cond.type, patternVarMap,
-                                     trueContext);
+            // If there is a matches clause we expect a block to have been created.
+            // The first one will be registered with the stmtCtx, the rest are children
+            // of that first block.
+            if (!currBlock) {
+                ifTrue = stmtCtx.tryGetBlock(context, *condSyntax);
+                SLANG_ASSERT(ifTrue);
+
+                if (ifTrue->bad()) {
+                    bad = true;
+                    ifTrue = ifTrue->as<InvalidStatement>().child;
+                    SLANG_ASSERT(ifTrue);
+                }
+
+                currBlock = ifTrue->as<BlockStatement>().blockSymbol;
+                SLANG_ASSERT(currBlock);
+            }
+            else {
+                auto last = currBlock->getLastMember();
+                SLANG_ASSERT(last);
+                currBlock = &last->as<StatementBlockSymbol>();
+            }
+
+            // If the block was invalid (due to failing to bind pattern variables),
+            // don't pile on with more pattern related errors.
+            trueContext = ASTContext(*currBlock, LookupLocation::max, trueContext.flags);
+            currBlock->members(); // Touch the block to ensure it's elaborated.
+            if (bad || currBlock->isKnownBad()) {
+                pattern = comp.emplace<InvalidPattern>(nullptr);
+            }
+            else {
+                pattern = &Pattern::bind(trueContext, *condSyntax->matchesClause->pattern,
+                                         *cond.type);
+            }
+            bad |= pattern->bad();
 
             // We don't consider the condition to be const if there's a pattern.
             isConst = false;
-            bad |= pattern->bad();
         }
-        else {
-            if (!bad && !trueContext.requireBooleanConvertible(cond))
-                bad = true;
+        else if (!bad && !trueContext.requireBooleanConvertible(cond)) {
+            bad = true;
         }
 
         if (!bad && isConst) {
@@ -96,7 +127,21 @@ Statement& ConditionalStatement::fromSyntax(Compilation& comp,
             ifFlags = ASTFlags::UnevaluatedBranch;
     }
 
-    auto& ifTrue = Statement::bind(*syntax.statement, trueContext.resetFlags(ifFlags), stmtCtx);
+    // If the `ifTrue` statement is already set it means we had a pattern
+    // in at least one condition, so we don't need to bind it again.
+    // We still need need to drill down in that case to the final block
+    // which has the actual statement to execute; the others above it in the
+    // tree just contain pattern variables.
+    if (ifTrue) {
+        SLANG_ASSERT(currBlock);
+        auto last = currBlock->getLastMember();
+        SLANG_ASSERT(last);
+        currBlock = &last->as<StatementBlockSymbol>();
+        ifTrue = &currBlock->getStatement(trueContext, stmtCtx);
+    }
+    else {
+        ifTrue = &Statement::bind(*syntax.statement, trueContext.resetFlags(ifFlags), stmtCtx);
+    }
 
     const Statement* ifFalse = nullptr;
     if (syntax.elseClause) {
@@ -105,10 +150,10 @@ Statement& ConditionalStatement::fromSyntax(Compilation& comp,
     }
 
     auto result = comp.emplace<ConditionalStatement>(
-        conditions.copy(comp), getUniquePriority(syntax.uniqueOrPriority.kind), ifTrue, ifFalse,
+        conditions.copy(comp), getUniquePriority(syntax.uniqueOrPriority.kind), *ifTrue, ifFalse,
         syntax.sourceRange());
 
-    if (bad || conditions.empty() || ifTrue.bad() || (ifFalse && ifFalse->bad()))
+    if (bad || conditions.empty() || ifTrue->bad() || (ifFalse && ifFalse->bad()))
         return badStmt(comp, result);
 
     return *result;
@@ -191,68 +236,6 @@ void ConditionalStatement::serializeTo(ASTSerializer& serializer) const {
     if (ifFalse)
         serializer.write("ifFalse", *ifFalse);
 }
-
-// A trie for checking overlap of case items.
-class CaseTrie {
-public:
-    // Tries to insert the given value. If successful, nullptr is returned.
-    // Otherwise, the overlapping expression is returned.
-    const Expression* insert(const SVInt& value, const Expression& expr, bool wildcardX,
-                             BumpAllocator& alloc) {
-        if (auto result = find(value, 0, expr, wildcardX))
-            return result;
-
-        CaseTrie* curr = this;
-        const auto width = value.getBitWidth();
-        for (uint32_t i = 0; i < width; i++) {
-            const auto bit = value[(int32_t)i];
-            const bool isWildcard = wildcardX ? bit.isUnknown() : bit.value == logic_t::Z_VALUE;
-            const auto valueIndex = isWildcard ? 3 : bit.isUnknown() ? 2 : bit.value;
-
-            auto& elem = curr->nodes[valueIndex];
-            if (i == width - 1) {
-                elem.expr = &expr;
-            }
-            else {
-                if (!elem.trie)
-                    elem.trie = alloc.emplace<CaseTrie>();
-                curr = elem.trie;
-            }
-        }
-
-        return nullptr;
-    }
-
-private:
-    const Expression* find(const SVInt& value, uint32_t bitIndex, const Expression& expr,
-                           bool wildcardX) {
-        const auto bit = value[(int32_t)bitIndex];
-        const bool lastBit = bitIndex == value.getBitWidth() - 1;
-        const bool isWildcard = wildcardX ? bit.isUnknown() : bit.value == logic_t::Z_VALUE;
-        const auto valueIndex = bit.isUnknown() ? 2 : bit.value;
-
-        for (int i = 0; i < 4; i++) {
-            if (isWildcard || i == valueIndex || i == 3) {
-                if (lastBit) {
-                    if (nodes[i].expr)
-                        return nodes[i].expr;
-                }
-                else if (nodes[i].trie) {
-                    if (auto result = nodes[i].trie->find(value, bitIndex + 1, expr, wildcardX))
-                        return result;
-                }
-            }
-        }
-
-        return nullptr;
-    }
-
-    union Node {
-        CaseTrie* trie;
-        const Expression* expr;
-    };
-    Node nodes[4] = {};
-};
 
 static CaseStatementCondition getCondition(TokenKind kind) {
     CaseStatementCondition condition;
@@ -365,88 +348,20 @@ Statement& CaseStatement::fromSyntax(Compilation& compilation, const CaseStateme
     if (bad)
         return badStmt(compilation, result);
 
+    if (!expr->type->isFourState() && wildcard) {
+        context.addDiag(diag::CaseWildcard2State, syntax.caseKeyword.range())
+            << expr->sourceRange << LexerFacts::getTokenKindText(keyword);
+    }
+
     if (!defStmt) {
-        context.addDiag(diag::CaseDefault, syntax.caseKeyword.range())
-            << LexerFacts::getTokenKindText(keyword);
-    }
-
-    CaseTrie trie;
-    std::optional<BumpAllocator> trieAlloc;
-    if (wildcard)
-        trieAlloc.emplace();
-
-    SmallMap<ConstantValue, const Expression*, 4> elems;
-    for (auto& g : result->items) {
-        for (auto item : g.expressions) {
-            if (auto cv = context.tryEval(*item)) {
-                auto [it, inserted] = elems.emplace(std::move(cv), item);
-                if (!inserted) {
-                    auto& diag = context.addDiag(diag::CaseDup, item->sourceRange);
-                    diag << LexerFacts::getTokenKindText(keyword) << it->first;
-                    diag.addNote(diag::NotePreviousUsage, it->second->sourceRange);
-                }
-                else if (wildcard) {
-                    if (auto prev = trie.insert(it->first.integer(), *item,
-                                                condition == CaseStatementCondition::WildcardXOrZ,
-                                                *trieAlloc)) {
-                        auto& diag = context.addDiag(diag::CaseOverlap, item->sourceRange)
-                                     << LexerFacts::getTokenKindText(keyword);
-                        diag.addNote(diag::NotePreviousUsage, prev->sourceRange);
-                    }
-                }
-            }
-
-            if (condition == CaseStatementCondition::Normal ||
-                condition == CaseStatementCondition::WildcardJustZ) {
-                // If we're not in a wildcard case we should warn
-                // about integer literal items that have unknown bits.
-                // Similarly, if we're in a wildcard case with just Zs
-                // we should warn if we see Xs.
-                auto& unwrapped = item->unwrapImplicitConversions();
-                if (unwrapped.kind == ExpressionKind::IntegerLiteral) {
-                    auto& lit = unwrapped.as<IntegerLiteral>();
-                    if (condition == CaseStatementCondition::Normal &&
-                        lit.getValue().hasUnknown()) {
-                        context.addDiag(diag::CaseNotWildcard, item->sourceRange);
-                    }
-                    else if (condition == CaseStatementCondition::WildcardJustZ &&
-                             lit.getValue().countXs() > 0) {
-                        context.addDiag(diag::CaseZWithX, item->sourceRange);
-                    }
-                }
-            }
+        if (check == UniquePriorityCheck::None || check == UniquePriorityCheck::Unique0) {
+            context.addDiag(diag::CaseDefault, syntax.caseKeyword.range())
+                << LexerFacts::getTokenKindText(keyword);
         }
     }
-
-    if (expr->type->isEnum()) {
-        SmallVector<std::string_view> missing;
-        for (auto& ev : expr->type->getCanonicalType().as<EnumType>().values()) {
-            auto& val = ev.getValue();
-            if (!elems.contains(val))
-                missing.push_back(ev.name);
-        }
-
-        if (!missing.empty()) {
-            std::string msg;
-            if (missing.size() == 1) {
-                msg = fmt::format("value '{}'", missing[0]);
-            }
-            else if (missing.size() == 2) {
-                msg = fmt::format("values '{}' and '{}'", missing[0], missing[1]);
-            }
-            else if (missing.size() == 3) {
-                msg = fmt::format("values '{}', '{}', and '{}'", missing[0], missing[1],
-                                  missing[2]);
-            }
-            else {
-                const size_t remainder = missing.size() - 3;
-                msg = fmt::format("values '{}', '{}', '{}' (and {} other{})", missing[0],
-                                  missing[1], missing[2], remainder, remainder == 1 ? "" : "s");
-            }
-
-            auto code = defStmt ? diag::CaseEnumExplicit : diag::CaseEnum;
-            context.addDiag(code, expr->sourceRange) << msg;
-        }
+    else if (check == UniquePriorityCheck::Unique || check == UniquePriorityCheck::Priority) {
+        context.addDiag(diag::CaseRedundantDefault, syntax.caseKeyword.range())
+            << LexerFacts::getTokenKindText(keyword) << syntax.uniqueOrPriority.valueText();
     }
 
     return *result;
@@ -481,14 +396,14 @@ static bool checkMatch(CaseStatementCondition condition, const ConstantValue& cv
     return cvl == cvr;
 }
 
-ER CaseStatement::evalImpl(EvalContext& context) const {
+std::pair<const Statement*, bool> CaseStatement::getKnownBranch(EvalContext& context) const {
     const Type* condType = nullptr;
     auto cv = expr.eval(context);
     if (!cv) {
         if (expr.kind == ExpressionKind::TypeReference)
             condType = &expr.as<TypeReferenceExpression>().targetType;
         else
-            return ER::Fail;
+            return {nullptr, false};
     }
 
     const Statement* matchedStmt = nullptr;
@@ -501,7 +416,7 @@ ER CaseStatement::evalImpl(EvalContext& context) const {
             if (item->kind == ExpressionKind::ValueRange) {
                 ConstantValue val = item->as<ValueRangeExpression>().checkInside(context, cv);
                 if (!val)
-                    return ER::Fail;
+                    return {nullptr, false};
 
                 matched = (bool)(logic_t)val.integer();
             }
@@ -512,7 +427,7 @@ ER CaseStatement::evalImpl(EvalContext& context) const {
                 else if (condType && item->kind == ExpressionKind::TypeReference)
                     matched = item->as<TypeReferenceExpression>().targetType.isMatching(*condType);
                 else
-                    return ER::Fail;
+                    return {nullptr, false};
             }
 
             if (matched) {
@@ -543,14 +458,24 @@ ER CaseStatement::evalImpl(EvalContext& context) const {
     if (!matchedStmt)
         matchedStmt = defaultCase;
 
-    if (matchedStmt)
-        return matchedStmt->eval(context);
+    if (!matchedStmt &&
+        (check == UniquePriorityCheck::Priority || check == UniquePriorityCheck::Unique)) {
 
-    if (check == UniquePriorityCheck::Priority || check == UniquePriorityCheck::Unique) {
         auto& diag = context.addDiag(diag::ConstEvalNoCaseItemsMatched, expr.sourceRange);
         diag << (check == UniquePriorityCheck::Priority ? "priority"sv : "unique"sv);
         diag << cv;
     }
+
+    return {matchedStmt, true};
+}
+
+ER CaseStatement::evalImpl(EvalContext& context) const {
+    auto [matchedStmt, success] = getKnownBranch(context);
+    if (!success)
+        return ER::Fail;
+
+    if (matchedStmt)
+        return matchedStmt->eval(context);
 
     return ER::Success;
 }
@@ -594,22 +519,35 @@ Statement& PatternCaseStatement::fromSyntax(Compilation& compilation,
     for (auto item : syntax.items) {
         switch (item->kind) {
             case SyntaxKind::PatternCaseItem: {
-                Pattern::VarMap varMap;
-                ASTContext localCtx = context;
-
+                // We always create an implicit block for each case item.
                 auto& pci = item->as<PatternCaseItemSyntax>();
-                auto& pattern = Pattern::bind(*pci.pattern, *expr.type, varMap, localCtx);
-                auto& stmt = Statement::bind(*pci.statement, localCtx, stmtCtx);
-                bad |= stmt.bad() || pattern.bad();
+                auto stmt = stmtCtx.tryGetBlock(context, pci);
+                SLANG_ASSERT(stmt);
+                bad |= stmt->bad();
 
+                const Pattern* pattern = nullptr;
                 const Expression* filter = nullptr;
-                if (pci.expr) {
-                    filter = &Expression::bind(*pci.expr, localCtx);
-                    if (!bad && !localCtx.requireBooleanConvertible(*filter))
-                        bad = true;
+
+                if (stmt->kind == StatementKind::Block) {
+                    auto& block = stmt->as<BlockStatement>();
+                    if (block.blockSymbol) {
+                        ASTContext blockContext(*block.blockSymbol, LookupLocation::max,
+                                                context.flags);
+                        pattern = &Pattern::bind(blockContext, *pci.pattern, *expr.type);
+
+                        if (pci.expr) {
+                            filter = &Expression::bind(*pci.expr, blockContext);
+                            if (!bad && !blockContext.requireBooleanConvertible(*filter))
+                                bad = true;
+                        }
+                    }
                 }
 
-                items.push_back({&pattern, filter, &stmt});
+                if (!pattern)
+                    pattern = compilation.emplace<InvalidPattern>(nullptr);
+
+                bad |= pattern->bad();
+                items.push_back({pattern, filter, stmt});
                 break;
             }
             case SyntaxKind::DefaultCaseItem:

@@ -12,16 +12,15 @@
 #include "slang/ast/Symbol.h"
 #include "slang/numeric/ConstantValue.h"
 #include "slang/syntax/SyntaxFwd.h"
+#include "slang/util/Function.h"
+#include "slang/util/SmallMap.h"
 
 namespace slang::ast {
 
 class AssertionExpr;
 class AttributeSymbol;
-class CheckerSymbol;
-class CheckerInstanceBodySymbol;
 class ConfigBlockSymbol;
 class DefinitionSymbol;
-class Expression;
 class InstanceBodySymbol;
 class InterfacePortSymbol;
 class MultiPortSymbol;
@@ -53,14 +52,25 @@ enum class SLANG_EXPORT InstanceFlags : uint8_t {
 
     /// The instance resides in a parent instance that itself is from a bind directive.
     /// This applies recursively for the entire bound hierarchy.
-    ParentFromBind = 1 << 2
+    ParentFromBind = 1 << 2,
+
+    /// The instance is the target of a bind instantiation.
+    TargetedByBind = 1 << 3,
+
+    /// Flags that prevent caching of this instance in the elaboration cache.
+    PreventsCaching = Uninstantiated | FromBind | ParentFromBind
 };
-SLANG_BITMASK(InstanceFlags, ParentFromBind)
+SLANG_BITMASK(InstanceFlags, TargetedByBind)
 
 /// Common functionality for module, interface, program, and primitive instances.
 class SLANG_EXPORT InstanceSymbolBase : public Symbol {
 public:
-    std::span<const int32_t> arrayPath;
+    /// The path to this instance, if it is contained within an array (or multiple
+    /// nested arrays). This is a list of indices that can be used to index into the
+    /// arrays' elements list, always zero based. This is not necessarily what the
+    /// user wrote in the source code; the array dimensions are needed to translate
+    /// from this canonical space back to the source code indices.
+    std::span<const uint32_t> arrayPath;
 
     /// If this instance is part of an array, walk upward to find the array's name.
     /// Otherwise returns the name of the instance itself.
@@ -80,7 +90,7 @@ protected:
 };
 
 /// Represents an instance of a module, interface, or program.
-class SLANG_EXPORT InstanceSymbol : public InstanceSymbolBase {
+class SLANG_EXPORT InstanceSymbol final : public InstanceSymbolBase {
 public:
     const InstanceBodySymbol& body;
 
@@ -88,11 +98,15 @@ public:
     /// the parent instance's config rule if there is one up the stack.
     const ResolvedConfig* resolvedConfig = nullptr;
 
-    InstanceSymbol(std::string_view name, SourceLocation loc, InstanceBodySymbol& body);
+    /// The depth of this instance within the design hierarchy.
+    uint32_t instanceDepth;
+
+    InstanceSymbol(std::string_view name, SourceLocation loc, InstanceBodySymbol& body,
+                   uint32_t instanceDepth);
 
     InstanceSymbol(Compilation& compilation, std::string_view name, SourceLocation loc,
                    const DefinitionSymbol& definition, ParameterBuilder& paramBuilder,
-                   bitmask<InstanceFlags> flags);
+                   bitmask<InstanceFlags> flags, uint32_t instanceDepth);
 
     const DefinitionSymbol& getDefinition() const;
     bool isModule() const;
@@ -100,9 +114,18 @@ public:
     bool isTopLevel() const;
 
     const PortConnection* getPortConnection(const PortSymbol& port) const;
-    const PortConnection* getPortConnection(const MultiPortSymbol& port) const;
     const PortConnection* getPortConnection(const InterfacePortSymbol& port) const;
     std::span<const PortConnection* const> getPortConnections() const;
+
+    /// If it has been determined that the body of this instance is an exact
+    /// duplicate of another, this returns a pointer to the canonical copy
+    /// to avoid duplicating effort visiting this instance's body again.
+    /// Otherwise returns nullptr.
+    const InstanceBodySymbol* getCanonicalBody() const { return canonicalBody; }
+
+    void setCanonicalBody(const InstanceBodySymbol* newCanonical) const {
+        canonicalBody = newCanonical;
+    }
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -126,7 +149,7 @@ public:
         SourceLocation locationOverride = {});
 
     /// Creates a placeholder instance for a virtual interface type declaration.
-    static InstanceSymbol& createVirtual(
+    static const InstanceSymbol& createVirtual(
         const ASTContext& context, SourceLocation loc, const DefinitionSymbol& definition,
         const syntax::ParameterValueAssignmentSyntax* paramAssignments);
 
@@ -150,9 +173,11 @@ private:
 
     mutable PointerMap* connectionMap = nullptr;
     mutable std::span<const PortConnection* const> connections;
+    mutable const InstanceBodySymbol* canonicalBody = nullptr;
 };
 
-class SLANG_EXPORT InstanceBodySymbol : public Symbol, public Scope {
+/// The body of a module, interface, or program instance, which acts as the scope for its members.
+class SLANG_EXPORT InstanceBodySymbol final : public Symbol, public Scope {
 public:
     /// The parent instance for which this is the body.
     const InstanceSymbol* parentInstance = nullptr;
@@ -203,13 +228,15 @@ private:
     friend class Scope;
 
     void setPorts(std::span<const Symbol* const> ports) const { portList = ports; }
+    void finishElaboration(function_ref<void(const Symbol&)> insertCB) const;
 
     const DefinitionSymbol& definition;
     mutable std::span<const Symbol* const> portList;
     std::span<const ParameterSymbolBase* const> parameters;
 };
 
-class SLANG_EXPORT InstanceArraySymbol : public Symbol, public Scope {
+/// Represents an array of instances.
+class SLANG_EXPORT InstanceArraySymbol final : public Symbol, public Scope {
 public:
     std::span<const Symbol* const> elements;
     ConstantRange range;
@@ -234,7 +261,7 @@ public:
 /// Represents an instance of a definition (module / interface / program / checker)
 /// that is not actually instantiated in the design. This is a placeholder
 /// in the AST to record this instance and capture its port expressions.
-class SLANG_EXPORT UninstantiatedDefSymbol : public Symbol {
+class SLANG_EXPORT UninstantiatedDefSymbol final : public Symbol {
 public:
     /// The name of the definition.
     std::string_view definitionName;
@@ -298,7 +325,8 @@ private:
     mutable bool mustBeChecker = false;
 };
 
-class SLANG_EXPORT PrimitiveInstanceSymbol : public InstanceSymbolBase {
+/// Represents an instance of a built-in or user-defined primitive.
+class SLANG_EXPORT PrimitiveInstanceSymbol final : public InstanceSymbolBase {
 public:
     const PrimitiveSymbol& primitiveType;
 
@@ -334,93 +362,17 @@ private:
     mutable std::optional<const TimingControl*> delay;
 };
 
-class SLANG_EXPORT CheckerInstanceSymbol : public InstanceSymbolBase {
-public:
-    const CheckerInstanceBodySymbol& body;
+namespace detail {
 
-    CheckerInstanceSymbol(std::string_view name, SourceLocation loc,
-                          CheckerInstanceBodySymbol& body);
+std::pair<std::string_view, SourceLocation> getNameLoc(
+    const syntax::HierarchicalInstanceSyntax& syntax);
 
-    class SLANG_EXPORT Connection {
-    public:
-        const CheckerInstanceBodySymbol& parent;
-        const Symbol& formal;
-        std::variant<const Expression*, const AssertionExpr*, const TimingControl*> actual;
-        std::span<const AttributeSymbol* const> attributes;
+void createImplicitNets(const syntax::HierarchicalInstanceSyntax& instance,
+                        const ASTContext& context, const NetType& netType,
+                        bitmask<InstanceFlags> flags,
+                        SmallSet<std::string_view, 8>& implicitNetNames,
+                        SmallVectorBase<const Symbol*>& results);
 
-        Connection(const CheckerInstanceBodySymbol& parent, const Symbol& formal,
-                   const syntax::ExpressionSyntax* outputInitialSyntax,
-                   std::span<const AttributeSymbol* const> attributes) :
-            parent(parent), formal(formal), attributes(attributes),
-            outputInitialSyntax(outputInitialSyntax) {}
-
-        const Expression* getOutputInitialExpr() const;
-
-    private:
-        const syntax::ExpressionSyntax* outputInitialSyntax;
-        mutable std::optional<const Expression*> outputInitialExpr;
-    };
-
-    std::span<const Connection> getPortConnections() const;
-
-    static void fromSyntax(const CheckerSymbol& checker,
-                           const syntax::HierarchyInstantiationSyntax& syntax,
-                           const ASTContext& context, SmallVectorBase<const Symbol*>& results,
-                           SmallVectorBase<const Symbol*>& implicitNets,
-                           bitmask<InstanceFlags> flags);
-
-    static void fromSyntax(const syntax::CheckerInstantiationSyntax& syntax,
-                           const ASTContext& context, SmallVectorBase<const Symbol*>& results,
-                           SmallVectorBase<const Symbol*>& implicitNets,
-                           bitmask<InstanceFlags> flags);
-
-    /// Creates an intentionally invalid instance by forcing all port connections to
-    /// null values. This allows type checking instance members as long as they don't
-    /// depend on any port expansion.
-    static CheckerInstanceSymbol& createInvalid(const CheckerSymbol& checker, uint32_t depth);
-
-    static CheckerInstanceSymbol& fromSyntax(
-        Compilation& compilation, const ASTContext& context, const CheckerSymbol& checker,
-        const syntax::HierarchicalInstanceSyntax& syntax,
-        std::span<const syntax::AttributeInstanceSyntax* const> attributes,
-        SmallVectorBase<int32_t>& path, bool isProcedural, bitmask<InstanceFlags> flags);
-
-    void verifyMembers() const;
-
-    void serializeTo(ASTSerializer& serializer) const;
-
-    static bool isKind(SymbolKind kind) { return kind == SymbolKind::CheckerInstance; }
-
-    template<typename TVisitor>
-    void visitExprs(TVisitor&& visitor) const; // implementation is in ASTVisitor.h
-
-private:
-    std::span<Connection> connections;
-    mutable bool connectionsResolved = false;
-};
-
-class SLANG_EXPORT CheckerInstanceBodySymbol : public Symbol, public Scope {
-public:
-    /// The parent instance for which this is the body.
-    const CheckerInstanceSymbol* parentInstance = nullptr;
-
-    const CheckerSymbol& checker;
-    const AssertionInstanceDetails& assertionDetails;
-    uint32_t instanceDepth;
-    bool isProcedural;
-    bitmask<InstanceFlags> flags;
-
-    CheckerInstanceBodySymbol(Compilation& compilation, const CheckerSymbol& checker,
-                              AssertionInstanceDetails& assertionDetails,
-                              const ASTContext& originalContext, uint32_t instanceDepth,
-                              bool isProcedural, bitmask<InstanceFlags> flags);
-
-    void serializeTo(ASTSerializer& serializer) const;
-
-    static bool isKind(SymbolKind kind) { return kind == SymbolKind::CheckerInstanceBody; }
-
-private:
-    ASTContext originalContext;
-};
+} // namespace detail
 
 } // namespace slang::ast

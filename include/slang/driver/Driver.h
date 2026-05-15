@@ -8,18 +8,30 @@
 //------------------------------------------------------------------------------
 #pragma once
 
+#include "slang/ast/Compilation.h"
+#include "slang/diagnostics/DiagnosticClient.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
+#include "slang/driver/CompatSettings.h"
 #include "slang/driver/SourceLoader.h"
+#include "slang/parsing/LexerFacts.h"
 #include "slang/text/SourceManager.h"
 #include "slang/util/Bag.h"
 #include "slang/util/CommandLine.h"
+#include "slang/util/ConcurrentMap.h"
+#include "slang/util/Function.h"
 #include "slang/util/LanguageVersion.h"
 #include "slang/util/OS.h"
 #include "slang/util/Util.h"
 
 namespace slang {
+
+class JsonDiagnosticClient;
+class JsonWriter;
 class TextDiagnosticClient;
-}
+class ThreadPool;
+enum class ShowHierarchyPathOption;
+
+} // namespace slang
 
 namespace slang::syntax {
 class SyntaxTree;
@@ -32,7 +44,44 @@ enum class CompilationFlags;
 
 } // namespace slang::ast
 
+namespace slang::analysis {
+
+struct AnalysisOptions;
+class AnalysisManager;
+enum class AnalysisFlags;
+
+} // namespace slang::analysis
+
 namespace slang::driver {
+
+class UserDefinedSubroutine;
+
+/// Flags that control output behavior when running the preprocessor directly.
+enum class SLANG_EXPORT PreprocessOutputFlags {
+    /// No flags specified.
+    None = 0,
+
+    /// Include comments in the output. If not set, comments are
+    /// stripped.
+    IncludeComments = 1 << 0,
+
+    /// Include preprocessor directives in the output. If not set,
+    /// directives are stripped.
+    IncludeDirectives = 1 << 1,
+
+    /// Obfuscate identifiers in the output by replacing them with
+    /// randomized alphanumeric strings.
+    ObfuscateIds = 1 << 2,
+
+    /// Obfuscated identifiers will be generated with a fixed
+    /// randomization seed, meaning they will be the same every
+    /// time the program is run. Used for testing.
+    UseFixedObfuscationSeed = 1 << 3,
+
+    /// Include source line information in the output.
+    IncludeSourceInfo = 1 << 4
+};
+SLANG_BITMASK(PreprocessOutputFlags, IncludeSourceInfo)
 
 /// @brief A top-level class that handles argument parsing, option preparation,
 /// and invoking various parts of the slang compilation process.
@@ -48,13 +97,17 @@ namespace slang::driver {
 /// if (!driver.parseCommandLine(someStr)) { ...error }
 /// if (!driver.processOptions()) { ...error }
 /// if (!driver.parseAllSources()) { ...error }
-///
-/// auto compilation = driver.createCompilation();
-/// if (!driver.reportCompilation(*compilation)) { ...error }
+/// if (!driver.runFullCompilation()) { ...error }
 /// else { ...success }
 /// @endcode
 ///
 class SLANG_EXPORT Driver {
+private:
+    // This exists to ensure we get a Compilation object created prior to anything else,
+    // such as the DiagnosticEngine, which wants a Compilation to register callbacks
+    // for printing symbol paths.
+    ast::Compilation defaultComp;
+
 public:
     /// The command line object that will be used to parse
     /// arguments if the @a parseCommandLine method is called.
@@ -66,11 +119,18 @@ public:
     /// The diagnostics engine that will be used to report diagnostics.
     DiagnosticEngine diagEngine;
 
-    /// The diagnostics client that will be used to render diagnostics.
-    std::shared_ptr<TextDiagnosticClient> diagClient;
+    /// The text diagnostics client that will be used to render diagnostics.
+    std::shared_ptr<TextDiagnosticClient> textDiagClient;
+
+    /// The (optional) JSON diagnostics client that will be used to render diagnostics.
+    std::shared_ptr<JsonDiagnosticClient> jsonDiagClient;
 
     /// The object that handles loading and parsing source files.
     SourceLoader sourceLoader;
+
+    /// A shared thread pool for doing work in parallel.
+    /// Created on demand when threading is enabled, otherwise left null.
+    std::shared_ptr<ThreadPool> threadPool;
 
     /// A list of syntax trees that have been parsed.
     std::vector<std::shared_ptr<syntax::SyntaxTree>> syntaxTrees;
@@ -106,6 +166,29 @@ public:
         /// A set of preprocessor directives to be ignored.
         std::vector<std::string> ignoreDirectives;
 
+        /// A set of options controlling translate-off comment directives.
+        std::vector<std::string> translateOffOptions;
+
+        /// A list of mappings from file patterns to language keyword versions.
+        std::vector<std::pair<std::string, parsing::KeywordVersion>> keywordMapping;
+
+        /// Disables "local" include path lookup, where include directives search
+        /// relative to the file containing the directive first.
+        std::optional<bool> disableLocalIncludes;
+
+        /// If true, user-specified include directories (+incdir/-I) are searched before
+        /// the local directory of the file containing the include directive, matching the
+        /// behavior of VCS and similar simulators.
+        std::optional<bool> incDirFirst;
+
+        /// If true, the preprocessor will allow trailing spaces after the continuation character
+        /// in macro definitions.
+        std::optional<bool> allowMacroTrailingSpace;
+
+        /// If true, the preprocessor will print the name and kind of each file
+        /// as it is parsed.
+        std::optional<bool> showParsedFiles;
+
         /// @}
         /// @name Parsing
         /// @{
@@ -118,6 +201,11 @@ public:
 
         /// The number of threads to use for parsing.
         std::optional<uint32_t> numThreads;
+
+        /// If true, the preprocessor will assume that a missing end of scope token for a
+        /// module/program/package/class inside an include file with protected code has the
+        /// end of scope token inside the protected code.
+        std::optional<bool> allowMissingProtectedScopeEnd;
 
         /// @}
         /// @name Compilation
@@ -143,20 +231,25 @@ public:
         /// before abbreviating them.
         std::optional<uint32_t> maxConstexprBacktrace;
 
+        /// The maximum number of bits a single constant value can occupy before
+        /// an error is issued to prevent out-of-memory crashes.
+        std::optional<uint64_t> maxConstantSize;
+
         /// The maximum number of instances allowed in a single instance array.
         std::optional<uint32_t> maxInstanceArray;
+
+        /// The maximum number of members allowed in a single enum declaration.
+        std::optional<uint32_t> maxEnumValues;
 
         /// The maximum number of UDP coverage notes that will be generated for a single
         /// warning about missing edge transitions.
         std::optional<uint32_t> maxUDPCoverageNotes;
 
-        /// A string indicating a member of @a CompatMode to use for tailoring
-        /// other compilation options.
-        std::optional<std::string> compat;
+        /// Preset compatibility modes for setting other options in one easy step.
+        std::optional<CompatMode> compat;
 
-        /// A string indicating a member of @a MinTypMax to indicate which set
-        /// of (min:typ:max) expressions is valid for this compilation.
-        std::optional<std::string> minTypMax;
+        /// Indicates which set of (min:typ:max) expressions is valid for this compilation.
+        std::optional<ast::MinTypMax> minTypMax;
 
         /// A string that indicates the default time scale to use for
         /// any design elements that don't specify one explicitly.
@@ -185,11 +278,11 @@ public:
         /// @name Diagnostics control
         /// @{
 
-        /// If true, print diagnostics with color.
-        std::optional<bool> colorDiags;
-
         /// If true, include column numbers in printed diagnostics.
         std::optional<bool> diagColumn;
+
+        /// The unit to use for column numbers in diagnostic output.
+        std::optional<ColumnUnit> diagColumnUnit;
 
         /// If true, include location information in printed diagnostics.
         std::optional<bool> diagLocation;
@@ -206,9 +299,15 @@ public:
         /// If true, include macro expansion information in printed diagnostics.
         std::optional<bool> diagMacroExpansion;
 
-        /// One of the ShowHierarchyPathOption values that control whether to
-        /// include hierarchy paths in printed diagnostics.
-        std::optional<std::string> diagHierarchy;
+        /// If true, display absolute paths to files in printed diagnostics.
+        std::optional<bool> diagAbsPaths;
+
+        /// Controls whether to include hierarchy paths in printed diagnostics.
+        std::optional<ShowHierarchyPathOption> diagHierarchy;
+
+        /// If set, the path to a JSON file that will be written with diagnostic information.
+        /// Can be '-' to indicate that the JSON should be written to stdout.
+        std::optional<std::string> diagJson;
 
         /// The maximum number of errors to print before giving up.
         std::optional<uint32_t> errorLimit;
@@ -228,6 +327,41 @@ public:
         flat_hash_set<std::string> excludeExts;
 
         /// @}
+        /// @name Dependency files
+        /// @{
+
+        /// Optional target name to include when writing dependency files.
+        std::optional<std::string> depfileTarget;
+
+        /// If true, trim unreferenced files before generating dependency lists.
+        std::optional<bool> depfileTrim;
+
+        /// If true, topologically sort files before generating dependency lists.
+        std::optional<bool> depfileSort;
+
+        /// Output path for a dependency file containing all dependencies.
+        std::optional<std::string> allDepfile;
+
+        /// Output path for a dependency file containing include file dependencies.
+        std::optional<std::string> includeDepfile;
+
+        /// Output path for a dependency file containing module source file dependencies.
+        std::optional<std::string> moduleDepfile;
+
+        /// @}
+        /// @name Analysis
+        /// @{
+
+        /// A collection of flags that control analysis.
+        std::map<analysis::AnalysisFlags, std::optional<bool>> analysisFlags;
+
+        /// The maximum number of steps to take when analyzing a case statement.
+        std::optional<uint32_t> maxCaseAnalysisSteps;
+
+        /// The maximum number of steps to take when analyzing a loop statement.
+        std::optional<uint32_t> maxLoopAnalysisSteps;
+
+        /// @}
 
         /// Returns true if the lintMode option is provided.
         bool lintMode() const;
@@ -235,6 +369,7 @@ public:
 
     /// Constructs a new instance of the @a Driver class.
     Driver();
+    ~Driver();
 
     /// @brief Adds standard command line arguments to the @a cmdLine object.
     ///
@@ -249,8 +384,7 @@ public:
     template<typename TArgs>
     [[nodiscard]] bool parseCommandLine(int argc, TArgs argv) {
         if (!cmdLine.parse(argc, argv)) {
-            for (auto& err : cmdLine.getErrors())
-                OS::printE(err + '\n');
+            issueCommandLineErrors(cmdLine);
             return false;
         }
         return !anyFailedLoads;
@@ -260,7 +394,7 @@ public:
     ///
     /// Any errors encountered will be printed to stderr.
     [[nodiscard]] bool parseCommandLine(std::string_view argList,
-                                        CommandLine::ParseOptions parseOptions = {});
+                                        const CommandLine::ParseOptions& parseOptions = {});
 
     /// @brief Processes the given command file(s) for more options.
     ///
@@ -278,22 +412,22 @@ public:
     /// @returns true on success and false if errors were encountered.
     [[nodiscard]] bool processOptions();
 
+    /// Returns the analysis options constructed from flags.
+    [[nodiscard]]
+    analysis::AnalysisOptions getAnalysisOptions() const;
+
     /// @brief Runs the preprocessor on all loaded buffers and outputs the result to stdout.
     ///
     /// Any errors encountered will be printed to stderr.
-    /// @param includeComments If true, comments will be included in the output.
-    /// @param includeDirectives If true, preprocessor directives will be included in the output.
-    /// @param obfuscateIds If true, identifiers will be obfuscated by replacing them with
-    ///                     randomized alphanumeric strings.
-    /// @param useFixedObfuscationSeed If true, obfuscated identifiers will be generated with
-    ///                                a fixed randomization seed, meaning they will be the
-    ///                                same every time the program is run. Used for testing.
-    /// @returns true on success and false if errors were encountered.
-    [[nodiscard]] bool runPreprocessor(bool includeComments, bool includeDirectives,
-                                       bool obfuscateIds, bool useFixedObfuscationSeed = false);
+    [[nodiscard]] bool runPreprocessor(bitmask<PreprocessOutputFlags> flags);
 
     /// Prints all macros from all loaded buffers to stdout.
-    void reportMacros();
+    /// If @a groupByFile is true, macros are grouped and labelled by source file.
+    void reportMacros(bool groupByFile = false);
+
+    /// Writes any dependency files that have been requested via command line options.
+    /// (if such options have not been specified this method does nothing).
+    void optionallyWriteDepFiles();
 
     /// @brief Parses all loaded buffers into syntax trees and appends the resulting trees
     /// to the @a syntaxTrees list.
@@ -303,6 +437,9 @@ public:
 
     /// Creates an options bag from all of the currently set options.
     [[nodiscard]] Bag createOptionBag() const;
+
+    /// Creates an options bag from all of the currently set parse options
+    [[nodiscard]] Bag createParseOptionBag() const;
 
     /// Creates a compilation object from all of the current loaded state of the driver.
     [[nodiscard]] std::unique_ptr<ast::Compilation> createCompilation();
@@ -314,20 +451,54 @@ public:
     /// @brief Reports the result of compilation.
     ///
     /// If @a quiet is set to true, non-essential output will be suppressed.
+    void reportCompilation(ast::Compilation& compilation, bool quiet);
+
+    /// @brief Runs analysis on a compilation and reports the results.
+    ///
+    /// @note The compilation will be frozen after this call.
+    std::unique_ptr<analysis::AnalysisManager> runAnalysis(ast::Compilation& compilation);
+
+    /// @brief Reports all diagnostics to output.
+    ///
+    /// If @a quiet is set to true, non-essential output will be suppressed.
     /// @returns true if compilation succeeded and false if errors were encountered.
-    [[nodiscard]] bool reportCompilation(ast::Compilation& compilation, bool quiet);
+    [[nodiscard]] bool reportDiagnostics(bool quiet);
+
+    /// @brief Runs a full compilation pass and reports the results.
+    ///
+    /// This is a helper method that calls @a createCompilation, @a reportCompilation,
+    /// @a runAnalysis, and @a reportDiagnostics in sequence.
+    ///
+    /// @returns true if compilation succeeded and false if errors were encountered.
+    [[nodiscard]] bool runFullCompilation(bool quiet = false);
+
+    /// Prints an error to stderr with appropriate terminal colors.
+    void printError(const std::string& message);
+
+    /// Prints a warning to stderr with appropriate terminal colors.
+    void printWarning(const std::string& message);
+
+    /// Prints a note to stderr with appropriate terminal colors.
+    void printNote(const std::string& message);
+
+    /// Sets whether terminal output should use color.
+    void setTerminalColorsEnabled(bool enable);
 
 private:
-    bool parseUnitListing(std::string_view text);
+    bool parseUnitListing(const SourceBuffer& sourceBuffer);
+    std::string parseMapKeywordVersion(std::string_view value);
     void addLibraryFiles(std::string_view pattern);
     void addParseOptions(Bag& bag) const;
     void addCompilationOptions(Bag& bag) const;
+    void issueCommandLineErrors(const CommandLine& cl);
     bool reportLoadErrors();
-    void printError(const std::string& message);
-    void printWarning(const std::string& message);
 
     bool anyFailedLoads = false;
     flat_hash_set<std::filesystem::path> activeCommandFiles;
+    std::vector<std::tuple<std::string_view, std::string_view, std::string_view>>
+        translateOffFormats;
+    std::unique_ptr<JsonWriter> jsonWriter;
+    std::vector<std::shared_ptr<UserDefinedSubroutine>> userDefinedSubroutines;
 };
 
 } // namespace slang::driver

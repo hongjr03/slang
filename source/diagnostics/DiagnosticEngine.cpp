@@ -10,13 +10,13 @@
 #include <algorithm>
 #include <fmt/args.h>
 
-#include "slang/diagnostics/DeclarationsDiags.h"
 #include "slang/diagnostics/DiagArgFormatter.h"
 #include "slang/diagnostics/DiagnosticClient.h"
 #include "slang/diagnostics/MetaDiags.h"
 #include "slang/diagnostics/TextDiagnosticClient.h"
 #include "slang/text/Glob.h"
 #include "slang/text/SourceManager.h"
+#include "slang/util/SmallMap.h"
 
 namespace fs = std::filesystem;
 
@@ -29,10 +29,11 @@ std::string_view getDefaultOptionName(DiagCode code);
 std::span<const DiagCode> findDiagsFromOptionName(std::string_view name);
 const DiagGroup* findDefaultDiagGroup(std::string_view name);
 
+DiagnosticEngine::SymbolPathCB DiagnosticEngine::defaultSymbolPathCB;
 DiagnosticEngine::FormatterMap DiagnosticEngine::defaultFormatters;
 
 DiagnosticEngine::DiagnosticEngine(const SourceManager& sourceManager) :
-    sourceManager(sourceManager), formatters(defaultFormatters) {
+    sourceManager(sourceManager), symbolPathCB(defaultSymbolPathCB), formatters(defaultFormatters) {
 }
 
 DiagnosticEngine::~DiagnosticEngine() = default;
@@ -56,9 +57,9 @@ void DiagnosticEngine::setSeverity(DiagCode code, DiagnosticSeverity severity) {
     severityTable[code] = severity;
 }
 
-void DiagnosticEngine::setSeverity(const DiagGroup& group, DiagnosticSeverity severity) {
-    for (auto diag : group.getDiags())
-        setSeverity(diag, severity);
+void DiagnosticEngine::setBaselineSeverity(DiagCode code, DiagnosticSeverity severity) {
+    baselineSeverityTable[code] = severity;
+    severityTable[code] = severity;
 }
 
 DiagnosticSeverity DiagnosticEngine::getSeverity(DiagCode code, SourceLocation location) const {
@@ -66,8 +67,17 @@ DiagnosticSeverity DiagnosticEngine::getSeverity(DiagCode code, SourceLocation l
     if (auto sev = findMappedSeverity(code, location); sev.has_value())
         return *sev;
 
-    if (auto it = severityTable.find(code); it != severityTable.end())
-        return it->second;
+    // Check per-buffer warning state from compilation unit listing options.
+    bool overrideWarnAsError = false;
+    if (auto sev = findPerBufferSeverity(code, location, overrideWarnAsError); sev.has_value())
+        return *sev;
+
+    if (auto it = severityTable.find(code); it != severityTable.end()) {
+        auto sev = it->second;
+        if (sev == DiagnosticSeverity::Warning && overrideWarnAsError)
+            return DiagnosticSeverity::Error;
+        return sev;
+    }
 
     auto result = getDefaultSeverity(code);
     switch (result) {
@@ -80,7 +90,7 @@ DiagnosticSeverity DiagnosticEngine::getSeverity(DiagCode code, SourceLocation l
         case DiagnosticSeverity::Warning:
             if (ignoreAllWarnings)
                 return DiagnosticSeverity::Ignored;
-            if (warningsAsErrors)
+            if (warningsAsErrors || overrideWarnAsError)
                 return DiagnosticSeverity::Error;
             break;
         case DiagnosticSeverity::Error:
@@ -119,15 +129,22 @@ const DiagGroup* DiagnosticEngine::findDiagGroup(std::string_view name) const {
 
 void DiagnosticEngine::clearMappings() {
     severityTable.clear();
+    baselineSeverityTable.clear();
     messageTable.clear();
 }
 
 void DiagnosticEngine::clearMappings(DiagnosticSeverity severity) {
     erase_if(severityTable, [severity](auto& pair) { return pair.second == severity; });
+    erase_if(baselineSeverityTable, [severity](auto& pair) { return pair.second == severity; });
 }
 
 std::error_code DiagnosticEngine::addIgnorePaths(std::string_view pattern) {
     std::error_code ec;
+    if (pattern.starts_with("..."sv)) {
+        ignoreWarnPatterns.emplace_back(pattern);
+        return ec;
+    }
+
     auto p = fs::weakly_canonical(pattern, ec);
     if (!ec)
         ignoreWarnPatterns.emplace_back(std::move(p));
@@ -137,6 +154,11 @@ std::error_code DiagnosticEngine::addIgnorePaths(std::string_view pattern) {
 
 std::error_code DiagnosticEngine::addIgnoreMacroPaths(std::string_view pattern) {
     std::error_code ec;
+    if (pattern.starts_with("..."sv)) {
+        ignoreMacroWarnPatterns.emplace_back(pattern);
+        return ec;
+    }
+
     auto p = fs::weakly_canonical(pattern, ec);
     if (!ec)
         ignoreMacroWarnPatterns.emplace_back(std::move(p));
@@ -194,6 +216,11 @@ void DiagnosticEngine::issue(const Diagnostic& diagnostic) {
         numWarnings++;
     else if (isError)
         numErrors++;
+}
+
+void DiagnosticEngine::issue(const Diagnostics& diagnostics) {
+    for (auto& diag : diagnostics)
+        issue(diag);
 }
 
 bool DiagnosticEngine::issueImpl(const Diagnostic& diagnostic, DiagnosticSeverity severity) {
@@ -263,15 +290,17 @@ bool DiagnosticEngine::issueImpl(const Diagnostic& diagnostic, DiagnosticSeverit
     // Notes are ignored if location is "NoLocation" since they frequently make no
     // sense without location information.
     for (const Diagnostic& note : diagnostic.notes) {
-        // At some point we should figure out how to not hardcode these special cases
-        // that allow notes to be issued without a location.
-        if (note.location != SourceLocation::NoLocation || note.code == diag::NoteFromHere2 ||
-            note.code == diag::NoteUdpCoverage) {
+        if (note.location != SourceLocation::NoLocation || note.code.showNoteWithNoLocation())
             issue(note);
-        }
     }
 
     return true;
+}
+
+const DiagnosticEngine::FormatterMap& DiagnosticEngine::getFormatters() const {
+    if (formatters.empty())
+        formatters = defaultFormatters;
+    return formatters;
 }
 
 std::string DiagnosticEngine::formatMessage(const Diagnostic& diag) const {
@@ -292,13 +321,9 @@ std::string DiagnosticEngine::formatMessage(const Diagnostic& diag) const {
         // Unwrap the argument type (stored as a variant).
         std::visit(
             [&](auto&& t) {
-                // If the argument is a pointer, the fmtlib API needs it unwrapped into a reference.
                 using T = std::decay_t<decltype(t)>;
                 if constexpr (std::is_same_v<Diagnostic::CustomArgType, T>) {
-                    if (auto it = formatters.find(t.first); it != formatters.end())
-                        args.push_back(it->second->format(t.second));
-                    else
-                        SLANG_THROW(std::runtime_error("No diagnostic formatter for type"));
+                    args.push_back(formatArg(t));
                 }
                 else if constexpr (std::is_same_v<ConstantValue, T>) {
                     if (t.isReal())
@@ -316,6 +341,36 @@ std::string DiagnosticEngine::formatMessage(const Diagnostic& diag) const {
     }
 
     return fmt::vformat(getMessage(diag.code), args);
+}
+
+std::string DiagnosticEngine::formatArg(const Diagnostic::CustomArgType& arg) const {
+    getFormatters();
+    if (auto it = formatters.find(arg.first); it != formatters.end())
+        return it->second->format(arg.second);
+
+    SLANG_THROW(std::runtime_error("No diagnostic formatter for type"));
+}
+
+std::string DiagnosticEngine::formatArg(const Diagnostic::Arg& arg) const {
+    return std::visit(
+        [&](auto&& t) {
+            using T = std::decay_t<decltype(t)>;
+            if constexpr (std::is_same_v<Diagnostic::CustomArgType, T>) {
+                return formatArg(t);
+            }
+            else if constexpr (std::is_same_v<ConstantValue, T>) {
+                if (t.isReal())
+                    return fmt::to_string(double(t.real()));
+                else if (t.isShortReal())
+                    return fmt::to_string(float(t.shortReal()));
+                else
+                    return t.toString();
+            }
+            else {
+                return fmt::to_string(t);
+            }
+        },
+        arg);
 }
 
 // Walks up a chain of macro argument expansions and collects their buffer IDs.
@@ -448,21 +503,36 @@ std::string DiagnosticEngine::reportAll(const SourceManager& sourceManager,
     return client->getString();
 }
 
-void DiagnosticEngine::setDefaultWarnings() {
-    setIgnoreAllWarnings(true);
-    setSeverity(*findDiagGroup("default"sv), DiagnosticSeverity::Warning);
-}
+void DiagnosticEngine::parseWarningOptions(std::span<const std::string> options, Diagnostics& diags,
+                                           bool includeDefault, ParsedOptions& results) {
+    std::vector<std::pair<const DiagGroup*, bool>> groupEnables;
+    std::vector<std::pair<DiagCode, bool>> codeEnables;
+    flat_hash_map<const DiagGroup*, bool> groupErrors;
+    flat_hash_map<DiagCode, bool> codeErrors;
 
-Diagnostics DiagnosticEngine::setWarningOptions(std::span<const std::string> options) {
-    Diagnostics diags;
-    auto findAndSet = [&](std::string_view name, DiagnosticSeverity severity,
-                          const char* errorPrefix) {
+    auto findAndSet = [&](std::string_view name, bool set, const char* errorPrefix,
+                          bool isExplicitError) {
         if (auto group = findDiagGroup(name)) {
-            setSeverity(*group, severity);
+            if (isExplicitError)
+                groupErrors[group] = set;
+            else
+                groupEnables.emplace_back(group, set);
+
+            // -Werror= also turns on the group.
+            if (isExplicitError && set)
+                groupEnables.emplace_back(group, true);
         }
         else if (auto codes = findFromOptionName(name); !codes.empty()) {
-            for (auto code : codes)
-                setSeverity(code, severity);
+            for (auto code : codes) {
+                if (isExplicitError)
+                    codeErrors[code] = set;
+                else
+                    codeEnables.emplace_back(code, set);
+
+                // -Werror= also turns on the code.
+                if (isExplicitError && set)
+                    codeEnables.emplace_back(code, true);
+            }
         }
         else {
             auto& diag = diags.add(diag::UnknownWarningOption, SourceLocation::NoLocation);
@@ -472,35 +542,102 @@ Diagnostics DiagnosticEngine::setWarningOptions(std::span<const std::string> opt
 
     for (auto& arg : options) {
         if (arg == "everything") {
-            // Enable all warnings.
-            clearMappings(DiagnosticSeverity::Ignored);
-            setIgnoreAllWarnings(false);
+            results.enableAll = true;
+            results.ignoreAll = false;
         }
         else if (arg == "none") {
-            // Disable all warnings.
-            clearMappings(DiagnosticSeverity::Warning);
-            setIgnoreAllWarnings(true);
+            includeDefault = false;
+            results.enableAll = false;
+            results.ignoreAll = true;
         }
         else if (arg == "error") {
-            for (auto it = severityTable.begin(); it != severityTable.end(); it++) {
-                if (it->second == DiagnosticSeverity::Warning)
-                    it->second = DiagnosticSeverity::Error;
-            }
-            setWarningsAsErrors(true);
+            results.warningsAsErrors = true;
         }
         else if (arg.starts_with("error=")) {
-            findAndSet(arg.substr(6), DiagnosticSeverity::Error, "-Werror=");
+            findAndSet(arg.substr(6), /* set */ true, "-Werror=", /* isExplicitError */ true);
         }
         else if (arg.starts_with("no-error=")) {
-            findAndSet(arg.substr(9), DiagnosticSeverity::Warning, "-Wno-error=");
+            findAndSet(arg.substr(9), /* set */ false, "-Wno-error=", /* isExplicitError */ true);
         }
         else if (arg.starts_with("no-")) {
-            findAndSet(arg.substr(3), DiagnosticSeverity::Ignored, "-Wno-");
+            findAndSet(arg.substr(3), /* set */ false, "-Wno-", /* isExplicitError */ false);
         }
         else {
-            findAndSet(arg, DiagnosticSeverity::Warning, "-W");
+            findAndSet(arg, /* set */ true, "-W", /* isExplicitError */ false);
         }
     }
+
+    auto handleGroup = [&](const DiagGroup* group, bool set, bool isDefault) {
+        DiagnosticSeverity severity;
+        if (!set)
+            severity = DiagnosticSeverity::Ignored;
+        else if (auto it = groupErrors.find(group); it != groupErrors.end())
+            severity = it->second ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning;
+        else {
+            severity = results.warningsAsErrors ? DiagnosticSeverity::Error
+                                                : DiagnosticSeverity::Warning;
+        }
+
+        for (auto code : group->getDiags()) {
+            if (isDefault)
+                results.overrides.try_emplace(code, severity);
+            else
+                results.overrides.insert_or_assign(code, severity);
+        }
+    };
+
+    if (includeDefault) {
+        auto group = findDiagGroup("default"sv);
+        SLANG_ASSERT(group);
+        handleGroup(group, true, /* isDefault */ true);
+    }
+
+    for (auto& [group, set] : groupEnables)
+        handleGroup(group, set, /* isDefault */ false);
+
+    // Special case for diagnostics with an explicit severity set by API that
+    // the user is now trying to downgrade to be not an error.
+    for (auto& [code, set] : codeErrors) {
+        if (!set) {
+            auto it = results.overrides.find(code);
+            if (it != results.overrides.end() && it->second == DiagnosticSeverity::Error)
+                it->second = DiagnosticSeverity::Warning;
+        }
+    }
+
+    for (auto& [code, set] : codeEnables) {
+        if (!set) {
+            results.overrides[code] = DiagnosticSeverity::Ignored;
+        }
+        else if (auto it = codeErrors.find(code); it != codeErrors.end()) {
+            results.overrides[code] = it->second ? DiagnosticSeverity::Error
+                                                 : DiagnosticSeverity::Warning;
+        }
+        else {
+            results.overrides[code] = results.warningsAsErrors ? DiagnosticSeverity::Error
+                                                               : DiagnosticSeverity::Warning;
+        }
+    }
+}
+
+Diagnostics DiagnosticEngine::setWarningOptions(std::span<const std::string> options) {
+    // Pre-fill the override table with our current severity settings.
+    // Baseline comes second since anything in the user-specified table
+    // takes precedence.
+    ParsedOptions results;
+    std::swap(results.overrides, severityTable);
+    results.overrides.insert(baselineSeverityTable.begin(), baselineSeverityTable.end());
+
+    Diagnostics diags;
+    parseWarningOptions(options, diags, /* includeDefault */ true, results);
+
+    // By default a DiagnosticEngine will emit all warnings. Unless the user
+    // provided Weverything we don't want this, so turn it all off and let the
+    // overrides control instead.
+    setIgnoreAllWarnings(!results.enableAll);
+    setWarningsAsErrors(results.warningsAsErrors);
+
+    std::swap(results.overrides, severityTable);
 
     return diags;
 }
@@ -573,6 +710,17 @@ Diagnostics DiagnosticEngine::setMappingsFromPragmas() {
     return diags;
 }
 
+Diagnostics DiagnosticEngine::setBufferWarningOptions(
+    const flat_hash_map<BufferID, std::vector<std::string>>& options) {
+    Diagnostics diags;
+    for (auto& [buffer, opts] : options) {
+        auto& bws = perBufferSeverity[buffer];
+        bws.overrides.insert(baselineSeverityTable.begin(), baselineSeverityTable.end());
+        parseWarningOptions(opts, diags, /* includeDefault */ false, bws);
+    }
+    return diags;
+}
+
 Diagnostics DiagnosticEngine::setMappingsFromPragmas(BufferID buffer) {
     Diagnostics diags;
     auto directives = sourceManager.getDiagnosticDirectives(buffer);
@@ -602,6 +750,41 @@ std::optional<DiagnosticSeverity> DiagnosticEngine::findMappedSeverity(
         return std::nullopt;
 
     return (--byOffset)->severity;
+}
+
+std::optional<DiagnosticSeverity> DiagnosticEngine::findPerBufferSeverity(
+    DiagCode code, SourceLocation location, bool& overrideWarnAsError) const {
+    if (perBufferSeverity.empty())
+        return std::nullopt;
+
+    auto fileLoc = sourceManager.getFullyExpandedLoc(location);
+    auto bwsIt = perBufferSeverity.find(fileLoc.buffer());
+    if (bwsIt == perBufferSeverity.end())
+        return std::nullopt;
+
+    const auto& bws = bwsIt->second;
+    if (auto it = bws.overrides.find(code); it != bws.overrides.end())
+        return it->second;
+
+    const bool isDefaultWarning = getDefaultSeverity(code) == DiagnosticSeverity::Warning;
+    if (isDefaultWarning) {
+        if (bws.ignoreAll)
+            return DiagnosticSeverity::Ignored;
+        if (bws.enableAll)
+            return bws.warningsAsErrors ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning;
+
+        // If the buffer has -Werror but no explicit override for this warning
+        // we will return back and let the default severity table control whether
+        // we issue the warning at all, but if we do we will upgrade it to an error.
+        if (bws.warningsAsErrors)
+            overrideWarnAsError = true;
+    }
+
+    return std::nullopt;
+}
+
+void DiagnosticEngine::clearIncludeStack() {
+    reportedIncludeStack.clear();
 }
 
 } // namespace slang

@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "slang/text/SourceLocation.h"
-#include "slang/util/Hash.h"
+#include "slang/util/FlatMap.h"
 #include "slang/util/SmallVector.h"
 #include "slang/util/Util.h"
 
@@ -68,17 +68,22 @@ public:
     std::string_view getFileName(SourceLocation location) const;
 
     /// Gets the source file name for a given source buffer, not taking
-    /// into account any `line directives that may be in the file.
+    /// into account any line directives that may be in the file.
     std::string_view getRawFileName(BufferID buffer) const;
 
     /// Gets the full path to the given source buffer. This does not take
-    /// into account any `line directives. If the buffer is not a file buffer,
+    /// into account any line directives. If the buffer is not a file buffer,
     /// returns an empty string.
     const std::filesystem::path& getFullPath(BufferID buffer) const;
 
     /// Gets the column line number for a given source location.
     /// @a location must be a file location.
     size_t getColumnNumber(SourceLocation location) const;
+
+    /// Gets the display column number for a given source location, accounting for
+    /// UTF-8 character widths and tab expansion.
+    /// @a location must be a file location.
+    size_t getDisplayColumnNumber(SourceLocation location) const;
 
     /// Gets a location that indicates from where the given buffer was included.
     /// @a location must be a file location.
@@ -87,6 +92,37 @@ public:
     /// Gets the source library of which the given buffer is a part,
     /// or nullptr if it's not explicitly part of any library.
     const SourceLibrary* getLibraryFor(BufferID buffer) const;
+
+    /// Describes the origin of a source buffer.
+    enum class BufferKind {
+        /// The buffer is unknown to the source manager.
+        Unknown,
+
+        /// A design file.
+        DesignFile,
+
+        /// A library file.
+        LibraryFile,
+
+        /// A library map.
+        LibraryMap,
+
+        /// An include file.
+        IncludeFile,
+
+        /// A macro expansion.
+        Macro,
+
+        /// A macro argument substitution.
+        MacroArg
+    };
+
+    /// Gets the kind for the given buffer. Returns BufferKind::Macro or BufferKind::MacroArg
+    /// for macro expansion buffers, and the appropriate file kind for source file buffers.
+    BufferKind getBufferKind(BufferID buffer) const;
+
+    /// Marks the given source file buffer as the specified kind.
+    void setBufferKind(BufferID buffer, BufferKind kind);
 
     /// Attempts to get the name of the macro represented by a macro location.
     /// If no macro name can be found, returns an empty string view.
@@ -165,8 +201,8 @@ public:
                               const SourceLibrary* library = nullptr);
 
     /// Read in a source file from disk.
-    BufferOrError readSource(const std::filesystem::path& path, const SourceLibrary* library,
-                             uint64_t sortKey = UINT64_MAX);
+    BufferOrError readSource(const std::filesystem::path& path,
+                             const SourceLibrary* library = nullptr, uint64_t sortKey = UINT64_MAX);
 
     /// Read in a header file from disk.
     BufferOrError readHeader(std::string_view path, SourceLocation includedFrom,
@@ -181,6 +217,16 @@ public:
     /// disabled to always use the simple filename.
     void setDisableProximatePaths(bool set) { disableProximatePaths = set; }
 
+    /// Sets whether to disable "local" include path lookup, where include directives search
+    /// relative to the file containing the directive first.
+    void setDisableLocalIncludes(bool set) { disableLocalIncludes = set; }
+
+    /// Sets whether user-specified include directories (+incdir/-I) are searched before
+    /// the local directory of the file containing the include directive. When false (the
+    /// default), the local directory is searched first. When true, the behavior matches
+    /// VCS and similar simulators that always prefer +incdir directories over local lookup.
+    void setIncDirFirst(bool set) { incDirFirst = set; }
+
     /// Adds a line directive at the given location.
     void addLineDirective(SourceLocation location, size_t lineNum, std::string_view name,
                           uint8_t level);
@@ -189,7 +235,7 @@ public:
     void addDiagnosticDirective(SourceLocation location, std::string_view name,
                                 DiagnosticSeverity severity);
 
-    /// Stores information specified in a `pragma diagnostic directive, which alters the
+    /// Stores information specified in a pragma diagnostic directive, which alters the
     /// currently active set of diagnostic mappings.
     struct DiagnosticDirectiveInfo {
         /// The name of the diagnostic being controlled.
@@ -211,7 +257,7 @@ public:
     /// iterable collection of DiagnosticDirectiveInfos.
     template<typename Func>
     void visitDiagnosticDirectives(Func&& func) const {
-        std::shared_lock lock(mutex);
+        std::shared_lock<std::shared_mutex> lock(mutex);
         for (auto& [buffer, directives] : diagDirectives)
             func(buffer, directives);
     }
@@ -222,9 +268,16 @@ public:
     /// @a addDiagnosticDirective and invalidate the span.
     std::span<const DiagnosticDirectiveInfo> getDiagnosticDirectives(BufferID buffer) const;
 
+    /// Clears all diagnostic directives registered with the sourcemanager.
+    void clearDiagnosticDirectives();
+
     /// Returns a list of buffers (files and macros) that have been created in the
     /// source manager.
     std::vector<BufferID> getAllBuffers() const;
+
+    /// Returns the total bytes consumed by all loaded source files:
+    /// raw file content plus any cached line-offset tables.
+    size_t getMemoryUsage() const;
 
 private:
     // Stores information specified in a `line directive, which alters the
@@ -259,13 +312,16 @@ private:
         FileData* data = nullptr;
         const SourceLibrary* library = nullptr;
         SourceLocation includedFrom;
-        uint64_t sortKey;
+        uint64_t sortKey = 0;
+        BufferKind bufferKind = BufferKind::DesignFile;
         std::vector<LineDirectiveInfo> lineDirectives;
 
         FileInfo() {}
+
         FileInfo(FileData* data, const SourceLibrary* library, SourceLocation includedFrom,
                  uint64_t sortKey) :
-            data(data), library(library), includedFrom(includedFrom), sortKey(sortKey) {}
+            data(data), library(library), includedFrom(includedFrom), sortKey(sortKey),
+            bufferKind(includedFrom.valid() ? BufferKind::IncludeFile : BufferKind::DesignFile) {}
 
         // Returns a pointer to the LineDirectiveInfo for the nearest enclosing
         // line directive of the given raw line number, or nullptr if there is none
@@ -320,9 +376,17 @@ private:
 
     std::atomic<uint32_t> unnamedBufferCount = 0;
     bool disableProximatePaths = false;
+    bool disableLocalIncludes = false;
+    bool incDirFirst = false;
 
     template<IsLock TLock>
     FileInfo* getFileInfo(BufferID buffer, TLock& lock);
+
+    template<IsLock TLock>
+    bool isIncludedFileLocImpl(SourceLocation location, TLock& lock) const;
+
+    template<IsLock TLock>
+    SourceLocation getIncludedFromImpl(BufferID buffer, TLock& lock) const;
 
     template<IsLock TLock>
     const FileInfo* getFileInfo(BufferID buffer, TLock& lock) const;

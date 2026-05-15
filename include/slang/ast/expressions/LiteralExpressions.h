@@ -12,8 +12,10 @@
 
 namespace slang::ast {
 
+class TypeProvider;
+
 /// Represents an integer literal.
-class SLANG_EXPORT IntegerLiteral : public Expression {
+class SLANG_EXPORT IntegerLiteral final : public Expression {
 public:
     /// Indicates whether the original token in the source text was declared
     /// unsized; if false, an explicit size was given.
@@ -28,6 +30,7 @@ public:
     ConstantValue evalImpl(EvalContext& context) const;
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const IntegerLiteral& rhs) const;
 
     void serializeTo(ASTSerializer&) const;
 
@@ -35,7 +38,7 @@ public:
                                   const syntax::LiteralExpressionSyntax& syntax);
     static Expression& fromSyntax(Compilation& compilation,
                                   const syntax::IntegerVectorExpressionSyntax& syntax);
-    static Expression& fromConstant(Compilation& compilation, const SVInt& value);
+    static Expression& fromConstant(const TypeProvider& typeProvider, const SVInt& value);
 
     static bool isKind(ExpressionKind kind) { return kind == ExpressionKind::IntegerLiteral; }
 
@@ -44,7 +47,7 @@ private:
 };
 
 /// Represents a real number literal.
-class SLANG_EXPORT RealLiteral : public Expression {
+class SLANG_EXPORT RealLiteral final : public Expression {
 public:
     RealLiteral(const Type& type, double value, SourceRange sourceRange) :
         Expression(ExpressionKind::RealLiteral, type, sourceRange), value(value) {}
@@ -53,6 +56,7 @@ public:
     double getValue() const { return value; }
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const RealLiteral& rhs) const;
 
     void serializeTo(ASTSerializer&) const;
 
@@ -66,15 +70,19 @@ private:
 };
 
 /// Represents a time literal.
-class SLANG_EXPORT TimeLiteral : public Expression {
+class SLANG_EXPORT TimeLiteral final : public Expression {
 public:
-    TimeLiteral(const Type& type, double value, SourceRange sourceRange) :
-        Expression(ExpressionKind::TimeLiteral, type, sourceRange), value(value) {}
+    TimeLiteral(const Type& type, double value, TimeScale scale, SourceRange sourceRange) :
+        Expression(ExpressionKind::TimeLiteral, type, sourceRange), value(value), scale(scale) {}
 
     /// Gets the value of the literal.
     double getValue() const { return value; }
 
+    /// Gets the time scale in effect for the context of the expression.
+    TimeScale getScale() const { return scale; }
+
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const TimeLiteral& rhs) const;
 
     void serializeTo(ASTSerializer&) const;
 
@@ -85,10 +93,11 @@ public:
 
 private:
     double value;
+    TimeScale scale;
 };
 
 /// Represents an unbased unsized integer literal, which fills all bits in an expression.
-class SLANG_EXPORT UnbasedUnsizedIntegerLiteral : public Expression {
+class SLANG_EXPORT UnbasedUnsizedIntegerLiteral final : public Expression {
 public:
     UnbasedUnsizedIntegerLiteral(const Type& type, logic_t value, SourceRange sourceRange) :
         Expression(ExpressionKind::UnbasedUnsizedIntegerLiteral, type, sourceRange), value(value) {}
@@ -100,9 +109,11 @@ public:
     SVInt getValue() const;
 
     ConstantValue evalImpl(EvalContext& context) const;
-    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange);
+    bool propagateType(const ASTContext& context, const Type& newType, SourceRange opRange,
+                       ConversionKind conversionKind);
     std::optional<bitwidth_t> getEffectiveWidthImpl() const;
     EffectiveSign getEffectiveSignImpl(bool isForConversion) const;
+    bool isEquivalentImpl(const UnbasedUnsizedIntegerLiteral& rhs) const;
 
     void serializeTo(ASTSerializer&) const;
 
@@ -118,12 +129,13 @@ private:
 };
 
 /// Represents a null literal.
-class SLANG_EXPORT NullLiteral : public Expression {
+class SLANG_EXPORT NullLiteral final : public Expression {
 public:
     NullLiteral(const Type& type, SourceRange sourceRange) :
         Expression(ExpressionKind::NullLiteral, type, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const NullLiteral&) const { return true; }
 
     void serializeTo(ASTSerializer&) const {}
 
@@ -134,12 +146,13 @@ public:
 };
 
 /// Represents the unbounded queue or range literal.
-class SLANG_EXPORT UnboundedLiteral : public Expression {
+class SLANG_EXPORT UnboundedLiteral final : public Expression {
 public:
     UnboundedLiteral(const Type& type, SourceRange sourceRange) :
         Expression(ExpressionKind::UnboundedLiteral, type, sourceRange) {}
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const UnboundedLiteral&) const { return true; }
 
     void serializeTo(ASTSerializer&) const {}
 
@@ -150,7 +163,7 @@ public:
 };
 
 /// Represents a string literal.
-class SLANG_EXPORT StringLiteral : public Expression {
+class SLANG_EXPORT StringLiteral final : public Expression {
 public:
     StringLiteral(const Type& type, std::string_view value, std::string_view rawValue,
                   ConstantValue& intVal, SourceRange sourceRange);
@@ -165,6 +178,7 @@ public:
     const ConstantValue& getIntValue() const;
 
     ConstantValue evalImpl(EvalContext& context) const;
+    bool isEquivalentImpl(const StringLiteral& rhs) const;
 
     void serializeTo(ASTSerializer& serializer) const;
 

@@ -58,7 +58,7 @@ protected:
 };
 
 /// Represents the single-bit scalar types.
-class SLANG_EXPORT ScalarType : public IntegralType {
+class SLANG_EXPORT ScalarType final : public IntegralType {
 public:
     /// The kind of scalar type.
     enum Kind { Bit, Logic, Reg } scalarKind;
@@ -66,17 +66,21 @@ public:
     ScalarType(Kind scalarKind);
     ScalarType(Kind scalarKind, bool isSigned);
 
+    void serializeTo(ASTSerializer&) const;
+
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::ScalarType; }
 };
 
 /// Represents the predefined integer types, which are essentially predefined vector types.
-class SLANG_EXPORT PredefinedIntegerType : public IntegralType {
+class SLANG_EXPORT PredefinedIntegerType final : public IntegralType {
 public:
     /// The kind of predefined integer type.
     enum Kind { ShortInt, Int, LongInt, Byte, Integer, Time } integerKind;
 
     PredefinedIntegerType(Kind integerKind);
     PredefinedIntegerType(Kind integerKind, bool isSigned);
+
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isDefaultSigned(Kind integerKind);
 
@@ -85,7 +89,7 @@ public:
 
 /// Represents one of the predefined floating point types,
 /// which are used for representing real numbers.
-class SLANG_EXPORT FloatingType : public Type {
+class SLANG_EXPORT FloatingType final : public Type {
 public:
     /// The kind of floating point type.
     enum Kind { Real, ShortReal, RealTime } floatKind;
@@ -93,6 +97,7 @@ public:
     explicit FloatingType(Kind floatKind);
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::FloatingType; }
 };
@@ -100,7 +105,7 @@ public:
 class EnumValueSymbol;
 
 /// Represents an enumerated type.
-class SLANG_EXPORT EnumType : public IntegralType, public Scope {
+class SLANG_EXPORT EnumType final : public IntegralType, public Scope {
 public:
     /// The base type of the enum.
     const Type& baseType;
@@ -110,6 +115,8 @@ public:
 
     EnumType(Compilation& compilation, SourceLocation loc, const Type& baseType,
              const ASTContext& context);
+
+    void serializeTo(ASTSerializer& serializer) const;
 
     static const Type& fromSyntax(Compilation& compilation, const syntax::EnumTypeSyntax& syntax,
                                   const ASTContext& context,
@@ -126,7 +133,7 @@ public:
 };
 
 /// Represents an enumerated value / member.
-class SLANG_EXPORT EnumValueSymbol : public ValueSymbol {
+class SLANG_EXPORT EnumValueSymbol final : public ValueSymbol {
 public:
     EnumValueSymbol(std::string_view name, SourceLocation loc);
 
@@ -135,6 +142,8 @@ public:
 
     /// Sets the value of the enum member.
     void setValue(ConstantValue value);
+
+    bool isEvaluating() const { return evaluating; }
 
     void serializeTo(ASTSerializer& serializer) const;
 
@@ -151,7 +160,7 @@ private:
 
 /// Represents a packed array of some simple element type
 /// (vectors, packed structures, other packed arrays).
-class SLANG_EXPORT PackedArrayType : public IntegralType {
+class SLANG_EXPORT PackedArrayType final : public IntegralType {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -161,11 +170,14 @@ public:
 
     PackedArrayType(const Type& elementType, ConstantRange range, bitwidth_t fullWidth);
 
-    static const Type& fromSyntax(const Scope& scope, const Type& elementType,
+    void serializeTo(ASTSerializer& serializer) const;
+
+    static const Type& fromSyntax(const ASTContext& context, const Type& elementType,
                                   const EvaluatedDimension& dimension,
                                   const syntax::SyntaxNode& syntax);
 
-    static const Type& fromDim(const Scope& scope, const Type& elementType, ConstantRange dim,
+    static const Type& fromDim(BumpAllocator& alloc, const ASTContext& context,
+                               const Type& elementType, ConstantRange dim,
                                syntax::DeferredSourceRange sourceRange);
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::PackedArrayType; }
@@ -173,7 +185,7 @@ public:
 
 /// Represents a fixed size unpacked array (as opposed to a
 /// dynamically sized unpacked array, associative array, or queue).
-class SLANG_EXPORT FixedSizeUnpackedArrayType : public Type {
+class SLANG_EXPORT FixedSizeUnpackedArrayType final : public Type {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -190,11 +202,14 @@ public:
     FixedSizeUnpackedArrayType(const Type& elementType, ConstantRange range,
                                uint64_t selectableWidth, uint64_t bitstreamWidth);
 
-    static const Type& fromDims(const Scope& scope, const Type& elementType,
-                                std::span<const ConstantRange> dimensions,
+    void serializeTo(ASTSerializer& serializer) const;
+
+    static const Type& fromDims(BumpAllocator& alloc, const ASTContext& context,
+                                const Type& elementType, std::span<const ConstantRange> dimensions,
                                 syntax::DeferredSourceRange sourceRange);
 
-    static const Type& fromDim(const Scope& scope, const Type& elementType, ConstantRange dim,
+    static const Type& fromDim(BumpAllocator& alloc, const ASTContext& context,
+                               const Type& elementType, ConstantRange dim,
                                syntax::DeferredSourceRange sourceRange);
 
     ConstantValue getDefaultValueImpl() const;
@@ -203,7 +218,7 @@ public:
 };
 
 /// Represents a dynamically sized unpacked array.
-class SLANG_EXPORT DynamicArrayType : public Type {
+class SLANG_EXPORT DynamicArrayType final : public Type {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -211,13 +226,14 @@ public:
     explicit DynamicArrayType(const Type& elementType);
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::DynamicArrayType; }
 };
 
 /// A special case for DPI imports that have "open array" typed arguments.
 /// It's not otherwise possible to declare a variable with this type.
-class SLANG_EXPORT DPIOpenArrayType : public Type {
+class SLANG_EXPORT DPIOpenArrayType final : public Type {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -228,12 +244,13 @@ public:
     DPIOpenArrayType(const Type& elementType, bool isPacked);
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::DPIOpenArrayType; }
 };
 
 /// Represents an unpacked array that provides associative lookup.
-class SLANG_EXPORT AssociativeArrayType : public Type {
+class SLANG_EXPORT AssociativeArrayType final : public Type {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -247,12 +264,13 @@ public:
     /// @returns true if the array has a wildcard index type
     bool hasWildcardIndexType() const { return indexType == nullptr; }
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::AssociativeArrayType; }
 };
 
 /// Represents an unpacked array that provides queue semantics.
-class SLANG_EXPORT QueueType : public Type {
+class SLANG_EXPORT QueueType final : public Type {
 public:
     /// The underlying element type.
     const Type& elementType;
@@ -263,18 +281,21 @@ public:
     QueueType(const Type& elementType, uint32_t maxBound);
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer& serializer) const;
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::QueueType; }
 };
 
 /// Represents a packed structure of members.
-class SLANG_EXPORT PackedStructType : public IntegralType, public Scope {
+class SLANG_EXPORT PackedStructType final : public IntegralType, public Scope {
 public:
     /// The system-generated ID.
     int systemId;
 
     PackedStructType(Compilation& compilation, bool isSigned, SourceLocation loc,
                      const ASTContext& context);
+
+    void serializeTo(ASTSerializer&) const {}
 
     static const Type& fromSyntax(Compilation& compilation,
                                   const syntax::StructUnionTypeSyntax& syntax,
@@ -284,7 +305,7 @@ public:
 };
 
 /// Represents an unpacked structure of members.
-class SLANG_EXPORT UnpackedStructType : public Type, public Scope {
+class SLANG_EXPORT UnpackedStructType final : public Type, public Scope {
 public:
     /// The fields contained in the struct.
     std::span<const FieldSymbol* const> fields;
@@ -300,6 +321,8 @@ public:
 
     UnpackedStructType(Compilation& compilation, SourceLocation loc, const ASTContext& context);
 
+    void serializeTo(ASTSerializer&) const {}
+
     static const Type& fromSyntax(const ASTContext& context,
                                   const syntax::StructUnionTypeSyntax& syntax);
 
@@ -309,7 +332,7 @@ public:
 };
 
 /// Represents a packed union of members.
-class SLANG_EXPORT PackedUnionType : public IntegralType, public Scope {
+class SLANG_EXPORT PackedUnionType final : public IntegralType, public Scope {
 public:
     /// The system-generated ID.
     int systemId;
@@ -327,6 +350,8 @@ public:
     PackedUnionType(Compilation& compilation, bool isSigned, bool isTagged, bool isSoft,
                     SourceLocation loc, const ASTContext& context);
 
+    void serializeTo(ASTSerializer& serializer) const;
+
     static const Type& fromSyntax(Compilation& compilation,
                                   const syntax::StructUnionTypeSyntax& syntax,
                                   const ASTContext& context);
@@ -335,7 +360,7 @@ public:
 };
 
 /// Represents an unpacked union of members.
-class SLANG_EXPORT UnpackedUnionType : public Type, public Scope {
+class SLANG_EXPORT UnpackedUnionType final : public Type, public Scope {
 public:
     /// The fields contained in the union.
     std::span<const FieldSymbol* const> fields;
@@ -355,6 +380,8 @@ public:
     UnpackedUnionType(Compilation& compilation, bool isTagged, SourceLocation loc,
                       const ASTContext& context);
 
+    void serializeTo(ASTSerializer& serializer) const;
+
     static const Type& fromSyntax(const ASTContext& context,
                                   const syntax::StructUnionTypeSyntax& syntax);
 
@@ -367,11 +394,12 @@ public:
 ///
 /// This can be used as the return type of functions
 /// and as the type of members in tagged unions.
-class SLANG_EXPORT VoidType : public Type {
+class SLANG_EXPORT VoidType final : public Type {
 public:
     VoidType() : Type(SymbolKind::VoidType, "void", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::VoidType; }
 };
@@ -380,99 +408,108 @@ public:
 ///
 /// This can be used as a literal for setting class handles and
 /// chandles to null (or the default value).
-class SLANG_EXPORT NullType : public Type {
+class SLANG_EXPORT NullType final : public Type {
 public:
     NullType() : Type(SymbolKind::NullType, "null", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::NullType; }
 };
 
 /// Represents storage for pointers passed using the DPI (a "C" compatible handle).
-class SLANG_EXPORT CHandleType : public Type {
+class SLANG_EXPORT CHandleType final : public Type {
 public:
     CHandleType() : Type(SymbolKind::CHandleType, "chandle", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::CHandleType; }
 };
 
 /// Represents the built-in ASCII string type.
-class SLANG_EXPORT StringType : public Type {
+class SLANG_EXPORT StringType final : public Type {
 public:
     StringType() : Type(SymbolKind::StringType, "string", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::StringType; }
 };
 
 /// Represents a SystemVerilog event handle, which is used for synchronization between
 /// asynchronous processes.
-class SLANG_EXPORT EventType : public Type {
+class SLANG_EXPORT EventType final : public Type {
 public:
     EventType() : Type(SymbolKind::EventType, "event", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::EventType; }
 };
 
 /// Represents the '$' special token that is a standin for the unbounded end
 /// of a queue or range selection.
-class SLANG_EXPORT UnboundedType : public Type {
+class SLANG_EXPORT UnboundedType final : public Type {
 public:
     UnboundedType() : Type(SymbolKind::UnboundedType, "$", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::UnboundedType; }
 };
 
 /// Represents the result of a type reference expression, i.e. the type() operator.
-class SLANG_EXPORT TypeRefType : public Type {
+class SLANG_EXPORT TypeRefType final : public Type {
 public:
     TypeRefType() : Type(SymbolKind::TypeRefType, "type reference", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::TypeRefType; }
 };
 
 /// Represents an 'untyped' type, which is used for e.g. arguments of sequences.
-class SLANG_EXPORT UntypedType : public Type {
+class SLANG_EXPORT UntypedType final : public Type {
 public:
     UntypedType() : Type(SymbolKind::UntypedType, "untyped", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::UntypedType; }
 };
 
 /// Represents the type of sequence instances and arguments.
-class SLANG_EXPORT SequenceType : public Type {
+class SLANG_EXPORT SequenceType final : public Type {
 public:
     SequenceType() : Type(SymbolKind::SequenceType, "sequence", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::SequenceType; }
 };
 
 /// Represents the type of property instances and arguments.
-class SLANG_EXPORT PropertyType : public Type {
+class SLANG_EXPORT PropertyType final : public Type {
 public:
     PropertyType() : Type(SymbolKind::PropertyType, "property", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::PropertyType; }
 };
 
 /// Represents a virtual interface type.
-class SLANG_EXPORT VirtualInterfaceType : public Type {
+class SLANG_EXPORT VirtualInterfaceType final : public Type {
 public:
     /// The type of interfaces that can be assigned to this virtual interface.
     const InstanceSymbol& iface;
@@ -490,6 +527,7 @@ public:
         isRealIface(isRealIface) {}
 
     ConstantValue getDefaultValueImpl() const;
+    void serializeTo(ASTSerializer& serializer) const;
 
     static const Type& fromSyntax(const ASTContext& context,
                                   const syntax::VirtualInterfaceTypeSyntax& syntax);
@@ -502,7 +540,7 @@ public:
 /// A given type name can have an arbitrary number of forward declarations
 /// in the same scope, so each symbol forms a linked list, headed by the
 /// actual type definition.
-class SLANG_EXPORT ForwardingTypedefSymbol : public Symbol {
+class SLANG_EXPORT ForwardingTypedefSymbol final : public Symbol {
 public:
     /// An optional restriction for the kind of type this can resolve to.
     ForwardTypeRestriction typeRestriction;
@@ -535,7 +573,7 @@ private:
 };
 
 /// Represents a type alias, which is introduced via a typedef or type parameter.
-class SLANG_EXPORT TypeAliasType : public Type {
+class SLANG_EXPORT TypeAliasType final : public Type {
 public:
     /// The declared type target of the alias.
     DeclaredType targetType;
@@ -571,11 +609,12 @@ private:
 
 /// An empty type symbol that indicates an error occurred while trying to
 /// resolve the type of some expression or declaration.
-class SLANG_EXPORT ErrorType : public Type {
+class SLANG_EXPORT ErrorType final : public Type {
 public:
     ErrorType() : Type(SymbolKind::ErrorType, "", SourceLocation()) {}
 
     ConstantValue getDefaultValueImpl() const { return nullptr; }
+    void serializeTo(ASTSerializer&) const {}
 
     static bool isKind(SymbolKind kind) { return kind == SymbolKind::ErrorType; }
 

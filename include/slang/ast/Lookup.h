@@ -54,39 +54,38 @@ enum class SLANG_EXPORT LookupFlags {
     /// Allow lookup to resolve to incomplete forward class types.
     AllowIncompleteForwardTypedefs = 1 << 5,
 
-    /// The lookup should not continue looking into parent scopes if the name
-    /// is not found in the initial search scope.
-    NoParentScope = 1 << 6,
-
     /// Additional name selectors are not allowed in the final result.
-    NoSelectors = 1 << 7,
+    NoSelectors = 1 << 6,
 
     /// Lookup is allowed to return the root symbol via the '$root' scope specifier.
-    AllowRoot = 1 << 8,
+    AllowRoot = 1 << 7,
 
     /// Lookup is allowed to return the nearest compilation unit via the '$unit' scope specifier.
-    AllowUnit = 1 << 9,
+    AllowUnit = 1 << 8,
 
     /// Lookup is resolving an interface port connection expression.
-    IfacePortConn = 1 << 10,
+    IfacePortConn = 1 << 9,
 
     /// Lookup is within a static initializer expression.
-    StaticInitializer = 1 << 11,
+    StaticInitializer = 1 << 10,
 
     /// Lookup is happening within a type reference expression.
-    TypeReference = 1 << 12,
+    TypeReference = 1 << 11,
 
     /// Always allow upward name lookup to occur, even with simple identifiers.
-    AlwaysAllowUpward = 1 << 13,
+    AlwaysAllowUpward = 1 << 12,
 
     /// Disallow resolving a name to a member declared or imported into
     /// the $unit compilation unit scope.
-    DisallowUnitReferences = 1 << 14,
+    DisallowUnitReferences = 1 << 13,
+
+    /// Allow unnamed generate blocks to be looked up by their external name.
+    AllowUnnamedGenerate = 1 << 14,
 
     /// Treat this lookup as hierarchical even if it's a simple name.
     ForceHierarchical = AllowDeclaredAfter | NoUndeclaredErrorIfUninstantiated
 };
-SLANG_BITMASK(LookupFlags, DisallowUnitReferences)
+SLANG_BITMASK(LookupFlags, AllowUnnamedGenerate)
 
 /// Flags that indicate additional details about the result of a lookup operation.
 enum class SLANG_EXPORT LookupResultFlags : uint8_t {
@@ -111,9 +110,12 @@ enum class SLANG_EXPORT LookupResultFlags : uint8_t {
 
     /// The lookup was resolved through a forwarded typedef. Some language
     /// rules restrict where this can be done.
-    FromForwardTypedef = 1 << 4
+    FromForwardTypedef = 1 << 4,
+
+    /// The lookup was resolved through an interface port connection.
+    IfacePort = 1 << 5
 };
-SLANG_BITMASK(LookupResultFlags, FromForwardTypedef)
+SLANG_BITMASK(LookupResultFlags, IfacePort)
 
 /// This type denotes the ordering of symbols within a particular scope, for the purposes of
 /// determining whether a found symbol is visible compared to the given location.
@@ -173,6 +175,9 @@ struct SLANG_EXPORT LookupResult {
 
     /// Flags that specify additional information about the result of the lookup.
     bitmask<LookupResultFlags> flags;
+
+    /// The portion of the name lookup syntax that resulted in this symbol being found.
+    SourceRange nameRange;
 
     /// A structure that represents a selection of a single member from the resulting
     /// symbol found during a lookup operation.
@@ -261,11 +266,11 @@ public:
                                      const ASTContext& context, LookupResult& result);
 
     /// Applies the given @a selectors to the @a virtualInterface type and returns the
-    /// selected child in @result -- if any errors occur, diagnostics are issued to
+    /// selected child in @a result -- if any errors occur, diagnostics are issued to
     /// the result object and nullptr is returned.
     static void selectChild(const Type& virtualInterface, SourceRange range,
-                            std::span<LookupResult::Selector> selectors, const ASTContext& context,
-                            LookupResult& result);
+                            std::span<const LookupResult::Selector> selectors,
+                            const ASTContext& context, LookupResult& result);
 
     /// Searches for a class with the given @a name within @a context -- if no symbol is
     /// found, or if the found symbol is not a class type, appropriate diagnostics are issued.
@@ -325,6 +330,11 @@ public:
     /// and returns true. Otherwise returns false.
     static bool findAssertionLocalVar(const ASTContext& context, const syntax::NameSyntax& name,
                                       LookupResult& result);
+
+    /// Searches @a scope for a member whose name is similar to @a name (typo correction).
+    /// If a close enough match is found, a NoteDidYouMean note is appended to @a diag and
+    /// the typo-correction count in the compilation is incremented.
+    static void addTypoCorrectionNote(Diagnostic& diag, std::string_view name, const Scope& scope);
 
 private:
     Lookup() = default;

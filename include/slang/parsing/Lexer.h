@@ -11,6 +11,7 @@
 #include "slang/parsing/LexerFacts.h"
 #include "slang/parsing/Token.h"
 #include "slang/text/SourceLocation.h"
+#include "slang/util/FlatMap.h"
 #include "slang/util/LanguageVersion.h"
 #include "slang/util/SmallVector.h"
 #include "slang/util/Util.h"
@@ -18,13 +19,54 @@
 namespace slang {
 
 class BumpAllocator;
+class SourceManager;
 
-}
+} // namespace slang
 
 namespace slang::parsing {
 
+/// A handler for a specific kind of directive embedded in comments in the
+/// user source text.
+struct CommentHandler {
+    /// The kind of directive this handler is for.
+    enum Kind {
+        /// A region that should be skipped (as if it were a pragma protect region).
+        Protect,
+
+        /// A region that should be skipped (as if it were commented out).
+        TranslateOff,
+
+        /// Turns linting on for one or more warnings.
+        LintOn,
+
+        /// Turns linting off for one or more warnings.
+        LintOff,
+
+        /// Saves the current lint state in a stack.
+        LintSave,
+
+        /// Restore a previously set lint state.
+        LintRestore
+    };
+
+    /// The kind of comment handler this is.
+    Kind kind;
+
+    /// For region handler, the text that marks the end of the region.
+    std::string_view endRegion;
+
+    CommentHandler() = default;
+    CommentHandler(Kind kind, std::string_view endRegion = {}) : kind(kind), endRegion(endRegion) {}
+};
+
+using CommentHandlerMap =
+    flat_hash_map<std::string_view, flat_hash_map<std::string_view, CommentHandler>>;
+
 /// Contains various options that can control lexing behavior.
 struct SLANG_EXPORT LexerOptions {
+    /// A map of comment handlers to use when lexing directives inside comments.
+    CommentHandlerMap commentHandlers;
+
     /// The maximum number of errors that can occur before the rest of the source
     /// buffer is skipped.
     uint32_t maxErrors = 16;
@@ -36,9 +78,9 @@ struct SLANG_EXPORT LexerOptions {
     /// for compatibility with old Verilog tools.
     bool enableLegacyProtect = false;
 
-    /// A flag to enable the interpretation of non-standard line comment pragmas
-    /// disabling parts of the input for synthesis.
-    bool enableTranslateOnOffCompat = false;
+    /// If true, the preprocessor will allow trailing spaces after the continuation character
+    /// in macro definitions.
+    bool allowMacroTrailingSpace = false;
 };
 
 /// Possible encodings for encrypted text used in a pragma protect region.
@@ -53,7 +95,7 @@ enum class SLANG_EXPORT ProtectEncoding { UUEncode, Base64, QuotedPrintable, Raw
 class SLANG_EXPORT Lexer {
 public:
     Lexer(SourceBuffer buffer, BumpAllocator& alloc, Diagnostics& diagnostics,
-          LexerOptions options = LexerOptions{});
+          SourceManager& sourceManager, LexerOptions options = LexerOptions{});
 
     // Not copyable
     Lexer(const Lexer&) = delete;
@@ -76,25 +118,48 @@ public:
     /// Returns the library with which the lexer's source buffer is associated.
     const SourceLibrary* getLibrary() const { return library; }
 
-    /// Concatenates two tokens together; used for macro pasting.
-    static Token concatenateTokens(BumpAllocator& alloc, Token left, Token right);
+    /// Returns the BufferID of the source buffer being lexed.
+    BufferID getBufferId() const { return bufferId; }
+
+    /// When set to true, '/' is not treated as the start of a comment during trivia
+    /// scanning. Used when parsing library map file paths that may contain /* glob patterns.
+    void setFilePathMode(bool enable) { filePathMode = enable; }
+
+    /// Concatenates two tokens together. This may result in more than one output token
+    /// if the right hand token being concatenated ends up splitting and being re-lexed.
+    /// Returns true if the concatenation succeeded and false otherwise.
+    static bool concatenateTokens(BumpAllocator& alloc, SourceManager& sourceManager,
+                                  const LexerOptions& options, Token left, Token right,
+                                  SmallVectorBase<Token>& results);
 
     /// Converts a range of tokens into a string literal; used for macro stringification.
-    static Token stringify(Lexer& parentLexer, Token startToken, std::span<Token> bodyTokens,
-                           Token endToken);
+    static Token stringify(BumpAllocator& alloc, SourceManager& sourceManager,
+                           const LexerOptions& options, Token startToken,
+                           std::span<Token> bodyTokens, Token endToken);
 
     /// Converts a range of tokens into a block comment; used for macro expansion.
-    static Trivia commentify(BumpAllocator& alloc, std::span<Token> tokens);
+    static Trivia commentify(BumpAllocator& alloc, SourceManager& sourceManager,
+                             const LexerOptions& options, std::span<Token> tokens);
 
     /// Splits the given token at the specified offset into its raw source text. The trailing
     /// portion of the split is lexed into new tokens and appened to @a results
     static void splitTokens(BumpAllocator& alloc, Diagnostics& diagnostics,
-                            const SourceManager& sourceManager, Token sourceToken, size_t offset,
-                            KeywordVersion keywordVersion, SmallVectorBase<Token>& results);
+                            SourceManager& sourceManager, const LexerOptions& options,
+                            Token sourceToken, size_t offset, KeywordVersion keywordVersion,
+                            SmallVectorBase<Token>& results);
+
+    /// Given a char index into a processed string literal and the raw string representing
+    /// that literal, returns the offset within the raw string that matches that character.
+    /// This essentially backs out the processing of things like escape character codes.
+    ///
+    /// If the given character index ends up pointing at a hex or octal encoded escape character,
+    /// the @a charLen parameter will receive the length of that escape sequence. Otherwise it
+    /// will be set to 1.
+    static size_t getLocForStringChar(std::string_view rawStr, size_t charIndex, size_t& charLen);
 
 private:
-    Lexer(BufferID bufferId, std::string_view source, const char* startPtr, BumpAllocator& alloc,
-          Diagnostics& diagnostics, LexerOptions options);
+    Lexer(BufferID bufferId, std::string_view source, BumpAllocator& alloc,
+          Diagnostics& diagnostics, SourceManager& sourceManager, LexerOptions options);
 
     Token lexToken(KeywordVersion keywordVersion);
     Token lexEscapeSequence(bool isMacroName);
@@ -117,8 +182,9 @@ private:
     bool scanUTF8Char(bool alreadyErrored, uint32_t* code, int& computedLen);
     void scanEncodedText(ProtectEncoding encoding, uint32_t expectedBytes, bool singleLine,
                          bool legacyProtectedMode);
-    void scanProtectComment();
-    void scanTranslateOffSection();
+    bool tryApplyCommentHandler();
+    void scanDisabledRegion(std::string_view firstWord, std::string_view secondWord,
+                            std::optional<std::string_view> thirdWord, DiagCode unclosedDiag);
 
     template<typename... Args>
     Token create(TokenKind kind, Args&&... args);
@@ -165,6 +231,10 @@ private:
     // the number of errors that have occurred while lexing the current buffer
     uint32_t errorCount = 0;
 
+    // When true, '/' is not treated as the start of a comment in trivia scanning.
+    // Used when parsing library map file paths that may contain /* glob patterns.
+    bool filePathMode = false;
+
     // temporary storage for building arrays of trivia
     SmallVector<Trivia, 32> triviaBuffer;
 
@@ -172,6 +242,7 @@ private:
     SmallVector<char> stringBuffer;
 
     const SourceLibrary* library = nullptr;
+    SourceManager& sourceManager;
 };
 
 } // namespace slang::parsing

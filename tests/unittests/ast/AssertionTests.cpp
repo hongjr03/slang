@@ -50,8 +50,7 @@ TEST_CASE("Concurrent assertion expressions") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
     string a;
-    logic b;
-    int c,d,e;
+    logic b,c,d,e;
 
     foo: assert property (a);
     assert property (a ##1 b ##[+] c ##[*] d ##[1:5] e);
@@ -74,7 +73,7 @@ module m;
     assert property (not a ##1 b);
     assert property (accept_on(b) sync_reject_on(c) sync_accept_on(d) reject_on(e) b ##1 c);
     assume property (if (b) a ##1 c else d ##1 e);
-    cover property (case (b) 1, 2, 3: 1 ##1 b; 4: a and b; default: 1 |-> b; endcase);
+    cover property (case (b) 1, 2, 3: 1 ##1 b; 4: a and b; default: 1 or b; endcase);
     restrict property (@(posedge b) ((b) and b) ##0 b);
 endmodule
 )");
@@ -95,7 +94,7 @@ endfunction
 
 module m;
     int a[];
-    int b;
+    logic b;
     chandle c;
     C d = new;
     logic o;
@@ -156,16 +155,16 @@ module m;
     assert property (n.a(3));
     assert property (b);
 
-    int c, d;
+    logic c, d;
     sequence b;
         ##1 c ##1 d;
     endsequence
 endmodule
 
 module n;
-    int c, d;
+    logic c, d;
     property a(int i, foo = 1);
-        ##1 c ##1 d ##1 i;
+        ##1 c ##1 d ##1 i > 0;
     endproperty
 endmodule
 )");
@@ -206,8 +205,8 @@ TEST_CASE("Assertion instance arg type checking") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
     int foo[];
-    assert property (a(1, 1 iff 2, foo, 1 and 2));
-    assert property (a(1 iff 2, 1, 1));
+    assert property (a(1, 1 iff 1, foo, 1 and 1));
+    assert property (a(1 iff 1, 1, 1));
     assert property (a(1, 1, foo[*]));
 
     int e;
@@ -241,19 +240,19 @@ module m;
 
     assert property (s1($, 5));
     assert property (s1(bar, 9.2));
-    assert property (s3(9));
-    assert property (s4(1 and 2));
+    assert property (s3(1));
+    assert property (s4(1 and 1));
 
     sequence s1(a, int b);
-        s2(a) ##1 bar[b:0];
+        s2(a) ##1 bar[b:0] > 0;
     endsequence
 
     sequence s2(foo);
-        1 ##[0:foo] 2 ##1 foo;
+        1 ##[0:foo] 1 ##1 foo > 0;
     endsequence
 
     sequence s3(sequence a);
-        1 ##[0:a] 2;
+        1 ##[0:a] 1;
     endsequence
 
     sequence s4(foo);
@@ -278,7 +277,7 @@ TEST_CASE("More complex sequence arg expansion") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
     sequence s1;
-        int foo;
+        logic foo;
         s2(s2(foo));
     endsequence
 
@@ -347,13 +346,13 @@ module m;
     int baz;
     sequence s2;
         int j, k = j;
-        first_match(j, !j, j + k, baz = 1, baz++);
+        first_match(j > 0, !j, j + k, baz = 1, baz++);
     endsequence
 
     typedef int Foo;
     property p;
         Foo u, v;
-        s(u) and v and s2;
+        s(u) and v > 0 and s2;
     endproperty
 
     assert property (p);
@@ -395,7 +394,7 @@ TEST_CASE("Sequence triggered method") {
 module m;
     wire clk, ready;
     sequence e1;
-        @(posedge clk) $rose(ready) ##1 1 ##1 2;
+        @(posedge clk) $rose(ready) ##1 1 ##1 1;
     endsequence
 
     sequence rule;
@@ -468,13 +467,14 @@ module m;
     endsequence
 
     sequence s5(a, event b, sequence c);
-        a ##1 c ##1 @b 1;
+        a > 0 ##1 c ##1 @b 1;
     endsequence
 
     event e;
     sequence s6;
         int i;
-        s5(i + 1, e, i + 1).triggered ##1 s5(i, e, i).triggered;
+        logic j;
+        s5(i + 1, e, i + 1 > 0).triggered ##1 s5(i, e, j).triggered;
     endsequence
 endmodule
 )");
@@ -718,7 +718,7 @@ module m;
         restrict property (@(posedge clk) i);
         expect (@(posedge clk) i);
 
-        restrict property (@(posedge clk) i) i++;
+        restrict property (@(posedge clk) i) i = 0;
     end
 endmodule
 )");
@@ -848,7 +848,8 @@ endmodule
 TEST_CASE("Local var formal arg") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
-    int a,b,c;
+    logic a;
+    int b,c;
     int data_in, data_out;
 
     sequence sub_seq2(local inout int lv);
@@ -858,7 +859,7 @@ module m;
 
     sequence seq2;
         int v1;
-        (c, v1 = data_in)
+        (c > 0, v1 = data_in)
         ##1 sub_seq2(v1)
         ##1 (data_out == v1);
     endsequence
@@ -925,7 +926,7 @@ endmodule
 TEST_CASE("Match items + empty match") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
-    int a,b,c;
+    logic a,b,c;
     sequence s;
         int x,e;
         a ##1 (b[*0:1], x = e) ##1 c[*];
@@ -1208,33 +1209,13 @@ TEST_CASE("$past in $bits regress GH #509") {
 module top;
     logic clk, reset, a, b, c;
     assert property(@(posedge clk) disable iff (reset)
-        a |-> {500-$bits($past(b)){1'b1}});
+        a |-> {500-$bits($past(b)){1'b1}} != 0);
 endmodule
 )");
 
     Compilation compilation;
     compilation.addSyntaxTree(tree);
     NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Assertion local var formal arg multiple drivers") {
-    auto tree = SyntaxTree::fromText(R"(
-sequence s1(local output int x, y);
-    ##1 1;
-endsequence
-
-sequence s2;
-    int foo;
-    s1(foo, foo);
-endsequence
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::LocalFormalVarMultiAssign);
 }
 
 TEST_CASE("Assertion local var in event expression") {
@@ -1323,945 +1304,6 @@ endmodule
     CHECK(diags[2].code == diag::InferredValDefArg);
 }
 
-TEST_CASE("Checker declarations") {
-    auto tree = SyntaxTree::fromText(R"(
-checker my_check1 (logic test_sig, event clock);
-    default clocking @clock; endclocking
-    property p(logic sig); 1; endproperty
-    a1: assert property (p (test_sig));
-    c1: cover property (!test_sig ##1 test_sig);
-endchecker : my_check1
-
-checker my_check2 (logic a, b);
-    a1: assert #0 ($onehot0({a, b}));
-    c1: cover #0 (a == 0 && b == 0);
-    c2: cover #0 (a == 1);
-    c3: cover #0 (b == 1);
-endchecker : my_check2
-
-checker my_check3 (logic a, b, event clock, output bit failure, undef);
-    default clocking @clock; endclocking
-    a1: assert property ($onehot0({a, b})) failure = 1'b0; else failure = 1'b1;
-    a2: assert property ($isunknown({a, b})) undef = 1'b0; else undef = 1'b1;
-endchecker : my_check3
-
-checker my_check4 (input logic in,
-                   en = 1'b1, // default value
-                   event clock,
-                   output int ctr = 0); // initial value
-    default clocking @clock; endclocking
-    always_ff @clock
-        if (en && in) ctr <= ctr + 1;
-    a1: assert property (ctr < 5);
-endchecker : my_check4
-
-module m;
-    wire clk1, clk2, rst1, rst2;
-
-    default clocking @clk1; endclocking
-    default disable iff rst1;
-    checker c1;
-    endchecker : c1
-    checker c2;
-        default clocking @clk2; endclocking
-        default disable iff rst2;
-    endchecker : c2
-endmodule : m
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Checker instantiation") {
-    auto tree = SyntaxTree::fromText(R"(
-checker mutex (logic [31:0] sig, event clock, output bit failure);
-    assert property (@clock $onehot0(sig))
-        failure = 1'b0; else failure = 1'b1;
-endchecker : mutex
-
-module m1(wire [31:0] bus, logic clk);
-    logic res, scan;
-    mutex check_bus(bus, posedge clk, res);
-    always @(posedge clk) scan <= res;
-endmodule : m1
-
-checker c1(event clk, logic[7:0] a, b);
-    logic [7:0] sum;
-    always_ff @(clk) begin
-        sum <= a + 1'b1;
-        p0: assert property (sum < 10);
-    end
-    p1: assert property (@clk sum < 10);
-    p2: assert property (@clk a != b);
-    p3: assert #0 ($onehot(a));
-endchecker
-
-module m2(input logic rst, clk, logic en, logic[7:0] in1, in2,
-          in_array [20:0]);
-    c1 check_outside(posedge clk, in1, in2);
-    always @(posedge clk) begin
-        automatic logic [7:0] v1=0;
-        if (en) begin
-            // v1 is automatic, so current procedural value is used
-            c1 check_inside(posedge clk, in1, v1);
-        end
-        for (int i = 0; i < 4; i++) begin
-            v1 = v1+5;
-            if (i != 2) begin
-                // v1 is automatic, so current procedural value is used
-                c1 check_loop(posedge clk, in1, in_array[v1]);
-            end
-        end
-    end
-endmodule : m2
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Checker formal port error checking") {
-    auto tree = SyntaxTree::fromText(R"(
-checker c(input i, j[3], local output int k, property p);
-endchecker
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::CheckerPortDirectionType);
-    CHECK(diags[1].code == diag::InvalidArrayElemType);
-    CHECK(diags[2].code == diag::LocalNotAllowed);
-    CHECK(diags[3].code == diag::CheckerOutputBadType);
-}
-
-TEST_CASE("Checker port connections") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    real prq;
-    checker c(a, b, output bit c, input real r = prq);
-        initial assert(real'(a + b) + r > 1);
-        always_comb c = 1;
-    endchecker
-endpackage
-
-module m;
-    bit d;
-    initial p::c c1(1, 2, d, 3.14);
-
-    int a, b;
-    real r;
-
-    import p::*;
-    c c2 [3](1, 2, e, 3.14);
-    c c3 [1:2][3:2] (.*, .c(foo), .r);
-    c c4(.*, .c(foo));
-    c c5(1, 2, e);
-    c c6(.a(1), .b, .c(foo));
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Checker port connection errors") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    real prq;
-    bit bc;
-    checker c(a, b, output bit c = bc, input real r = prq);
-        initial assert(a + b + r > 1);
-        always_comb c = 1;
-
-        checker d(input untyped);
-        endchecker
-
-        d d1();
-    endchecker
-endpackage
-
-module m;
-    import p::*;
-    c c1(1, , 3, 4, 5);
-    c c2();
-    c c3(.a(), .b(1), .q(3));
-    c c4(.*, .c(), .r(), 5);
-
-    int b;
-
-    initial c c5(1, 2, foo);
-    c c6(1, 2, bar);
-
-    checker q(output int r = unknown); endchecker
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 19);
-    CHECK(diags[0].code == diag::ExpectedIdentifier);
-    CHECK(diags[1].code == diag::CheckerArgCannotBeEmpty);
-    CHECK(diags[2].code == diag::ExpressionNotAssignable);
-    CHECK(diags[3].code == diag::SignConversion);
-    CHECK(diags[4].code == diag::WidthExpand);
-    CHECK(diags[5].code == diag::TooManyPortConnections);
-    CHECK(diags[6].code == diag::UnconnectedArg);
-    CHECK(diags[7].code == diag::UnconnectedArg);
-    CHECK(diags[8].code == diag::UnconnectedArg);
-    CHECK(diags[9].code == diag::UnconnectedArg);
-    CHECK(diags[10].code == diag::CheckerArgCannotBeEmpty);
-    CHECK(diags[11].code == diag::PortDoesNotExist);
-    CHECK(diags[12].code == diag::ImplicitNamedPortNotFound);
-    CHECK(diags[13].code == diag::UsedBeforeDeclared);
-    CHECK(diags[14].code == diag::CheckerArgCannotBeEmpty);
-    CHECK(diags[15].code == diag::CheckerArgCannotBeEmpty);
-    CHECK(diags[16].code == diag::MixingOrderedAndNamedPorts);
-    CHECK(diags[17].code == diag::UndeclaredIdentifier);
-    CHECK(diags[18].code == diag::UndeclaredIdentifier);
-}
-
-TEST_CASE("Checker invalid instantiations") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    int e;
-    function automatic func(int a, b); endfunction
-    class cls; endclass
-endpackage
-
-checker check;
-endchecker
-
-module m;
-    c c1(posedge clk, $, 3 + 4);
-    initial d d1(posedge clk, $, 3 + 4);
-
-    p::e e1(posedge clk, $, 3 + 4);
-
-    p::func func(1, 2);
-    p::cls cls(1, 2);
-
-    check #(1, 2) c2();
-
-    initial begin
-        fork : asdf
-            if (1) begin : bazz
-                check c1();
-            end
-        join_none
-    end
-
-    checker cfoo;
-        initial check c4();
-    endchecker
-
-    cfoo foo1();
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 8);
-    CHECK(diags[0].code == diag::UnknownModule);
-    CHECK(diags[1].code == diag::UndeclaredIdentifier);
-    CHECK(diags[2].code == diag::NotAChecker);
-    CHECK(diags[3].code == diag::CheckerFuncBadInstantiation);
-    CHECK(diags[4].code == diag::CheckerClassBadInstantiation);
-    CHECK(diags[5].code == diag::CheckerParameterAssign);
-    CHECK(diags[6].code == diag::CheckerInForkJoin);
-    CHECK(diags[7].code == diag::CheckerInCheckerProc);
-}
-
-TEST_CASE("Assertion ports invalid directions") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    sequence s(local ref int r); 1; endsequence
-    checker c(inout int i); endchecker
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 2);
-    CHECK(diags[0].code == diag::AssertionPortRef);
-    CHECK(diags[1].code == diag::CheckerPortInout);
-}
-
-TEST_CASE("Invalid instantiations inside checkers") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-endmodule
-
-package p;
-endpackage
-
-checker c;
-    module n;
-    endmodule
-
-    package p2;
-    endpackage
-
-    checker c2;
-    endchecker
-
-    c2 asdf();
-    m m1();
-endchecker
-
-checker c2;
-    int i = j;
-endchecker
-
-module n;
-    c c1();
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 5);
-    CHECK(diags[0].code == diag::NotAllowedInChecker);
-    CHECK(diags[1].code == diag::InvalidInstanceForParent);
-    CHECK(diags[2].code == diag::NotAllowedInChecker);
-    CHECK(diags[3].code == diag::InvalidInstanceForParent);
-    CHECK(diags[4].code == diag::UndeclaredIdentifier);
-}
-
-TEST_CASE("Upward lookup from checkers") {
-    auto tree = SyntaxTree::fromText(R"(
-module m;
-    logic req, gnt;
-endmodule :m
-
-module top;
-    logic clock, reset;
-    m m1();
-    request_granted c1(clock, reset);
-endmodule : top
-
-checker request_granted(clk, rst);
-    a1: assert property (@clk disable iff (rst) m1.req |=> m1.gnt);
-endchecker : request_granted
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Hierarchical lookup into checkers disallowed") {
-    auto tree = SyntaxTree::fromText(R"(
-checker c(q);
-    int i;
-endchecker
-
-module m;
-    int j = c.i + c.q;
-    c c1(3);
-    int k = c1.i + c1.q;
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 4);
-    CHECK(diags[0].code == diag::CheckerHierarchical);
-    CHECK(diags[1].code == diag::CheckerHierarchical);
-    CHECK(diags[2].code == diag::CheckerHierarchical);
-    CHECK(diags[3].code == diag::CheckerHierarchical);
-}
-
-TEST_CASE("Nested checker name lookup") {
-    auto tree = SyntaxTree::fromText(R"(
-checker c(q);
-    int i;
-    checker d(r);
-        int j = i;
-        int k = q + r;
-    endchecker
-
-    d d1(q);
-endchecker
-
-module m;
-    c c1(3);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Recursive checker instances -- ok") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    checker c(q);
-        if (q < 4) begin
-            c c_next(q + 1);
-            p::c c_next2(q + 1);
-        end
-    endchecker
-endpackage
-
-module m;
-    p::c c1(1);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Recursive checker instances -- bad") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    checker c(q);
-        c c_next(q + 1);
-    endchecker
-endpackage
-
-module m;
-    p::c c1(1);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::MaxInstanceDepthExceeded);
-}
-
-TEST_CASE("Checkers diagnostic expansion stack") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    checker c(q);
-        d d1(q);
-    endchecker
-
-    checker d(r);
-        string a;
-        int b,c,d,e;
-
-        assert property (a ##1 b ##[+] c ##[*] d ##[1:5] e + r);
-    endchecker
-endpackage
-
-module m;
-    p::c c1(1);
-    p::c c2($);
-
-    checker e(q);
-        f f1(q);
-    endchecker
-
-    checker f(r);
-        int foo[$];
-        int j = foo + r;
-    endchecker
-
-    e e1(5);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diagnostics = compilation.getAllDiagnostics();
-    std::string result = "\n" + report(diagnostics);
-    CHECK(result == R"(
-source:17:13: error: unbounded literal '$' not allowed here
-    p::c c2($);
-            ^
-source:4:14: note: expanded here
-        d d1(q);
-             ^
-source:11:62: note: expanded here
-        assert property (a ##1 b ##[+] c ##[*] d ##[1:5] e + r);
-                                                             ^
-source:25:21: error: invalid operands to binary expression ('queue of int' and 'int')
-        int j = foo + r;
-                ~~~ ^ ~
-source:20:11: note: while expanding checker 'f'
-        f f1(q);
-          ^
-source:28:7: note: while expanding checker 'e'
-    e e1(5);
-      ^
-)");
-}
-
-TEST_CASE("Binding checker targets") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    checker c(q);
-    endchecker
-endpackage
-
-module m;
-    import p::*;
-endmodule
-
-module n;
-    m m1();
-    bind m c c1(1);
-    bind m p::c c2(1);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Binding checker errors") {
-    auto tree = SyntaxTree::fromText(R"(
-package p;
-    checker c(q);
-    endchecker
-endpackage
-
-module m;
-    import p::*;
-endmodule
-
-module n;
-    m m1();
-    bind m o o1();
-    bind o p::c c1(1);
-endmodule
-
-module o;
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::BindUnderBind);
-}
-
-TEST_CASE("UDNT decl in checker") {
-    auto tree = SyntaxTree::fromText(R"(
-nettype logic l;
-checker s;
-    l r;
-endchecker
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::NotAllowedInChecker);
-}
-
-TEST_CASE("Inferred value sys funcs in checkers") {
-    auto tree = SyntaxTree::fromText(R"(
-checker check_in_context (logic test_sig,
-                          event clock = $inferred_clock,
-                          logic reset = $inferred_disable);
-    property p(logic sig); 1; endproperty
-    a1: assert property (@clock disable iff (reset) p(test_sig));
-    c1: cover property (@clock !reset throughout !test_sig ##1 test_sig);
-endchecker : check_in_context
-
-module m(logic rst);
-    wire clk;
-    logic a, en;
-    wire b = a && en;
-
-    // No context inference
-    check_in_context my_check1(.test_sig(b), .clock(clk), .reset(rst));
-
-    always @(posedge clk) begin
-        a <= 1;
-        if (en) begin
-            // inferred from context:
-            // .clock(posedge clk)
-            // .reset(1'b0)
-            check_in_context my_check2(a);
-        end
-        en <= 1;
-    end
-endmodule : m
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Covergroups in checkers") {
-    auto tree = SyntaxTree::fromText(R"(
-checker my_check(logic clk, active);
-    bit active_d1 = 1'b0;
-    always_ff @(posedge clk) begin
-        active_d1 <= active;
-    end
-
-    covergroup cg_active @(posedge clk);
-        cp_active : coverpoint active
-        {
-            bins idle = { 1'b0 };
-            bins active = { 1'b1 };
-        }
-        cp_active_d1 : coverpoint active_d1
-        {
-            bins idle = { 1'b0 };
-            bins active = { 1'b1 };
-        }
-        option.per_instance = 1;
-    endgroup
-    cg_active cg_active_1 = new();
-endchecker : my_check
-
-checker op_test1 (logic clk, vld_1, vld_2, logic [3:0] opcode);
-    bit [3:0] opcode_d1;
-
-    always_ff @(posedge clk) opcode_d1 <= opcode;
-
-    covergroup cg_op;
-        cp_op : coverpoint opcode_d1;
-    endgroup: cg_op
-    cg_op cg_op_1 = new();
-
-    sequence op_accept;
-        @(posedge clk) vld_1 ##1 (vld_2, cg_op_1.sample());
-    endsequence
-    cover property (op_accept);
-endchecker
-
-checker op_test2 (logic clk, vld_1, vld_2, logic [3:0] opcode);
-    bit [3:0] opcode_d1;
-
-    always_ff @(posedge clk) opcode_d1 <= opcode;
-
-    covergroup cg_op with function sample(bit [3:0] opcode_d1);
-        cp_op : coverpoint opcode_d1;
-    endgroup: cg_op
-    cg_op cg_op_1 = new();
-
-    sequence op_accept;
-        @(posedge clk) vld_1 ##1 (vld_2, cg_op_1.sample(opcode_d1));
-    endsequence
-    cover property (op_accept);
-endchecker
-
-module m;
-    logic clk;
-    my_check c1(clk, 1);
-    op_test1 t1(clk, 1, 2, 3);
-    op_test2 t2(clk, 1, 2, 3);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Checker LRM examples") {
-    auto tree = SyntaxTree::fromText(R"(
-typedef enum { cover_none, cover_all } coverage_level;
-checker assert_window1 (
-    logic test_expr,
-    untyped start_event,
-    untyped end_event,
-    event clock = $inferred_clock,
-    logic reset = $inferred_disable,
-    string error_msg = "violation",
-    coverage_level clevel = cover_all
-);
-    default clocking @clock; endclocking
-    default disable iff reset;
-    bit window = 1'b0, next_window = 1'b1;
-
-    always_comb begin
-        if (reset || (window && end_event))
-            next_window = 1'b0;
-        else if (!window && start_event)
-            next_window = 1'b1;
-        else
-            next_window = window;
-    end
-
-    always_ff @clock
-        window <= next_window;
-
-    property p_window;
-        start_event && !window |=> test_expr[+] ##0 end_event;
-    endproperty
-
-    a_window: assert property (p_window) else $error(error_msg);
-
-    generate if (clevel != cover_none) begin : cover_b
-        cover_window_open: cover property (start_event && !window)
-        $display("window_open covered");
-        cover_window: cover property (
-            start_event && !window
-            ##1 (!end_event && window) [*]
-            ##1 end_event && window
-        ) $display("window covered");
-    end : cover_b
-    endgenerate
-endchecker : assert_window1
-
-checker assert_window2 (
-    logic test_expr,
-    sequence start_event,
-    sequence end_event,
-    event clock = $inferred_clock,
-    logic reset = $inferred_disable,
-    string error_msg = "violation",
-    coverage_level clevel = cover_all
-);
-    default clocking @clock; endclocking
-    default disable iff reset;
-    bit window = 0;
-    let start_flag = start_event.triggered;
-    let end_flag = end_event.triggered;
-
-    function bit next_window (bit win);
-        if (reset || (win && end_flag))
-            return 1'b0;
-        if (!win && start_flag)
-            return 1'b1;
-        return win;
-    endfunction
-
-    always_ff @clock
-        window <= next_window(window);
-
-    property p_window;
-        start_flag && !window |=> test_expr[+] ##0 end_flag;
-    endproperty
-
-    a_window: assert property (p_window) else $error(error_msg);
-
-    generate if (clevel != cover_none) begin : cover_b
-        cover_window_open: cover property (start_flag && !window)
-        $display("window_open covered");
-        cover_window: cover property (
-            start_flag && !window
-            ##1 (!end_flag && window) [*]
-            ##1 end_flag && window
-        ) $display("window covered");
-    end : cover_b
-    endgenerate
-endchecker : assert_window2
-
-checker counter_model(logic flag);
-    bit [2:0] counter = '0;
-    always_ff @$global_clock
-        counter <= counter + 1'b1;
-    assert property (@$global_clock counter == 0 |-> flag);
-endchecker : counter_model
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Error checking for procedures inside checkers") {
-    auto tree = SyntaxTree::fromText(R"(
-wire clk;
-
-function void foo(); endfunction
-
-checker s;
-    int i;
-    final begin
-        i++;
-    end
-
-    always @(posedge clk) begin end
-
-    initial begin
-        fork join_none
-        #3 i++;
-        @(posedge clk) i++;
-    end
-
-    always_comb begin
-        i <= 3;
-        i = 4;
-        if (i > 3) begin
-            foo();
-        end
-    end
-
-    always_ff begin
-        @(posedge clk) i = 5;
-        fork join_any
-        #3 i++;
-    end
-
-    always_latch begin
-        i++;
-    end
-
-    always_comb disable fork;
-endchecker
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 10);
-    CHECK(diags[0].code == diag::AlwaysInChecker);
-    CHECK(diags[1].code == diag::InvalidStmtInChecker);
-    CHECK(diags[2].code == diag::CheckerTimingControl);
-    CHECK(diags[3].code == diag::InvalidStmtInChecker);
-    CHECK(diags[4].code == diag::CheckerBlockingAssign);
-    CHECK(diags[5].code == diag::InvalidStmtInChecker);
-    CHECK(diags[6].code == diag::CheckerTimingControl);
-    CHECK(diags[7].code == diag::BlockingInAlwaysFF);
-    CHECK(diags[8].code == diag::InvalidStmtInChecker);
-    CHECK(diags[9].code == diag::InvalidStmtInChecker);
-}
-
-TEST_CASE("Checker variables") {
-    auto tree = SyntaxTree::fromText(R"(
-checker observer_model(bit valid, reset);
-    default clocking @$global_clock; endclocking
-    rand bit flag;
-    m1: assume property (reset |=> !flag);
-    m2: assume property (!reset && flag |=> flag);
-    m3: assume property ($rising_gclk(flag) |-> valid);
-endchecker : observer_model
-
-checker reason_about_one_bit(bit [63:0] data1, bit [63:0] data2,
-                             event clock);
-    rand const bit [5:0] idx;
-    a1: assert property (@clock data1[idx] == data2[idx]);
-endchecker : reason_about_one_bit
-
-checker reason_about_all_bit(bit [63:0] data1, bit [63:0] data2,
-                             event clock);
-    a1: assert property (@clock data1 == data2);
-endchecker : reason_about_all_bit
-
-wire clock;
-checker data_legal(start_ev, end_ev, in_data, out_data);
-    rand const bit [$bits(in_data)-1:0] mem_data;
-    sequence transaction;
-        start_ev && (in_data == mem_data) ##1 end_ev[->1];
-    endsequence
-    a1: assert property (@clock transaction |-> out_data == mem_data);
-endchecker : data_legal
-
-checker data_legal_with_loc(start_ev, end_ev, in_data, out_data);
-    sequence transaction (loc_var);
-        (start_ev, loc_var = in_data) ##1 end_ev[->1];
-    endsequence
-
-    property data_legal;
-        bit [$bits(in_data)-1:0] mem_data;
-        transaction(mem_data) |-> out_data == mem_data;
-    endproperty
-
-    a1: assert property (@clock data_legal);
-endchecker : data_legal_with_loc
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-    NO_COMPILATION_ERRORS;
-}
-
-TEST_CASE("Checker variable errors") {
-    auto tree = SyntaxTree::fromText(R"(
-checker check1(bit a, b, event clk);
-    rand bit x, y, z, v;
-    assign x = a & b; // Illegal
-    always_comb
-        y = a & b; // Illegal
-    always_ff @clk
-        z <= a & b; // OK
-
-    initial v = 1'b0; // Illegal
-    bit w = 1'b0; // OK
-endchecker : check1
-
-module m;
-    wire clk;
-    check1 c(1, 0, clk);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 3);
-    CHECK(diags[0].code == diag::BlockingAssignToFreeVar);
-    CHECK(diags[1].code == diag::BlockingAssignToFreeVar);
-    CHECK(diags[2].code == diag::BlockingAssignToFreeVar);
-}
-
-TEST_CASE("Checker function restrictions") {
-    auto tree = SyntaxTree::fromText(R"(
-int i;
-
-function automatic int f1(output int o);
-    return 1;
-endfunction
-
-function automatic int f2(const ref int o);
-    return 1;
-endfunction
-
-module m;
-    int j;
-    checker check1(bit a, b, event clk);
-        int k;
-        always_comb begin
-            i = f1(i);
-            j = f1(i);
-            k = f1(i);
-            k = f2(i);
-        end
-    endchecker
-
-    wire clk;
-    check1 c(1, 0, clk);
-endmodule
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    auto& diags = compilation.getAllDiagnostics();
-    REQUIRE(diags.size() == 1);
-    CHECK(diags[0].code == diag::CheckerFuncArg);
-}
-
 TEST_CASE("Duplicate assertion local variable error") {
     auto tree = SyntaxTree::fromText(R"(
 module m;
@@ -2279,62 +1321,6 @@ endmodule
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::Redefinition);
-}
-
-TEST_CASE("Checker instantiation infinite loop regress 1") {
-    auto tree = SyntaxTree::fromText("checker\0module w\0w("sv);
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    // Just check no crashes.
-    compilation.getAllDiagnostics();
-}
-
-TEST_CASE("Checker instantiation infinite loop regress 2") {
-    auto tree = SyntaxTree::fromText("checker a a(;a(endchecker a("sv);
-
-    CompilationOptions options;
-    options.maxCheckerInstanceDepth = 16;
-
-    Compilation compilation(options);
-    compilation.addSyntaxTree(tree);
-
-    // Just check no crashes.
-    compilation.getAllDiagnostics();
-}
-
-TEST_CASE("Checker instantiation infinite loop regress 3") {
-    auto tree = SyntaxTree::fromText(R"(
-checker a waty (p_window) else $error(error_msg);
-
-module m5;
-    a aw1(1ss
-endmodule
-
-a aw1(1ss
-)");
-
-    CompilationOptions options;
-    options.maxCheckerInstanceDepth = 16;
-
-    Compilation compilation(options);
-    compilation.addSyntaxTree(tree);
-
-    // Just check no crashes.
-    compilation.getAllDiagnostics();
-}
-
-TEST_CASE("Checker port binding crash regress") {
-    auto tree = SyntaxTree::fromText(R"(
-checker(_e,[_e
-)");
-
-    Compilation compilation;
-    compilation.addSyntaxTree(tree);
-
-    // Just check no crashes.
-    compilation.getAllDiagnostics();
 }
 
 TEST_CASE("Assertion clocking events can't reference auto vars") {
@@ -2380,7 +1366,7 @@ TEST_CASE("Sequence nondegeneracy tests 1") {
 module top;
     string a;
     logic b;
-    int c, d, e;
+    logic c, d, e;
     assert property ({});
 endmodule
 )",
@@ -2429,7 +1415,7 @@ module top(a, b, e);
     input a;
     input b;
     input e;
-    int c, d;
+    logic c, d;
     logic clk;
 
     property p;
@@ -2458,7 +1444,7 @@ endmodule
     };
 
     test("!(2'b01 - 2'b01 + 3'b010 - 3'b010 + 4'b0010)", diag::SeqNoMatch);
-    test("2'b01 - 2'b01 + 3'b010 - 3'b010 + 4'b0010");
+    test("(2'b01 - 2'b01 + 3'b010 - 3'b010 + 4'b0010) > 0");
     test("a[*0] |-> b", diag::SeqOnlyEmpty);
     test("a[*1] |-> b");
     test("1'b1 ##1 b");
@@ -2580,8 +1566,8 @@ endmodule
 TEST_CASE("Sequence nondegeneracy tests 4") {
     auto tree = SyntaxTree::fromText(R"(
 module top;
-    int c, d;
-    property p(int i, foo = 1);
+    logic c, d;
+    property p(logic i, foo = 1);
 	    ##1 c ##1 d ##1 i;  // may be legal or not - depends on value of `i`
     endproperty
 
@@ -2603,13 +1589,13 @@ TEST_CASE("Sequence nondegeneracy tests 5") {
 module top;
     logic clk, reset, a, b;
     assert property(@(posedge clk) disable iff (reset)
-        a |-> {500-$bits($past(b)){1'b0}});  // illegal
+        a |-> {500-$bits($past(b)){1'b0}} != 0);  // illegal
 
     assert property(@(posedge clk) disable iff (reset)
-        {3 - 2{3'b111}});  // legal
+        {3 - 2{3'b111}} != 0);  // legal
 
     assert property(@(posedge clk) disable iff (reset)
-        {500 - $bits(b){1'b1}});  // legal
+        {500 - $bits(b){1'b1}} != 0);  // legal
 endmodule
 )");
 
@@ -2671,4 +1657,189 @@ endmodule
     auto& diags = compilation.getAllDiagnostics();
     REQUIRE(diags.size() == 1);
     CHECK(diags[0].code == diag::Redefinition);
+}
+
+TEST_CASE("Invalid property lookup crash regress") {
+    auto tree = SyntaxTree::fromText(R"(
+f(p1(,;property p1(,
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    compilation.getAllDiagnostics();
+}
+
+TEST_CASE("Explicit clocks specified in seq / prop in clocking block") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input clk, a);
+    clocking cb @(posedge clk);
+        sequence s;
+            @(posedge clk) a;
+        endsequence
+
+        property p;
+            @(posedge clk) a;
+        endproperty
+    endclocking
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 2);
+    CHECK(diags[0].code == diag::ExplicitClockInClockingBlock);
+    CHECK(diags[1].code == diag::ExplicitClockInClockingBlock);
+}
+
+TEST_CASE("matched method can only be used in a sequence") {
+    auto tree = SyntaxTree::fromText(R"(
+module m(input clk, a);
+    sequence s;
+        @(posedge clk) a;
+    endsequence
+
+    always @(posedge clk) begin
+        if (s.matched()) begin end
+    end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::SequenceMatchedOutsideAssertion);
+}
+
+TEST_CASE("Assertion local var isn't rewritten") {
+    auto tree = SyntaxTree::fromText(R"(
+sequence s(local int a);
+    (1, a++) ##1 1;
+endsequence
+
+module m(input clk);
+    assert property (@(posedge clk) s(1));
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Assertion vacuity checking") {
+    auto tree = SyntaxTree::fromText(R"(
+module top;
+    logic a, b;
+    cover property (a |-> b);
+    cover property (if (a) b);
+    cover property (if (a) b else b);
+    cover property (case (a) 0: b; 1: b; endcase);
+    cover property (case (a) 0: b; 1: b; default: b; endcase);
+    cover property (case (a) 0: b; 1: a |-> b; default: b; endcase);
+    cover property (not (a |=> b));
+    cover property (nexttime a);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 6);
+    CHECK(diags[0].code == diag::VacuousCover);
+    CHECK(diags[1].code == diag::VacuousCover);
+    CHECK(diags[2].code == diag::VacuousCover);
+    CHECK(diags[3].code == diag::VacuousCover);
+    CHECK(diags[4].code == diag::VacuousCover);
+    CHECK(diags[5].code == diag::VacuousCover);
+}
+
+TEST_CASE("Assertion instances in uninstantiated contexts -- GH #1512") {
+    auto tree = SyntaxTree::fromText(R"(
+module main
+  (
+   input wire clk,
+   input wire reset
+   );
+
+   wire a;
+
+   property delay (int CYCLES);
+      @(posedge clk) disable iff (reset) ($past(a, CYCLES));
+   endproperty
+
+   localparam int TICKS = 0;
+
+   if (TICKS < 0) begin: ticks_lt_zero
+      $warning("Property was given: %0d", -TICKS);
+      p: assume property (delay(-TICKS));
+   end
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Property expansion stack overflow regress") {
+    auto tree = SyntaxTree::fromText(R"(
+property p(o=o);
+    1;
+endproperty
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::RecursiveDefinition);
+}
+
+TEST_CASE("Bit-stream types allowed as assertion local variable declarations") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    logic clk;
+    sequence s;
+        // Fixed unpacked array of integral - bit-stream type, should be allowed
+        bit [11:0] ptr[2];
+        // Packed struct of integral - also a bit-stream type
+        struct packed { logic [7:0] a; logic [3:0] b; } ps;
+        // Plain integral - always allowed
+        int x;
+        1;
+    endsequence
+
+    property p;
+        bit [7:0] arr[4];
+        1;
+    endproperty
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+    NO_COMPILATION_ERRORS;
+}
+
+TEST_CASE("Unpacked array rejected as assertion sequence expression") {
+    auto tree = SyntaxTree::fromText(R"(
+module m;
+    int a[];
+    logic b;
+    assert property (a ##1 b);
+endmodule
+)");
+
+    Compilation compilation;
+    compilation.addSyntaxTree(tree);
+
+    auto& diags = compilation.getAllDiagnostics();
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == diag::AssertionExprType);
 }

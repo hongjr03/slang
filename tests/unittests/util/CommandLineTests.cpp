@@ -6,6 +6,12 @@
 #include "slang/text/SourceManager.h"
 #include "slang/util/CommandLine.h"
 
+// Test enum for enum command line option testing using SLANG_ENUM
+#define TM(x) x(Fast) x(Normal) x(Slow) x(VeryDetailedMode)
+
+SLANG_ENUM(TestMode, TM)
+#undef TM
+
 TEST_CASE("Test CommandLine -- basic") {
     std::optional<bool> a, b, longFlag, longFlag2;
     std::optional<std::string> c;
@@ -295,15 +301,15 @@ TEST_CASE("Test CommandLine -- user errors") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 9);
-    CHECK(errors[0] == "prog: expected value for argument '--foo'"s);
-    CHECK(errors[1] == "prog: invalid value '123f4' for integer argument '--foo'"s);
-    CHECK(errors[2] == "prog: expected value for argument '--bar'"s);
-    CHECK(errors[3] == "prog: invalid value '123.45g' for float argument '--bar'"s);
-    CHECK(errors[4] == "prog: invalid value 'asdf' for boolean argument '--frob=asdf'"s);
-    CHECK(errors[5] == "prog: more than one value provided for argument '--foo'"s);
-    CHECK(errors[6] == "prog: unknown command line argument '-D'"s);
-    CHECK(errors[7] == "prog: unknown command line argument '--frib', did you mean '--frob'?"s);
-    CHECK(errors[8] == "prog: no value provided for argument '--bar'"s);
+    CHECK(errors[0].message == "expected value for argument '--foo'"s);
+    CHECK(errors[1].message == "invalid value '123f4' for integer argument '--foo'"s);
+    CHECK(errors[2].message == "expected value for argument '--bar'"s);
+    CHECK(errors[3].message == "invalid value '123.45g' for float argument '--bar'"s);
+    CHECK(errors[4].message == "invalid value 'asdf' for boolean argument '--frob=asdf'"s);
+    CHECK(errors[5].message == "more than one value provided for argument '--foo'"s);
+    CHECK(errors[6].message == "unknown command line argument '-D'"s);
+    CHECK(errors[7].message == "unknown command line argument '--frib', did you mean '--frob'?"s);
+    CHECK(errors[8].message == "no value provided for argument '--bar'"s);
 }
 
 TEST_CASE("Test CommandLine -- grouping") {
@@ -386,7 +392,7 @@ TEST_CASE("Test CommandLine -- grouping error") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 1);
-    CHECK(errors[0] == "prog: unknown command line argument '-abc', did you mean '-a'?"s);
+    CHECK(errors[0].message == "unknown command line argument '-abc', did you mean '-a'?"s);
 }
 
 TEST_CASE("Test CommandLine -- grouping trailing error") {
@@ -403,7 +409,7 @@ TEST_CASE("Test CommandLine -- grouping trailing error") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 1);
-    CHECK(errors[0] == "prog: no value provided for argument 'c'"s);
+    CHECK(errors[0].message == "no value provided for argument 'c'"s);
 }
 
 TEST_CASE("Test CommandLine -- nearest match tests") {
@@ -416,8 +422,8 @@ TEST_CASE("Test CommandLine -- nearest match tests") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 2);
-    CHECK(errors[0] == "prog: unknown command line argument '--asdfasdf=asdfasdf'"s);
-    CHECK(errors[1] == "prog: unknown command line argument '--fooey', did you mean '--foo'?"s);
+    CHECK(errors[0].message == "unknown command line argument '--asdfasdf=asdfasdf'"s);
+    CHECK(errors[1].message == "unknown command line argument '--fooey', did you mean '--foo'?"s);
 }
 
 TEST_CASE("Test CommandLine -- positional not allowed") {
@@ -430,7 +436,7 @@ TEST_CASE("Test CommandLine -- positional not allowed") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 1);
-    CHECK(errors[0] == "prog: positional arguments are not allowed (see e.g. 'asdf')"s);
+    CHECK(errors[0].message == "positional arguments are not allowed (see e.g. 'asdf')"s);
 }
 
 TEST_CASE("Test CommandLine -- plusarg errors") {
@@ -447,9 +453,9 @@ TEST_CASE("Test CommandLine -- plusarg errors") {
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.size() == 3);
-    CHECK(errors[0] == "prog: unknown command line argument '+unknown'"s);
-    CHECK(errors[1] == "prog: no value provided for argument '+foo'"s);
-    CHECK(errors[2] == "prog: invalid value 'asdf' for float argument '+num'"s);
+    CHECK(errors[0].message == "unknown command line argument '+unknown'"s);
+    CHECK(errors[1].message == "no value provided for argument '+foo'"s);
+    CHECK(errors[2].message == "invalid value 'asdf' for float argument '+num'"s);
 }
 
 TEST_CASE("Test CommandLine -- file names") {
@@ -460,7 +466,11 @@ TEST_CASE("Test CommandLine -- file names") {
 
     CHECK(cmdLine.parse("prog +foo+../something/bar/baz"));
 
+    // On WASI, it is not possible to expand a path starting with `..` into
+    // an absolute path.
+#if !defined(__wasi__)
     CHECK(fs::path(*foo).is_absolute());
+#endif
 }
 
 TEST_CASE("Test CommandLine -- ignore duplicates") {
@@ -499,16 +509,24 @@ TEST_CASE("Test CommandLine -- check setIgnoreCommand()") {
 TEST_CASE("Test CommandLine -- check setRenameCommand()") {
     std::optional<int32_t> foo;
     std::optional<int32_t> bar;
+    std::vector<std::string> ext;
+    std::vector<std::string> biz;
 
     CommandLine cmdLine;
     cmdLine.add("--foo", foo, "");
     cmdLine.add("--bar", bar, "");
+    cmdLine.add("--ext", ext, "");
+    cmdLine.add("+biz", biz, "");
     cmdLine.addRenameCommand("--xxx,--foo");
     cmdLine.addRenameCommand("--yyy,--bar");
+    cmdLine.addRenameCommand("+ext,--ext");
+    cmdLine.addRenameCommand("--qqq,+biz");
 
-    CHECK(cmdLine.parse("prog --xxx 123 --yyy=456"));
+    CHECK(cmdLine.parse("prog --xxx 123 --yyy=456 +ext+lib+v --qqq=asdf --qqq=qwerty"));
     CHECK(foo == 123);
     CHECK(bar == 456);
+    CHECK(ext == std::vector<std::string>{"lib", "v"});
+    CHECK(biz == std::vector<std::string>{"asdf", "qwerty"});
 
     auto errors = cmdLine.getErrors();
     REQUIRE(errors.empty());
@@ -519,4 +537,108 @@ TEST_CASE("Test CommandLine -- ignore and rename errors") {
     CHECK(cmdLine.addRenameCommand("--xxx").find("missing or extra comma") != std::string::npos);
     CHECK(cmdLine.addIgnoreCommand("--yyy,--bar,baz").find("missing or extra comma") !=
           std::string::npos);
+}
+
+TEST_CASE("Test CommandLine enum options basic") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode selection");
+
+    CHECK(cmdLine.parse("prog --mode fast"));
+    CHECK(mode == TestMode::Fast);
+
+    // Test help text includes valid options
+    auto help = cmdLine.getHelpText("Test program");
+    CHECK(help.find("Valid options: 'fast', 'normal', 'slow', 'very-detailed-mode'") !=
+          std::string::npos);
+}
+
+TEST_CASE("Test CommandLine -- enum options all values") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode");
+
+    // Test all valid kebab-case values
+    CHECK(cmdLine.parse("prog --mode fast"));
+    CHECK(mode == TestMode::Fast);
+
+    CHECK(cmdLine.parse("prog --mode normal"));
+    CHECK(mode == TestMode::Normal);
+
+    CHECK(cmdLine.parse("prog --mode slow"));
+    CHECK(mode == TestMode::Slow);
+
+    CHECK(cmdLine.parse("prog --mode very-detailed-mode"));
+    CHECK(mode == TestMode::VeryDetailedMode);
+}
+
+TEST_CASE("Test CommandLine -- enum options invalid value") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode");
+
+    CHECK(!cmdLine.parse("prog --mode invalid"));
+
+    auto errors = cmdLine.getErrors();
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].message == "invalid value 'invalid', valid options are: 'fast', 'normal', "
+                               "'slow', 'very-detailed-mode'");
+}
+
+TEST_CASE("Test CommandLine -- enum options case sensitive") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode");
+
+    // CamelCase should not work
+    CHECK(!cmdLine.parse("prog --mode Fast"));
+
+    auto errors = cmdLine.getErrors();
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].message == "invalid value 'Fast', valid options are: 'fast', 'normal', 'slow', "
+                               "'very-detailed-mode'");
+}
+
+TEST_CASE("Test CommandLine -- enum options default value") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode");
+
+    // No mode specified, should remain unset
+    CHECK(cmdLine.parse("prog"));
+    CHECK(!mode.has_value());
+}
+
+TEST_CASE("Test CommandLine -- enum options with short name") {
+    std::optional<TestMode> mode;
+
+    CommandLine cmdLine;
+    cmdLine.addEnum<TestMode, TestMode_traits>("-m,--mode", mode, "Test mode");
+
+    CHECK(cmdLine.parse("prog -m fast"));
+    CHECK(mode == TestMode::Fast);
+
+    CHECK(cmdLine.parse("prog --mode slow"));
+    CHECK(mode == TestMode::Slow);
+}
+
+TEST_CASE("Test CommandLine -- enum options invalid value with valid prefix") {
+    // Test invalid value that has a valid prefix
+    {
+        std::optional<TestMode> mode;
+        CommandLine cmdLine;
+        cmdLine.addEnum<TestMode, TestMode_traits>("--mode", mode, "Test mode");
+
+        CHECK(!cmdLine.parse("prog --mode fast-invalid"));
+        auto errors = cmdLine.getErrors();
+        REQUIRE(errors.size() == 1);
+        CHECK(errors[0].message ==
+              "invalid value 'fast-invalid', valid options are: 'fast', 'normal', "
+              "'slow', 'very-detailed-mode'");
+    }
 }

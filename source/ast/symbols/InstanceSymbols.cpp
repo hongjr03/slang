@@ -30,6 +30,7 @@
 #include "slang/diagnostics/ParserDiags.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/util/TimeTrace.h"
+#include "slang/util/TypeTraits.h"
 
 namespace {
 
@@ -37,59 +38,6 @@ using namespace slang;
 using namespace slang::ast;
 using namespace slang::parsing;
 using namespace slang::syntax;
-
-std::pair<std::string_view, SourceLocation> getNameLoc(const HierarchicalInstanceSyntax& syntax) {
-    std::string_view name;
-    SourceLocation loc;
-    if (syntax.decl) {
-        name = syntax.decl->name.valueText();
-        loc = syntax.decl->name.location();
-    }
-    else {
-        name = "";
-        loc = syntax.getFirstToken().location();
-    }
-    return std::make_pair(name, loc);
-}
-
-void createImplicitNets(const HierarchicalInstanceSyntax& instance, const ASTContext& context,
-                        const NetType& netType, bitmask<InstanceFlags> flags,
-                        SmallSet<std::string_view, 8>& implicitNetNames,
-                        SmallVectorBase<const Symbol*>& results) {
-    // If no default nettype is set, we don't create implicit nets.
-    if (netType.isError())
-        return;
-
-    ASTContext ctx = context;
-    if (flags.has(InstanceFlags::FromBind))
-        ctx.flags |= ASTFlags::BindInstantiation;
-
-    for (auto conn : instance.connections) {
-        const PropertyExprSyntax* expr = nullptr;
-        switch (conn->kind) {
-            case SyntaxKind::OrderedPortConnection:
-                expr = conn->as<OrderedPortConnectionSyntax>().expr;
-                break;
-            case SyntaxKind::NamedPortConnection:
-                expr = conn->as<NamedPortConnectionSyntax>().expr;
-                break;
-            default:
-                break;
-        }
-
-        if (!expr)
-            continue;
-
-        SmallVector<const IdentifierNameSyntax*> implicitNets;
-        Expression::findPotentiallyImplicitNets(*expr, ctx, implicitNets);
-
-        auto& comp = ctx.getCompilation();
-        for (auto ins : implicitNets) {
-            if (implicitNetNames.emplace(ins->identifier.valueText()).second)
-                results.push_back(&NetSymbol::createImplicit(comp, *ins, netType));
-        }
-    }
-}
 
 // A helper class for building instances of definitions (modules/interfaces/programs).
 class InstanceBuilder {
@@ -105,16 +53,19 @@ public:
     // Resets the builder to be ready to create more instances with different settings.
     // Must be called at least once prior to creating instances.
     void reset(const DefinitionSymbol& def_, ParameterBuilder& paramBuilder_,
-               const ResolvedConfig* resolvedConfig_, const ConfigBlockSymbol* newConfigRoot_) {
+               const ResolvedConfig* resolvedConfig_, const ConfigBlockSymbol* newConfigRoot_,
+               uint32_t instanceDepth_) {
         definition = &def_;
         paramBuilder = &paramBuilder_;
         resolvedConfig = resolvedConfig_;
         newConfigRoot = newConfigRoot_;
+        instanceDepth = instanceDepth_;
     }
 
     // Creates instance(s) for the given syntax node.
     Symbol* create(const HierarchicalInstanceSyntax& syntax) {
-        createImplicitNets(syntax, context, netType, flags, implicitNetNames, implicitNets);
+        ast::detail::createImplicitNets(syntax, context, netType, flags, implicitNetNames,
+                                        implicitNets);
 
         path.clear();
 
@@ -140,7 +91,7 @@ public:
     const NetType& netType;
 
 private:
-    using DimIterator = std::span<VariableDimensionSyntax*>::iterator;
+    using DimIterator = SyntaxList<VariableDimensionSyntax>::const_iterator;
 
     Compilation& comp;
     const ASTContext& context;
@@ -151,16 +102,17 @@ private:
     const ConfigBlockSymbol* newConfigRoot = nullptr;
     const SyntaxNode* overrideSyntax;
     SmallVectorBase<const Symbol*>& implicitNets;
-    SmallVector<int32_t> path;
+    SmallVector<uint32_t> path;
     std::span<const AttributeInstanceSyntax* const> attributes;
     bitmask<InstanceFlags> flags;
+    uint32_t instanceDepth = 0;
 
     Symbol* createInstance(const HierarchicalInstanceSyntax& syntax,
                            const HierarchyOverrideNode* overrideNode) {
         paramBuilder->setOverrides(overrideNode);
-        auto [name, loc] = getNameLoc(syntax);
-        auto inst = comp.emplace<InstanceSymbol>(comp, name, loc, *definition, *paramBuilder,
-                                                 flags);
+        auto [name, loc] = ast::detail::getNameLoc(syntax);
+        auto inst = comp.emplace<InstanceSymbol>(comp, name, loc, *definition, *paramBuilder, flags,
+                                                 instanceDepth);
         inst->arrayPath = path.copy(comp);
         inst->setSyntax(syntax);
         inst->setAttributes(*context.scope, attributes);
@@ -189,16 +141,21 @@ private:
         // make up an empty array so that we don't get further errors when
         // things try to reference this symbol.
         auto dim = context.evalDimension(dimSyntax, /* requireRange */ true, /* isPacked */ false);
-        if (!dim.isRange())
-            return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
-                                                     nameToken.location());
+        if (!dim.isRange()) {
+            auto result = &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
+                                                            nameToken.location());
+            result->setSyntax(syntax);
+            return result;
+        }
 
         ConstantRange range = dim.range;
         if (range.width() > comp.getOptions().maxInstanceArray) {
             auto& diag = context.addDiag(diag::MaxInstanceArrayExceeded, dimSyntax.sourceRange());
             diag << definition->getKindString() << comp.getOptions().maxInstanceArray;
-            return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
-                                                     nameToken.location());
+            auto result = &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
+                                                            nameToken.location());
+            result->setSyntax(syntax);
+            return result;
         }
 
         SmallVector<const Symbol*> elements;
@@ -210,7 +167,7 @@ private:
                     childOverrides = &nodeIt->second;
             }
 
-            path.push_back(range.lower() + int32_t(i));
+            path.push_back(i);
             auto symbol = recurse(syntax, childOverrides, it, end);
             path.pop_back();
 
@@ -398,18 +355,19 @@ void InstanceSymbolBase::getArrayDimensions(SmallVectorBase<ConstantRange>& dime
         getInstanceArrayDimensions(scope->asSymbol().as<InstanceArraySymbol>(), dimensions);
 }
 
-InstanceSymbol::InstanceSymbol(std::string_view name, SourceLocation loc,
-                               InstanceBodySymbol& body) :
-    InstanceSymbolBase(SymbolKind::Instance, name, loc), body(body) {
+InstanceSymbol::InstanceSymbol(std::string_view name, SourceLocation loc, InstanceBodySymbol& body,
+                               uint32_t instanceDepth) :
+    InstanceSymbolBase(SymbolKind::Instance, name, loc), body(body), instanceDepth(instanceDepth) {
     body.parentInstance = this;
 }
 
 InstanceSymbol::InstanceSymbol(Compilation& compilation, std::string_view name, SourceLocation loc,
                                const DefinitionSymbol& definition, ParameterBuilder& paramBuilder,
-                               bitmask<InstanceFlags> flags) :
+                               bitmask<InstanceFlags> flags, uint32_t instanceDepth) :
     InstanceSymbol(name, loc,
                    InstanceBodySymbol::fromDefinition(compilation, definition, loc, paramBuilder,
-                                                      flags)) {
+                                                      flags),
+                   instanceDepth) {
 }
 
 InstanceSymbol& InstanceSymbol::createDefault(Compilation& comp, const DefinitionSymbol& definition,
@@ -418,13 +376,14 @@ InstanceSymbol& InstanceSymbol::createDefault(Compilation& comp, const Definitio
                                               const ConfigRule* configRule,
                                               SourceLocation locationOverride) {
     auto loc = locationOverride ? locationOverride : definition.location;
-    auto& result = *comp.emplace<InstanceSymbol>(
-        definition.name, loc,
-        InstanceBodySymbol::fromDefinition(comp, definition, loc, InstanceFlags::None,
-                                           hierarchyOverrideNode, configBlock, configRule));
+    auto& body = InstanceBodySymbol::fromDefinition(comp, definition, loc, InstanceFlags::None,
+                                                    hierarchyOverrideNode, configBlock, configRule);
+    auto& result = *comp.emplace<InstanceSymbol>(definition.name, loc, body, 0u);
 
     if (configBlock) {
         auto rc = comp.emplace<ResolvedConfig>(*configBlock, result);
+        rc->configRule = configRule;
+
         if (configRule) {
             configRule->isUsed = true;
             if (configRule->liblist)
@@ -436,7 +395,7 @@ InstanceSymbol& InstanceSymbol::createDefault(Compilation& comp, const Definitio
     return result;
 }
 
-InstanceSymbol& InstanceSymbol::createVirtual(
+const InstanceSymbol& InstanceSymbol::createVirtual(
     const ASTContext& context, SourceLocation loc, const DefinitionSymbol& definition,
     const ParameterValueAssignmentSyntax* paramAssignments) {
 
@@ -447,13 +406,15 @@ InstanceSymbol& InstanceSymbol::createVirtual(
 
     auto& comp = context.getCompilation();
     auto& result = *comp.emplace<InstanceSymbol>(comp, definition.name, loc, definition,
-                                                 paramBuilder, InstanceFlags::None);
+                                                 paramBuilder, InstanceFlags::None, 0u);
 
     // Set the parent pointer so that traversing upwards still works to find
     // the instantiation scope. This "virtual" instance never actually gets
     // added to the scope the proper way as a member.
     result.setParent(*context.scope);
-    return result;
+
+    // Allow the compilation to cache this virtual interface instance.
+    return comp.getOrAddVirtualIface(result);
 }
 
 Symbol& InstanceSymbol::createDefaultNested(const Scope& scope,
@@ -468,16 +429,16 @@ Symbol& InstanceSymbol::createDefaultNested(const Scope& scope,
     SmallVector<TokenOrSyntax, 4> instances;
     auto& header = *syntax.header;
     auto loc = header.name.location();
-    auto instName = comp.emplace<InstanceNameSyntax>(header.name,
-                                                     std::span<VariableDimensionSyntax*>());
+    auto instName = comp.emplace<InstanceNameSyntax>(header.name, nullptr);
     auto instance = comp.emplace<HierarchicalInstanceSyntax>(
-        instName, missing(TokenKind::OpenParenthesis, loc), std::span<TokenOrSyntax>(),
+        instName, missing(TokenKind::OpenParenthesis, loc), nullptr,
         missing(TokenKind::CloseParenthesis, loc));
 
     instances.push_back(instance);
 
     auto instantiation = comp.emplace<HierarchyInstantiationSyntax>(
-        std::span<AttributeInstanceSyntax*>(), header.name, nullptr, instances.copy(comp),
+        nullptr, header.name, nullptr,
+        syntax::SeparatedSyntaxList<syntax::HierarchicalInstanceSyntax>(comp, instances),
         header.semi);
 
     ASTContext context(scope, LookupLocation::max);
@@ -498,14 +459,13 @@ Symbol& InstanceSymbol::createDefaultNested(const Scope& scope,
     return result;
 }
 
-InstanceSymbol& InstanceSymbol::createInvalid(Compilation& compilation,
+InstanceSymbol& InstanceSymbol::createInvalid(Compilation& comp,
                                               const DefinitionSymbol& definition) {
     // Give this instance an empty name so that it can't be referenced by name.
-    return *compilation.emplace<InstanceSymbol>(
-        "", SourceLocation::NoLocation,
-        InstanceBodySymbol::fromDefinition(compilation, definition, definition.location,
-                                           InstanceFlags::Uninstantiated, nullptr, nullptr,
-                                           nullptr));
+    auto& body = InstanceBodySymbol::fromDefinition(comp, definition, definition.location,
+                                                    InstanceFlags::Uninstantiated, nullptr, nullptr,
+                                                    nullptr);
+    return *comp.emplace<InstanceSymbol>("", SourceLocation::NoLocation, body, 0u);
 }
 
 void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationSyntax& syntax,
@@ -568,6 +528,7 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
     const DefinitionSymbol* owningDefinition = nullptr;
     const HierarchyOverrideNode* parentOverrideNode = nullptr;
     const ResolvedConfig* resolvedConfig = nullptr;
+    uint32_t instanceDepth = 0;
     if (parentInst) {
         owningDefinition = &parentInst->getDefinition();
 
@@ -581,8 +542,10 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
         // Check if our parent has a configuration applied. If so, and if
         // that configuration has instance overrides, we need to check if
         // any of them apply to the instances we're about to create.
-        if (parentInst->parentInstance)
+        if (parentInst->parentInstance) {
             resolvedConfig = parentInst->parentInstance->resolvedConfig;
+            instanceDepth = parentInst->parentInstance->instanceDepth;
+        }
 
         if (flags.has(InstanceFlags::FromBind)) {
             if (flags.has(InstanceFlags::ParentFromBind)) {
@@ -599,6 +562,12 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
     InstanceBuilder builder(context, implicitNets, parentOverrideNode, syntax.attributes, flags,
                             overrideSyntax);
 
+    auto createUninstantiated = [&](const HierarchicalInstanceSyntax* specificInstance) {
+        UninstantiatedDefSymbol::fromSyntax(comp, syntax, specificInstance, context, results,
+                                            implicitNets, builder.implicitNetNames,
+                                            builder.netType);
+    };
+
     // Creates instance symbols -- if specificInstance is provided then only that
     // instance will be created, otherwise all instances in the original syntax
     // node will be created in one go.
@@ -606,9 +575,7 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
                                const HierarchicalInstanceSyntax* specificInstance) {
         auto def = defResult.definition;
         if (!def) {
-            UninstantiatedDefSymbol::fromSyntax(comp, syntax, specificInstance, context, results,
-                                                implicitNets, builder.implicitNetNames,
-                                                builder.netType);
+            createUninstantiated(specificInstance);
             return;
         }
 
@@ -661,6 +628,24 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
             }
         }
 
+        // This check breaks infinitely recursive hierarchies. Note that this is deliberately
+        // off by one; most of the time this will get hit first in ElabVisitors and we won't
+        // even try to create more instances beneath that. In certain cases (or when visiting
+        // the AST manually) it's possible to get in here instead.
+        if (instanceDepth > comp.getOptions().maxInstanceDepth + 1) {
+            auto loc = syntax.type.location();
+            if (specificInstance)
+                loc = detail::getNameLoc(*specificInstance).second;
+            else if (!syntax.instances.empty())
+                loc = detail::getNameLoc(*syntax.instances[0]).second;
+
+            auto& diag = context.addDiag(diag::MaxInstanceDepthExceeded, loc);
+            diag << definition.getKindString();
+            diag << comp.getOptions().maxInstanceDepth;
+            createUninstantiated(specificInstance);
+            return;
+        }
+
         ParameterBuilder paramBuilder(*context.scope, definition.name, definition.parameters);
         if (syntax.parameters)
             paramBuilder.setAssignments(*syntax.parameters, /* isFromConfig */ false);
@@ -669,6 +654,8 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
         if (confRule) {
             SLANG_ASSERT(resolvedConfig);
             auto rc = comp.emplace<ResolvedConfig>(*resolvedConfig);
+            rc->configRule = confRule;
+
             confRule->isUsed = true;
             if (confRule->liblist)
                 rc->liblist = *confRule->liblist;
@@ -680,7 +667,8 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
             }
         }
 
-        builder.reset(definition, paramBuilder, localConfig, defResult.configRoot);
+        builder.reset(definition, paramBuilder, localConfig, defResult.configRoot,
+                      instanceDepth + 1);
 
         if (specificInstance) {
             results.push_back(builder.create(*specificInstance));
@@ -730,7 +718,7 @@ void InstanceSymbol::fromSyntax(Compilation& comp, const HierarchyInstantiationS
 
     // Simple case: look up the definition and create all instances in one go.
     auto defResult = comp.getDefinition(defName, *context.scope, syntax.type.range(),
-                                        diag::UnknownModule);
+                                        diag::UnknownModule, syntax.attributes);
     createInstances(defResult, nullptr);
 }
 
@@ -745,6 +733,9 @@ void InstanceSymbol::fromFixupSyntax(Compilation& comp, const DefinitionSymbol& 
     // for this fixup case.
     SmallVector<TokenOrSyntax, 4> instances;
     for (auto decl : syntax.declarators) {
+        if (decl->name.valueText().empty())
+            continue;
+
         auto loc = decl->name.location();
         if (!instances.empty())
             instances.push_back(missing(TokenKind::Comma, loc));
@@ -754,15 +745,16 @@ void InstanceSymbol::fromFixupSyntax(Compilation& comp, const DefinitionSymbol& 
 
         auto instName = comp.emplace<InstanceNameSyntax>(decl->name, decl->dimensions);
         auto instance = comp.emplace<HierarchicalInstanceSyntax>(
-            instName, missing(TokenKind::OpenParenthesis, loc), std::span<TokenOrSyntax>(),
+            instName, missing(TokenKind::OpenParenthesis, loc), nullptr,
             missing(TokenKind::CloseParenthesis, loc));
 
         instances.push_back(instance);
     }
 
     auto instantiation = comp.emplace<HierarchyInstantiationSyntax>(
-        std::span<AttributeInstanceSyntax*>(), syntax.type->getFirstToken(), nullptr,
-        instances.copy(comp), syntax.semi);
+        nullptr, syntax.type->getFirstToken(), nullptr,
+        syntax::SeparatedSyntaxList<syntax::HierarchicalInstanceSyntax>(comp, instances),
+        syntax.semi);
 
     SmallVector<const Symbol*> implicitNets;
     fromSyntax(comp, *instantiation, context, results, implicitNets);
@@ -788,17 +780,6 @@ bool InstanceSymbol::isTopLevel() const {
 }
 
 const PortConnection* InstanceSymbol::getPortConnection(const PortSymbol& port) const {
-    if (!connectionMap)
-        resolvePortConnections();
-
-    auto it = connectionMap->find(reinterpret_cast<uintptr_t>(&port));
-    if (it == connectionMap->end())
-        return nullptr;
-
-    return reinterpret_cast<const PortConnection*>(it->second);
-}
-
-const PortConnection* InstanceSymbol::getPortConnection(const MultiPortSymbol& port) const {
     if (!connectionMap)
         resolvePortConnections();
 
@@ -868,14 +849,10 @@ void InstanceSymbol::resolvePortConnections() const {
     PortConnection::makeConnections(*this, portList,
                                     syntax->as<HierarchicalInstanceSyntax>().connections, conns);
 
-    auto portIt = portList.begin();
     for (auto conn : conns) {
-        SLANG_ASSERT(portIt != portList.end());
-        connectionMap->emplace(reinterpret_cast<uintptr_t>(*portIt++),
+        connectionMap->emplace(reinterpret_cast<uintptr_t>(&conn->port),
                                reinterpret_cast<uintptr_t>(conn));
     }
-
-    SLANG_ASSERT(portIt == portList.end());
     connections = conns.copy(comp);
 }
 
@@ -941,7 +918,8 @@ void InstanceSymbol::connectDefaultIfacePorts() const {
                 }
 
                 inst->setParent(*parent);
-                conns.emplace_back(comp.emplace<PortConnection>(ifacePort, inst, modport));
+                conns.emplace_back(
+                    comp.emplace<PortConnection>(ifacePort, std::pair{inst, modport}, nullptr));
                 connectionMap->emplace(reinterpret_cast<uintptr_t>(port),
                                        reinterpret_cast<uintptr_t>(conns.back()));
             }
@@ -951,7 +929,13 @@ void InstanceSymbol::connectDefaultIfacePorts() const {
 }
 
 void InstanceSymbol::serializeTo(ASTSerializer& serializer) const {
-    serializer.write("body", body);
+    if (canonicalBody &&
+        !serializer.getCompilation().hasFlag(CompilationFlags::DisableInstanceCaching)) {
+        serializer.writeLink("body", *canonicalBody);
+    }
+    else {
+        serializer.write("body", body);
+    }
 
     serializer.startArray("connections");
     for (auto conn : getPortConnections()) {
@@ -1054,8 +1038,7 @@ InstanceBodySymbol& InstanceBodySymbol::fromDefinition(Compilation& comp,
         }
     }
 
-    // If there are any bind directives targeting this instance,
-    // add them to the end of the scope now.
+    // Make note of any bind directives targeting this instance.
     if (overrideNode) {
         for (auto& [bindInfo, targetDefSyntax] : overrideNode->binds) {
             if (targetDefSyntax) {
@@ -1068,19 +1051,78 @@ InstanceBodySymbol& InstanceBodySymbol::fromDefinition(Compilation& comp,
                 }
             }
             else {
-                result->addDeferredMembers(*bindInfo.bindSyntax);
+                result->setNeedElaboration();
+                result->flags |= InstanceFlags::TargetedByBind;
             }
         }
     }
 
     if (!definition.bindDirectives.empty()) {
-        for (auto& bindInfo : definition.bindDirectives)
-            result->addDeferredMembers(*bindInfo.bindSyntax);
+        result->setNeedElaboration();
+        result->flags |= InstanceFlags::TargetedByBind;
         comp.noteInstanceWithDefBind(*result);
     }
 
     result->parameters = params.copy(comp);
     return *result;
+}
+
+void InstanceBodySymbol::finishElaboration(function_ref<void(const Symbol&)> insertCB) const {
+    // Force port types to resolve so that back references to internal
+    // variables and nets are known.
+    for (auto port : portList) {
+        switch (port->kind) {
+            case SymbolKind::Port:
+                port->as<PortSymbol>().getType();
+                break;
+            case SymbolKind::MultiPort:
+                port->as<MultiPortSymbol>().getType();
+                break;
+            default:
+                break;
+        }
+    }
+
+    // If there are bind directives targeting this instance we need to apply them now.
+    if (flags.has(InstanceFlags::TargetedByBind)) {
+        SmallSet<const BindDirectiveSyntax*, 4> seenBindDirectives;
+        ASTContext context(*this, LookupLocation::max);
+        auto handleBind = [&](const BindDirectiveInfo& info) {
+            if (!seenBindDirectives.emplace(info.bindSyntax).second) {
+                addDiag(diag::DuplicateBind, info.bindSyntax->sourceRange());
+                return;
+            }
+
+            SmallVector<const Symbol*> instances;
+            SmallVector<const Symbol*> implicitNets;
+            if (info.bindSyntax->instantiation->kind == SyntaxKind::CheckerInstantiation) {
+                CheckerInstanceSymbol::fromSyntax(
+                    info.bindSyntax->instantiation->as<CheckerInstantiationSyntax>(), context,
+                    instances, implicitNets, InstanceFlags::FromBind);
+            }
+            else {
+                InstanceSymbol::fromSyntax(
+                    getCompilation(),
+                    info.bindSyntax->instantiation->as<HierarchyInstantiationSyntax>(), context,
+                    instances, implicitNets, &info);
+            }
+
+            for (auto sym : implicitNets)
+                insertCB(*sym);
+            for (auto sym : instances)
+                insertCB(*sym);
+        };
+
+        if (auto node = hierarchyOverrideNode) {
+            for (auto& [bindInfo, targetDefSyntax] : node->binds) {
+                if (!targetDefSyntax)
+                    handleBind(bindInfo);
+            }
+        }
+
+        for (auto& bindInfo : getDefinition().bindDirectives)
+            handleBind(bindInfo);
+    }
 }
 
 const Symbol* InstanceBodySymbol::findPort(std::string_view portName) const {
@@ -1098,32 +1140,8 @@ bool InstanceBodySymbol::hasSameType(const InstanceBodySymbol& other) const {
     if (&definition != &other.definition)
         return false;
 
-    if (parameters.size() != other.parameters.size())
-        return false;
-
-    for (auto li = parameters.begin(), ri = other.parameters.begin(); li != parameters.end();
-         li++, ri++) {
-
-        auto& lp = (*li)->symbol;
-        auto& rp = (*ri)->symbol;
-        if (lp.kind != rp.kind)
-            return false;
-
-        if (lp.kind == SymbolKind::Parameter) {
-            auto& lv = lp.as<ParameterSymbol>().getValue();
-            auto& rv = rp.as<ParameterSymbol>().getValue();
-            if (lv != rv)
-                return false;
-        }
-        else {
-            auto& lt = lp.as<TypeParameterSymbol>().targetType.getType();
-            auto& rt = rp.as<TypeParameterSymbol>().targetType.getType();
-            if (!lt.isMatching(rt))
-                return false;
-        }
-    }
-
-    return true;
+    auto getSym = std::views::transform([](auto& paramBase) { return &paramBase->symbol; });
+    return ParameterSymbolBase::allMatching(parameters | getSym, other.parameters | getSym);
 }
 
 void InstanceBodySymbol::serializeTo(ASTSerializer& serializer) const {
@@ -1158,10 +1176,10 @@ static void createUninstantiatedDef(Compilation& compilation, const TSyntax& syn
                                     SmallVectorBase<const Symbol*>& implicitNets,
                                     SmallSet<std::string_view, 8>& implicitNetNames,
                                     const NetType& netType) {
-    createImplicitNets(*instanceSyntax, context, netType, InstanceFlags::None, implicitNetNames,
-                       implicitNets);
+    detail::createImplicitNets(*instanceSyntax, context, netType, InstanceFlags::None,
+                               implicitNetNames, implicitNets);
 
-    auto [name, loc] = getNameLoc(*instanceSyntax);
+    auto [name, loc] = detail::getNameLoc(*instanceSyntax);
     auto sym = compilation.emplace<UninstantiatedDefSymbol>(name, loc, moduleName, params);
     sym->setSyntax(*instanceSyntax);
     sym->setAttributes(*context.scope, syntax.attributes);
@@ -1187,15 +1205,18 @@ static std::span<const Expression* const> createUninstantiatedParams(
 
     SmallVector<const Expression*> params;
     if (syntax.parameters) {
+        auto& comp = context.getCompilation();
         for (auto expr : syntax.parameters->parameters) {
             // Empty expressions are just ignored here.
-            if (expr->kind == SyntaxKind::OrderedParamAssignment) {
-                params.push_back(
-                    &Expression::bind(*expr->as<OrderedParamAssignmentSyntax>().expr, context));
-            }
-            else if (expr->kind == SyntaxKind::NamedParamAssignment) {
-                if (auto ex = expr->as<NamedParamAssignmentSyntax>().expr)
-                    params.push_back(&Expression::bind(*ex, context, ASTFlags::AllowDataType));
+            const ExpressionSyntax* connSyntax = nullptr;
+            if (expr->kind == SyntaxKind::OrderedParamAssignment)
+                connSyntax = expr->as<OrderedParamAssignmentSyntax>().expr;
+            else if (expr->kind == SyntaxKind::NamedParamAssignment)
+                connSyntax = expr->as<NamedParamAssignmentSyntax>().expr;
+
+            if (connSyntax) {
+                params.push_back(&Expression::bindRValue(comp.getErrorType(), *connSyntax, {},
+                                                         context, ASTFlags::AllowDataType));
             }
         }
     }
@@ -1299,15 +1320,20 @@ static const AssertionExpr* bindUnknownPortConn(const ASTContext& context,
                             symbol->kind == SymbolKind::Instance ||
                             symbol->kind == SymbolKind::InstanceArray ||
                             symbol->kind == SymbolKind::UninstantiatedDef) {
+
+                            auto hierRef = HierarchicalReference::fromLookup(comp, result);
                             auto hre = comp.emplace<ArbitrarySymbolExpression>(
-                                *symbol, comp.getVoidType(), syntax.sourceRange());
+                                *context.scope, *symbol, comp.getVoidType(), &hierRef,
+                                syntax.sourceRange());
+
                             return comp.emplace<SimpleAssertionExpr>(*hre, std::nullopt);
                         }
                     }
                 }
 
-                return comp.emplace<SimpleAssertionExpr>(Expression::bind(*expr, context, flags),
-                                                         std::nullopt);
+                return comp.emplace<SimpleAssertionExpr>(
+                    Expression::bindRValue(comp.getErrorType(), *expr, {}, context, flags),
+                    std::nullopt);
             }
         }
     }
@@ -1341,7 +1367,9 @@ std::span<const AssertionExpr* const> UninstantiatedDefSymbol::getPortConnection
                     results.push_back(bindUnknownPortConn(context, *ex));
                 }
                 else if (npc.openParen) {
-                    results.push_back(comp.emplace<InvalidAssertionExpr>(nullptr));
+                    auto emptyExpr = comp.emplace<EmptyArgumentExpression>(comp.getVoidType(),
+                                                                           npc.sourceRange());
+                    results.push_back(comp.emplace<SimpleAssertionExpr>(*emptyExpr, std::nullopt));
                 }
                 else {
                     auto idName = comp.emplace<IdentifierNameSyntax>(npc.name);
@@ -1414,8 +1442,8 @@ PrimitiveInstanceSymbol* createPrimInst(Compilation& compilation, const Scope& s
                                         const PrimitiveSymbol& primitive,
                                         const HierarchicalInstanceSyntax& syntax,
                                         std::span<const AttributeInstanceSyntax* const> attributes,
-                                        SmallVectorBase<int32_t>& path) {
-    auto [name, loc] = getNameLoc(syntax);
+                                        SmallVectorBase<uint32_t>& path) {
+    auto [name, loc] = ast::detail::getNameLoc(syntax);
     auto result = compilation.emplace<PrimitiveInstanceSymbol>(name, loc, primitive);
     result->arrayPath = path.copy(compilation);
     result->setSyntax(syntax);
@@ -1423,13 +1451,13 @@ PrimitiveInstanceSymbol* createPrimInst(Compilation& compilation, const Scope& s
     return result;
 }
 
-using DimIterator = std::span<VariableDimensionSyntax*>::iterator;
+using DimIterator = SyntaxList<VariableDimensionSyntax>::const_iterator;
 
 Symbol* recursePrimArray(Compilation& comp, const PrimitiveSymbol& primitive,
                          const HierarchicalInstanceSyntax& instance, const ASTContext& context,
                          DimIterator it, DimIterator end,
                          std::span<const AttributeInstanceSyntax* const> attributes,
-                         SmallVectorBase<int32_t>& path) {
+                         SmallVectorBase<uint32_t>& path) {
     if (it == end)
         return createPrimInst(comp, *context.scope, primitive, instance, attributes, path);
 
@@ -1442,18 +1470,25 @@ Symbol* recursePrimArray(Compilation& comp, const PrimitiveSymbol& primitive,
     // make up an empty array so that we don't get further errors when
     // things try to reference this symbol.
     auto dim = context.evalDimension(dimSyntax, /* requireRange */ true, /* isPacked */ false);
-    if (!dim.isRange())
-        return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(), nameToken.location());
+    if (!dim.isRange()) {
+        auto result = &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
+                                                        nameToken.location());
+        result->setSyntax(instance);
+        return result;
+    }
 
     ConstantRange range = dim.range;
     if (range.width() > comp.getOptions().maxInstanceArray) {
         auto& diag = context.addDiag(diag::MaxInstanceArrayExceeded, dimSyntax.sourceRange());
         diag << "primitive"sv << comp.getOptions().maxInstanceArray;
-        return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(), nameToken.location());
+        auto result = &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(),
+                                                        nameToken.location());
+        result->setSyntax(instance);
+        return result;
     }
 
     SmallVector<const Symbol*> elements;
-    for (int32_t i = range.lower(); i <= range.upper(); i++) {
+    for (uint32_t i = 0; i < range.width(); i++) {
         path.push_back(i);
         auto symbol = recursePrimArray(comp, primitive, instance, context, it, end, attributes,
                                        path);
@@ -1466,6 +1501,7 @@ Symbol* recursePrimArray(Compilation& comp, const PrimitiveSymbol& primitive,
     auto result = comp.emplace<InstanceArraySymbol>(comp, nameToken.valueText(),
                                                     nameToken.location(), elements.copy(comp),
                                                     range);
+    result->setSyntax(instance);
     for (auto element : elements)
         result->addMember(*element);
 
@@ -1478,15 +1514,15 @@ void createPrimitives(const PrimitiveSymbol& primitive, const TSyntax& syntax,
                       const ASTContext& context, SmallVectorBase<const Symbol*>& results,
                       SmallVectorBase<const Symbol*>& implicitNets,
                       SmallSet<std::string_view, 8>& implicitNetNames) {
-    SmallVector<int32_t> path;
+    SmallVector<uint32_t> path;
 
     auto& comp = context.getCompilation();
     auto& netType = context.scope->getDefaultNetType();
 
     auto createInst = [&](const syntax::HierarchicalInstanceSyntax* instance) {
         path.clear();
-        createImplicitNets(*instance, context, netType, InstanceFlags::None, implicitNetNames,
-                           implicitNets);
+        detail::createImplicitNets(*instance, context, netType, InstanceFlags::None,
+                                   implicitNetNames, implicitNets);
 
         if (!instance->decl) {
             results.push_back(createPrimInst(comp, *context.scope, primitive, *instance,
@@ -1576,7 +1612,7 @@ void PrimitiveInstanceSymbol::fromSyntax(const PrimitiveInstantiationSyntax& syn
                 auto pvas = comp.emplace<ParameterValueAssignmentSyntax>(
                     delaySyntax.hash,
                     missing(TokenKind::OpenParenthesis, delayVal.getFirstToken().location()),
-                    parameters.copy(comp),
+                    syntax::SeparatedSyntaxList<syntax::ParamAssignmentSyntax>(comp, parameters),
                     missing(TokenKind::CloseParenthesis, delayVal.getLastToken().location()));
 
                 // Rebuild the instance list. The const_casts are fine because
@@ -1592,7 +1628,10 @@ void PrimitiveInstanceSymbol::fromSyntax(const PrimitiveInstantiationSyntax& syn
                 }
 
                 auto instantiation = comp.emplace<HierarchyInstantiationSyntax>(
-                    syntax.attributes, syntax.type, pvas, instanceBuf.copy(comp), syntax.semi);
+                    syntax.attributes, syntax.type, pvas,
+                    syntax::SeparatedSyntaxList<syntax::HierarchicalInstanceSyntax>(comp,
+                                                                                    instanceBuf),
+                    syntax.semi);
                 InstanceSymbol::fromSyntax(comp, *instantiation, context, results, implicitNets);
                 return;
             }
@@ -1679,7 +1718,7 @@ std::span<const Expression* const> PrimitiveInstanceSymbol::getPortConnections()
                 if (primitiveType.primitiveKind == PrimitiveSymbol::NInput)
                     dir = i == 0 ? ArgumentDirection::Out : ArgumentDirection::In;
                 else
-                    dir = conns.size() - 1 ? ArgumentDirection::In : ArgumentDirection::Out;
+                    dir = (i == conns.size() - 1) ? ArgumentDirection::In : ArgumentDirection::Out;
 
                 SLANG_ASSERT(conns[i]);
                 results.push_back(&Expression::bindArgument(logic_t, dir, {}, *conns[i], context));
@@ -1829,750 +1868,61 @@ void PrimitiveInstanceSymbol::serializeTo(ASTSerializer& serializer) const {
         serializer.write("driveStrength1", toString(*ds1));
 }
 
-namespace {
+namespace detail {
 
-using DimIterator = std::span<VariableDimensionSyntax*>::iterator;
-
-Symbol* recurseCheckerArray(Compilation& comp, const CheckerSymbol& checker,
-                            const HierarchicalInstanceSyntax& instance, const ASTContext& context,
-                            DimIterator it, DimIterator end,
-                            std::span<const AttributeInstanceSyntax* const> attributes,
-                            SmallVectorBase<int32_t>& path, bool isProcedural,
-                            bitmask<InstanceFlags> flags) {
-    if (it == end) {
-        return &CheckerInstanceSymbol::fromSyntax(comp, context, checker, instance, attributes,
-                                                  path, isProcedural, flags);
-    }
-
-    SLANG_ASSERT(instance.decl);
-    auto nameToken = instance.decl->name;
-    auto& dimSyntax = **it;
-    ++it;
-
-    // Evaluate the dimensions of the array. If this fails for some reason,
-    // make up an empty array so that we don't get further errors when
-    // things try to reference this symbol.
-    auto dim = context.evalDimension(dimSyntax, /* requireRange */ true, /* isPacked */ false);
-    if (!dim.isRange())
-        return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(), nameToken.location());
-
-    ConstantRange range = dim.range;
-    if (range.width() > comp.getOptions().maxInstanceArray) {
-        auto& diag = context.addDiag(diag::MaxInstanceArrayExceeded, dimSyntax.sourceRange());
-        diag << "checker"sv << comp.getOptions().maxInstanceArray;
-        return &InstanceArraySymbol::createEmpty(comp, nameToken.valueText(), nameToken.location());
-    }
-
-    SmallVector<const Symbol*> elements;
-    for (int32_t i = range.lower(); i <= range.upper(); i++) {
-        path.push_back(i);
-        auto symbol = recurseCheckerArray(comp, checker, instance, context, it, end, attributes,
-                                          path, isProcedural, flags);
-        path.pop_back();
-
-        symbol->name = "";
-        elements.push_back(symbol);
-    }
-
-    auto result = comp.emplace<InstanceArraySymbol>(comp, nameToken.valueText(),
-                                                    nameToken.location(), elements.copy(comp),
-                                                    range);
-    for (auto element : elements)
-        result->addMember(*element);
-
-    return result;
-}
-
-template<typename TSyntax>
-void createCheckers(const CheckerSymbol& checker, const TSyntax& syntax, const ASTContext& context,
-                    SmallVectorBase<const Symbol*>& results,
-                    SmallVectorBase<const Symbol*>& implicitNets, bool isProcedural,
-                    bitmask<InstanceFlags> flags) {
-    if (syntax.parameters)
-        context.addDiag(diag::CheckerParameterAssign, syntax.parameters->sourceRange());
-
-    SmallSet<std::string_view, 8> implicitNetNames;
-    SmallVector<int32_t> path;
-
-    auto& comp = context.getCompilation();
-    auto& netType = context.scope->getDefaultNetType();
-
-    for (auto instance : syntax.instances) {
-        path.clear();
-
-        if (!isProcedural)
-            createImplicitNets(*instance, context, netType, flags, implicitNetNames, implicitNets);
-
-        if (!instance->decl) {
-            context.addDiag(diag::InstanceNameRequired, instance->sourceRange());
-            results.push_back(&CheckerInstanceSymbol::fromSyntax(
-                comp, context, checker, *instance, syntax.attributes, path, isProcedural, flags));
-        }
-        else {
-            auto dims = instance->decl->dimensions;
-            auto symbol = recurseCheckerArray(comp, checker, *instance, context, dims.begin(),
-                                              dims.end(), syntax.attributes, path, isProcedural,
-                                              flags);
-            results.push_back(symbol);
-        }
-    }
-}
-
-} // namespace
-
-CheckerInstanceSymbol::CheckerInstanceSymbol(std::string_view name, SourceLocation loc,
-                                             CheckerInstanceBodySymbol& body) :
-    InstanceSymbolBase(SymbolKind::CheckerInstance, name, loc), body(body) {
-    body.parentInstance = this;
-}
-
-void CheckerInstanceSymbol::fromSyntax(const CheckerSymbol& checker,
-                                       const HierarchyInstantiationSyntax& syntax,
-                                       const ASTContext& context,
-                                       SmallVectorBase<const Symbol*>& results,
-                                       SmallVectorBase<const Symbol*>& implicitNets,
-                                       bitmask<InstanceFlags> flags) {
-    createCheckers(checker, syntax, context, results, implicitNets,
-                   /* isProcedural */ false, flags);
-}
-
-void CheckerInstanceSymbol::fromSyntax(const CheckerInstantiationSyntax& syntax,
-                                       const ASTContext& context,
-                                       SmallVectorBase<const Symbol*>& results,
-                                       SmallVectorBase<const Symbol*>& implicitNets,
-                                       bitmask<InstanceFlags> flags) {
-    // If this instance is not instantiated then we'll just fill in a placeholder
-    // and move on. This is likely inside an untaken generate branch.
-    if (context.scope->isUninstantiated()) {
-        UninstantiatedDefSymbol::fromSyntax(context.getCompilation(), syntax, context, results,
-                                            implicitNets);
-        return;
-    }
-
-    LookupResult lookupResult;
-    Lookup::name(*syntax.type, context, LookupFlags::AllowDeclaredAfter | LookupFlags::NoSelectors,
-                 lookupResult);
-
-    lookupResult.reportDiags(context);
-    if (!lookupResult.found)
-        return;
-
-    auto symbol = lookupResult.found;
-    if (symbol->kind != SymbolKind::Checker) {
-        if (symbol->kind == SymbolKind::ClassType) {
-            context.addDiag(diag::CheckerClassBadInstantiation, syntax.sourceRange())
-                << symbol->name;
-        }
-        else if (symbol->kind == SymbolKind::Subroutine) {
-            context.addDiag(diag::CheckerFuncBadInstantiation, syntax.sourceRange())
-                << symbol->name;
-        }
-        else {
-            auto& diag = context.addDiag(diag::NotAChecker, syntax.sourceRange());
-            diag << symbol->name << symbol->name;
-            diag.addNote(diag::NoteDeclarationHere, symbol->location);
-        }
-        return;
-    }
-
-    // Only procedural if declared via a statement.
-    const bool isProcedural = syntax.parent &&
-                              syntax.parent->kind == SyntaxKind::CheckerInstanceStatement;
-
-    createCheckers(symbol->as<CheckerSymbol>(), syntax, context, results, implicitNets,
-                   isProcedural, flags);
-}
-
-static const Symbol* createCheckerFormal(Compilation& comp, const AssertionPortSymbol& port,
-                                         CheckerInstanceBodySymbol& instance,
-                                         const ExpressionSyntax*& outputInitialSyntax,
-                                         const ASTContext& context) {
-    if (auto portSyntax = port.getSyntax(); portSyntax && portSyntax->previewNode)
-        instance.addMembers(*portSyntax->previewNode);
-
-    // Output ports are special; they aren't involved in the rewriting process,
-    // they just act like normal formal ports / arguments.
-    if (port.direction == ArgumentDirection::Out) {
-        auto arg = comp.emplace<FormalArgumentSymbol>(port.name, port.location, *port.direction,
-                                                      VariableLifetime::Static);
-        arg->getDeclaredType()->setLink(port.declaredType);
-
-        if (auto portSyntax = port.getSyntax()) {
-            arg->setSyntax(*portSyntax);
-            arg->setAttributes(instance, portSyntax->as<AssertionItemPortSyntax>().attributes);
-        }
-
-        if (port.defaultValueSyntax)
-            outputInitialSyntax = context.requireSimpleExpr(*port.defaultValueSyntax);
-
-        instance.addMember(*arg);
-        return arg;
+std::pair<std::string_view, SourceLocation> getNameLoc(const HierarchicalInstanceSyntax& syntax) {
+    std::string_view name;
+    SourceLocation loc;
+    if (syntax.decl) {
+        name = syntax.decl->name.valueText();
+        loc = syntax.decl->name.location();
     }
     else {
-        // Clone all of the formal arguments and add them to the instance so that
-        // members in the body can reference them.
-        auto& cloned = port.clone(instance);
-        instance.addMember(cloned);
-        return &cloned;
+        name = "";
+        loc = syntax.getFirstToken().location();
     }
+    return std::make_pair(name, loc);
 }
 
-CheckerInstanceSymbol& CheckerInstanceSymbol::fromSyntax(
-    Compilation& comp, const ASTContext& parentContext, const CheckerSymbol& checker,
-    const HierarchicalInstanceSyntax& syntax,
-    std::span<const AttributeInstanceSyntax* const> attributes, SmallVectorBase<int32_t>& path,
-    bool isProcedural, bitmask<InstanceFlags> flags) {
+void createImplicitNets(const HierarchicalInstanceSyntax& instance, const ASTContext& context,
+                        const NetType& netType, bitmask<InstanceFlags> flags,
+                        SmallSet<std::string_view, 8>& implicitNetNames,
+                        SmallVectorBase<const Symbol*>& results) {
+    // If no default nettype is set, we don't create implicit nets.
+    if (netType.isError())
+        return;
 
-    ASTContext context = parentContext;
-    auto parentSym = context.tryFillAssertionDetails();
-    auto [name, loc] = getNameLoc(syntax);
+    ASTContext ctx = context;
+    if (flags.has(InstanceFlags::FromBind))
+        ctx.flags |= ASTFlags::BindInstantiation;
 
-    uint32_t depth = 0;
-    if (parentSym) {
-        if (parentSym->kind == SymbolKind::CheckerInstanceBody) {
-            auto& checkerBody = parentSym->as<CheckerInstanceBodySymbol>();
-            depth = checkerBody.instanceDepth + 1;
-            if (depth > comp.getOptions().maxCheckerInstanceDepth) {
-                auto& diag = context.addDiag(diag::MaxInstanceDepthExceeded, loc);
-                diag << "checker"sv;
-                diag << comp.getOptions().maxCheckerInstanceDepth;
-                return createInvalid(checker, depth);
-            }
-
-            if (checkerBody.flags.has(InstanceFlags::ParentFromBind))
-                flags |= InstanceFlags::ParentFromBind;
-        }
-        else if (parentSym->as<InstanceBodySymbol>().flags.has(InstanceFlags::ParentFromBind)) {
-            flags |= InstanceFlags::ParentFromBind;
-        }
-    }
-
-    if (flags.has(InstanceFlags::FromBind)) {
-        if (flags.has(InstanceFlags::ParentFromBind)) {
-            context.addDiag(diag::BindUnderBind, syntax.sourceRange());
-            return createInvalid(checker, depth);
-        }
-
-        // If our parent is from a bind statement, pass down the flag
-        // so that we prevent further binds below us too.
-        flags |= InstanceFlags::ParentFromBind;
-        context.flags |= ASTFlags::BindInstantiation;
-    }
-
-    // It's illegal to instantiate checkers inside fork-join blocks.
-    auto parentScope = context.scope;
-    while (parentScope->asSymbol().kind == SymbolKind::StatementBlock) {
-        auto& block = parentScope->asSymbol().as<StatementBlockSymbol>();
-        if (block.blockKind != StatementBlockKind::Sequential) {
-            parentScope->addDiag(diag::CheckerInForkJoin, syntax.sourceRange());
-            break;
-        }
-
-        parentScope = block.getParentScope();
-        SLANG_ASSERT(parentScope);
-    }
-
-    // It's also illegal to instantiate checkers inside the procedures of other checkers.
-    if (parentSym && parentSym->kind == SymbolKind::CheckerInstanceBody && isProcedural)
-        context.addDiag(diag::CheckerInCheckerProc, syntax.sourceRange());
-
-    auto assertionDetails = comp.allocAssertionDetails();
-    auto body = comp.emplace<CheckerInstanceBodySymbol>(comp, checker, *assertionDetails,
-                                                        parentContext, depth, isProcedural, flags);
-
-    auto checkerSyntax = checker.getSyntax();
-    SLANG_ASSERT(checkerSyntax);
-    body->setSyntax(*checkerSyntax);
-
-    assertionDetails->symbol = &checker;
-    assertionDetails->instanceLoc = loc;
-
-    // Build port connection map from formals to connection expressions.
-    SmallVector<Connection> connections;
-    size_t orderedIndex = 0;
-    PortConnection::ConnMap connMap(syntax.connections, *context.scope, context.getLocation());
-    for (auto port : checker.ports) {
-        if (port->name.empty())
-            continue;
-
-        const ExpressionSyntax* outputInitialSyntax = nullptr;
-        auto actualArg = createCheckerFormal(comp, *port, *body, outputInitialSyntax, context);
-
-        const ASTContext* argCtx = &context;
+    for (auto conn : instance.connections) {
         const PropertyExprSyntax* expr = nullptr;
-        std::optional<ASTContext> defValCtx;
-        std::span<const AttributeSymbol* const> attrs;
-
-        auto setDefault = [&](std::optional<DeferredSourceRange> explicitRange) {
-            if (!port->defaultValueSyntax || port->direction != ArgumentDirection::In) {
-                auto code = explicitRange ? diag::CheckerArgCannotBeEmpty : diag::UnconnectedArg;
-                auto& diag = context.addDiag(code, explicitRange ? explicitRange->get()
-                                                                 : syntax.sourceRange());
-                diag << port->name;
-            }
-            else {
-                expr = port->defaultValueSyntax;
-                defValCtx.emplace(checker, LookupLocation::after(*port));
-                defValCtx->assertionInstance = assertionDetails;
-                defValCtx->flags |= ASTFlags::AssertionDefaultArg;
-                argCtx = &defValCtx.value();
-            }
-        };
-
-        auto createImplicitNamed = [&](DeferredSourceRange range,
-                                       bool isWildcard) -> const PropertyExprSyntax* {
-            bitmask<LookupFlags> lf;
-            if (isWildcard)
-                lf |= LookupFlags::DisallowWildcardImport;
-
-            if (flags.has(InstanceFlags::FromBind))
-                lf |= LookupFlags::DisallowWildcardImport | LookupFlags::DisallowUnitReferences;
-
-            auto symbol = Lookup::unqualified(*context.scope, port->name, lf);
-            if (!symbol) {
-                // If this is a wildcard connection, we're allowed to use the port's default value,
-                // if it has one.
-                if (isWildcard && port->defaultValueSyntax &&
-                    port->direction == ArgumentDirection::In) {
-                    return port->defaultValueSyntax;
-                }
-
-                context.addDiag(diag::ImplicitNamedPortNotFound, range.get()) << port->name;
-                return nullptr;
-            }
-
-            // Create an expression tree that can stand in for this reference.
-            auto nameSyntax = comp.emplace<IdentifierNameSyntax>(
-                Token(comp, TokenKind::Identifier, {}, port->name, range.get().start()));
-            auto seqSyntax = comp.emplace<SimpleSequenceExprSyntax>(*nameSyntax, nullptr);
-            return comp.emplace<SimplePropertyExprSyntax>(*seqSyntax);
-        };
-
-        if (connMap.usingOrdered) {
-            if (orderedIndex >= connMap.orderedConns.size()) {
-                orderedIndex++;
-                setDefault({});
-            }
-            else {
-                const PortConnectionSyntax& pc = *connMap.orderedConns[orderedIndex++];
-                attrs = AttributeSymbol::fromSyntax(pc.attributes, *context.scope,
-                                                    context.getLocation());
-
-                if (pc.kind == SyntaxKind::OrderedPortConnection)
-                    expr = pc.as<OrderedPortConnectionSyntax>().expr;
-                else
-                    setDefault(pc);
-            }
-        }
-        else {
-            auto it = connMap.namedConns.find(port->name);
-            if (it == connMap.namedConns.end()) {
-                if (connMap.hasWildcard)
-                    expr = createImplicitNamed(connMap.wildcardRange, true);
-                else
-                    setDefault({});
-            }
-            else {
-                // We have a named connection; there are two possibilities here:
-                // - An explicit connection (with an optional expression)
-                // - An implicit connection, where we have to look up the name ourselves
-                const NamedPortConnectionSyntax& conn = *it->second.first;
-                it->second.second = true;
-
-                attrs = AttributeSymbol::fromSyntax(conn.attributes, *context.scope,
-                                                    context.getLocation());
-                if (conn.openParen) {
-                    // For explicit named port connections, having an empty expression means no
-                    // connection, so we never take the default value here.
-                    expr = conn.expr;
-                    if (!expr) {
-                        auto& diag = context.addDiag(diag::CheckerArgCannotBeEmpty,
-                                                     conn.sourceRange());
-                        diag << port->name;
-                    }
-                }
-                else {
-                    expr = createImplicitNamed(conn.name.range(), false);
-                }
-            }
+        switch (conn->kind) {
+            case SyntaxKind::OrderedPortConnection:
+                expr = conn->as<OrderedPortConnectionSyntax>().expr;
+                break;
+            case SyntaxKind::NamedPortConnection:
+                expr = conn->as<NamedPortConnectionSyntax>().expr;
+                break;
+            default:
+                break;
         }
 
-        assertionDetails->argumentMap.emplace(actualArg, std::make_tuple(expr, *argCtx));
-        connections.emplace_back(*body, *actualArg, outputInitialSyntax, attrs);
-    }
-
-    if (connMap.usingOrdered) {
-        if (orderedIndex < connMap.orderedConns.size()) {
-            auto connLoc = connMap.orderedConns[orderedIndex]->getFirstToken().location();
-            auto& diag = context.addDiag(diag::TooManyPortConnections, connLoc);
-            diag << checker.name;
-            diag << connMap.orderedConns.size();
-            diag << orderedIndex;
-        }
-    }
-    else {
-        for (auto& pair : connMap.namedConns) {
-            // We marked all the connections that we used, so anything left over is a connection
-            // for a non-existent port.
-            if (!pair.second.second) {
-                auto& diag = context.addDiag(diag::PortDoesNotExist,
-                                             pair.second.first->name.location());
-                diag << pair.second.first->name.valueText();
-                diag << checker.name;
-            }
-        }
-    }
-
-    // Now add all members.
-    for (auto member : checkerSyntax->as<CheckerDeclarationSyntax>().members)
-        body->addMembers(*member);
-
-    auto instance = comp.emplace<CheckerInstanceSymbol>(name, loc, *body);
-    instance->arrayPath = path.copy(comp);
-    instance->setSyntax(syntax);
-    instance->setAttributes(*context.scope, attributes);
-    instance->connections = connections.copy(comp);
-    return *instance;
-}
-
-CheckerInstanceSymbol& CheckerInstanceSymbol::createInvalid(const CheckerSymbol& checker,
-                                                            uint32_t depth) {
-    auto scope = checker.getParentScope();
-    SLANG_ASSERT(scope);
-
-    auto& comp = scope->getCompilation();
-    auto assertionDetails = comp.allocAssertionDetails();
-    assertionDetails->symbol = &checker;
-    assertionDetails->instanceLoc = checker.location;
-
-    ASTContext context(*scope, LookupLocation::after(checker));
-    auto body = comp.emplace<CheckerInstanceBodySymbol>(comp, checker, *assertionDetails, context,
-                                                        depth,
-                                                        /* isProcedural */ false,
-                                                        InstanceFlags::Uninstantiated);
-
-    auto checkerSyntax = checker.getSyntax();
-    SLANG_ASSERT(checkerSyntax);
-    body->setSyntax(*checkerSyntax);
-
-    SmallVector<Connection> connections;
-    for (auto port : checker.ports) {
-        if (port->name.empty())
-            continue;
-
-        const ExpressionSyntax* outputInitialSyntax = nullptr;
-        auto actualArg = createCheckerFormal(comp, *port, *body, outputInitialSyntax, context);
-
-        assertionDetails->argumentMap.emplace(
-            actualArg, std::make_tuple((const PropertyExprSyntax*)nullptr, context));
-        connections.emplace_back(*body, *actualArg, outputInitialSyntax,
-                                 std::span<const AttributeSymbol* const>{});
-    }
-
-    for (auto member : checkerSyntax->as<CheckerDeclarationSyntax>().members)
-        body->addMembers(*member);
-
-    auto instance = comp.emplace<CheckerInstanceSymbol>(checker.name, checker.location, *body);
-    instance->setSyntax(*checkerSyntax);
-    instance->connections = connections.copy(comp);
-    return *instance;
-}
-
-std::span<const CheckerInstanceSymbol::Connection> CheckerInstanceSymbol::getPortConnections()
-    const {
-    if (connectionsResolved)
-        return connections;
-
-    connectionsResolved = true;
-
-    // We prepopulated some of the connection members but still need
-    // to resolve the actual argument value and save it.
-    for (auto& conn : connections) {
-        conn.getOutputInitialExpr();
-
-        auto argIt = body.assertionDetails.argumentMap.find(&conn.formal);
-        SLANG_ASSERT(argIt != body.assertionDetails.argumentMap.end());
-
-        auto& [expr, argCtx] = argIt->second;
         if (!expr)
             continue;
 
-        if (conn.formal.kind == SymbolKind::AssertionPort) {
-            AssertionInstanceExpression::ActualArg actualArgValue;
-            if (AssertionInstanceExpression::checkAssertionArg(
-                    *expr, conn.formal.as<AssertionPortSymbol>(), argCtx, actualArgValue,
-                    /* isRecursiveProp */ false)) {
-                conn.actual = actualArgValue;
-            }
-        }
-        else if (auto exprSyntax = argCtx.requireSimpleExpr(*expr)) {
-            ASTContext context = argCtx;
-            if (!body.isProcedural)
-                context.flags |= ASTFlags::NonProcedural;
+        SmallVector<const IdentifierNameSyntax*> implicitNets;
+        Expression::findPotentiallyImplicitNets(*expr, ctx, implicitNets);
 
-            if (body.flags.has(InstanceFlags::FromBind))
-                context.flags |= ASTFlags::BindInstantiation;
-
-            auto& formal = conn.formal.as<FormalArgumentSymbol>();
-            conn.actual = &Expression::bindArgument(formal.getType(), formal.direction, {},
-                                                    *exprSyntax, context);
+        auto& comp = ctx.getCompilation();
+        for (auto ins : implicitNets) {
+            if (implicitNetNames.emplace(ins->identifier.valueText()).second)
+                results.push_back(&NetSymbol::createImplicit(comp, *ins, netType));
         }
     }
-
-    return connections;
 }
 
-const Expression* CheckerInstanceSymbol::Connection::getOutputInitialExpr() const {
-    if (!outputInitialExpr) {
-        if (outputInitialSyntax) {
-            ASTContext context(parent, LookupLocation::after(formal));
-            outputInitialExpr = &Expression::bind(*outputInitialSyntax, context);
-        }
-        else {
-            outputInitialExpr = nullptr;
-        }
-    }
-    return *outputInitialExpr;
-}
-
-class CheckerMemberVisitor : public ASTVisitor<CheckerMemberVisitor, true, true> {
-public:
-    CheckerMemberVisitor(const CheckerInstanceBodySymbol& body) : body(body) {}
-
-    void handle(const ProceduralBlockSymbol& symbol) {
-        // Everything is allowed in final blocks, and implicit procedures created
-        // for assertions should be ignored.
-        if (symbol.procedureKind == ProceduralBlockKind::Final || symbol.isFromAssertion)
-            return;
-
-        if (symbol.procedureKind == ProceduralBlockKind::Always) {
-            body.addDiag(diag::AlwaysInChecker, symbol.location);
-            return;
-        }
-
-        SLANG_ASSERT(!currBlock);
-        currBlock = &symbol;
-        visitDefault(symbol);
-        currBlock = nullptr;
-    }
-
-    void handle(const VariableSymbol& symbol) {
-        inAssignmentRhs = true;
-        visitDefault(symbol);
-        inAssignmentRhs = false;
-    }
-
-    void handle(const AssignmentExpression& expr) {
-        // Special checking only applies to assignments to
-        // checker variables.
-        if (auto sym = expr.left().getSymbolReference()) {
-            auto scope = sym->getParentScope();
-            while (scope) {
-                auto& parentSym = scope->asSymbol();
-                if (parentSym.kind == SymbolKind::CheckerInstanceBody) {
-                    expr.left().visit(*this);
-
-                    auto prev = std::exchange(inAssignmentRhs, true);
-                    expr.right().visit(*this);
-                    inAssignmentRhs = prev;
-                    return;
-                }
-
-                if (parentSym.kind == SymbolKind::InstanceBody)
-                    break;
-
-                scope = parentSym.getParentScope();
-            }
-        }
-
-        visitDefault(expr);
-    }
-
-    void handle(const CallExpression& expr) {
-        if (inAssignmentRhs && expr.hasOutputArgs())
-            body.addDiag(diag::CheckerFuncArg, expr.sourceRange);
-    }
-
-    template<std::derived_from<Statement> T>
-    void handle(const T& stmt) {
-        if (!currBlock)
-            return;
-
-        auto notAllowed = [&] {
-            auto& diag = body.addDiag(diag::InvalidStmtInChecker, stmt.sourceRange);
-            switch (currBlock->procedureKind) {
-                case ProceduralBlockKind::Initial:
-                    diag << "initial"sv;
-                    break;
-                case ProceduralBlockKind::AlwaysComb:
-                    diag << "always_comb"sv;
-                    break;
-                case ProceduralBlockKind::AlwaysFF:
-                    diag << "always_ff"sv;
-                    break;
-                case ProceduralBlockKind::AlwaysLatch:
-                    diag << "always_latch"sv;
-                    break;
-                default:
-                    SLANG_UNREACHABLE;
-            }
-        };
-
-        auto checkTimed = [&] {
-            auto& timed = stmt.template as<TimedStatement>();
-            switch (timed.timing.kind) {
-                case TimingControlKind::Invalid:
-                case TimingControlKind::SignalEvent:
-                case TimingControlKind::EventList:
-                case TimingControlKind::ImplicitEvent:
-                    return true;
-                default:
-                    body.addDiag(diag::CheckerTimingControl, timed.sourceRange);
-                    return false;
-            }
-        };
-
-        if (currBlock->procedureKind == ProceduralBlockKind::Initial) {
-            switch (stmt.kind) {
-                case StatementKind::Empty:
-                case StatementKind::List:
-                    break;
-                case StatementKind::Timed:
-                    if (!checkTimed())
-                        return;
-                    break;
-                case StatementKind::Block:
-                    if (stmt.template as<BlockStatement>().blockKind !=
-                        StatementBlockKind::Sequential) {
-                        return notAllowed();
-                    }
-                    break;
-                case StatementKind::ImmediateAssertion:
-                case StatementKind::ConcurrentAssertion:
-                case StatementKind::ProceduralChecker:
-                    return;
-                default:
-                    return notAllowed();
-            }
-        }
-        else {
-            switch (stmt.kind) {
-                case StatementKind::Empty:
-                case StatementKind::List:
-                case StatementKind::Return:
-                case StatementKind::Continue:
-                case StatementKind::Break:
-                case StatementKind::Conditional:
-                case StatementKind::Case:
-                case StatementKind::ForLoop:
-                case StatementKind::RepeatLoop:
-                case StatementKind::ForeachLoop:
-                case StatementKind::WhileLoop:
-                case StatementKind::DoWhileLoop:
-                case StatementKind::ForeverLoop:
-                    break;
-                case StatementKind::Timed:
-                    if (!checkTimed())
-                        return;
-                    break;
-                case StatementKind::ExpressionStatement: {
-                    auto& expr = stmt.template as<ExpressionStatement>().expr;
-                    switch (expr.kind) {
-                        case ExpressionKind::Call:
-                            break;
-                        case ExpressionKind::Assignment:
-                            if (!expr.template as<AssignmentExpression>().isNonBlocking() &&
-                                currBlock->procedureKind == ProceduralBlockKind::AlwaysFF) {
-                                body.addDiag(diag::CheckerBlockingAssign, stmt.sourceRange);
-                                return;
-                            }
-                            break;
-                        default:
-                            return notAllowed();
-                    }
-                    break;
-                }
-                case StatementKind::Block:
-                    if (stmt.template as<BlockStatement>().blockKind !=
-                        StatementBlockKind::Sequential) {
-                        return notAllowed();
-                    }
-                    break;
-                case StatementKind::ImmediateAssertion:
-                case StatementKind::ConcurrentAssertion:
-                case StatementKind::ProceduralChecker:
-                    return;
-                default:
-                    return notAllowed();
-            }
-        }
-
-        visitDefault(stmt);
-    }
-
-    // Ignore instances so we don't go down a rabbit hole for invalid constructions.
-    void handle(const CheckerInstanceSymbol&) {}
-    void handle(const InstanceSymbol&) {}
-
-private:
-    const CheckerInstanceBodySymbol& body;
-    const ProceduralBlockSymbol* currBlock = nullptr;
-    bool inAssignmentRhs = false;
-};
-
-void CheckerInstanceSymbol::verifyMembers() const {
-    CheckerMemberVisitor visitor(body);
-    body.visit(visitor);
-}
-
-void CheckerInstanceSymbol::serializeTo(ASTSerializer& serializer) const {
-    serializer.write("body", body);
-
-    serializer.startArray("connections");
-    for (auto& conn : getPortConnections()) {
-        serializer.startObject();
-
-        serializer.writeLink("formal", conn.formal);
-        std::visit(
-            [&](auto&& arg) {
-                if (arg)
-                    serializer.write("actual", *arg);
-            },
-            conn.actual);
-
-        if (!conn.attributes.empty()) {
-            serializer.startArray("attributes");
-            for (auto attr : conn.attributes)
-                serializer.serialize(*attr);
-            serializer.endArray();
-        }
-
-        serializer.endObject();
-    }
-    serializer.endArray();
-}
-
-CheckerInstanceBodySymbol::CheckerInstanceBodySymbol(Compilation& compilation,
-                                                     const CheckerSymbol& checker,
-                                                     AssertionInstanceDetails& assertionDetails,
-                                                     const ASTContext& originalContext,
-                                                     uint32_t instanceDepth, bool isProcedural,
-                                                     bitmask<InstanceFlags> flags) :
-    Symbol(SymbolKind::CheckerInstanceBody, checker.name, checker.location),
-    Scope(compilation, this), checker(checker), assertionDetails(assertionDetails),
-    instanceDepth(instanceDepth), isProcedural(isProcedural), flags(flags),
-    originalContext(originalContext) {
-
-    assertionDetails.prevContext = &this->originalContext;
-
-    auto parent = checker.getParentScope();
-    SLANG_ASSERT(parent);
-    setParent(*parent, checker.getIndex());
-}
-
-void CheckerInstanceBodySymbol::serializeTo(ASTSerializer& serializer) const {
-    serializer.writeLink("checker", checker);
-    serializer.write("isProcedural", isProcedural);
-}
+} // namespace detail
 
 } // namespace slang::ast
